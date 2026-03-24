@@ -1,14 +1,26 @@
 import 'dart:async';
 import 'dart:convert';
-import 'package:crypto/crypto.dart';
 import 'package:dio/dio.dart';
 import '../../models/models.dart';
+import '../agent/agent_types.dart';
 import 'llm_provider.dart';
 
 /// 腾讯混元大模型适配器
-/// 使用腾讯云 API 签名认证
+/// 使用 OpenAI 兼容接口（更简单、更稳定）
 class HunyuanProvider implements LLMProvider {
+  static const _defaultBaseUrl = 'https://api.hunyuan.cloud.tencent.com/v1';
   final Dio _dio = Dio();
+
+  /// 修正旧版URL或无效URL，确保使用新的OpenAI兼容端点
+  String _fixBaseUrl(String? baseUrl) {
+    if (baseUrl == null || baseUrl.isEmpty) return _defaultBaseUrl;
+    // 旧版腾讯云API地址，自动替换为新的OpenAI兼容端点
+    if (baseUrl.contains('hunyuan.tencentcloudapi.com')) {
+      return _defaultBaseUrl;
+    }
+    // 去掉末尾斜杠
+    return baseUrl.endsWith('/') ? baseUrl.substring(0, baseUrl.length - 1) : baseUrl;
+  }
 
   @override
   String get name => 'hunyuan';
@@ -24,119 +36,78 @@ class HunyuanProvider implements LLMProvider {
     'hunyuan-pro',
     'hunyuan-turbo',
     'hunyuan-turbo-latest',
+    'hunyuan-turbos-latest',
     'hunyuan-large',
   ];
 
-  /// 生成腾讯云 API v3 签名
-  Map<String, String> _generateSignature(
-    String secretId,
-    String secretKey,
-    String payload,
-  ) {
-    final now = DateTime.now().toUtc();
-    final timestamp = (now.millisecondsSinceEpoch ~/ 1000).toString();
-    final dateStr = '${now.year}-${now.month.toString().padLeft(2, '0')}-${now.day.toString().padLeft(2, '0')}';
-
-    const service = 'hunyuan';
-    const host = 'hunyuan.tencentcloudapi.com';
-    const action = 'ChatCompletions';
-    const version = '2023-09-01';
-    const algorithm = 'TC3-HMAC-SHA256';
-
-    // Step 1: 拼接规范请求串
-    final hashedPayload = sha256.convert(utf8.encode(payload)).toString();
-    final canonicalRequest = [
-      'POST',
-      '/',
-      '',
-      'content-type:application/json',
-      'host:$host',
-      '',
-      'content-type;host',
-      hashedPayload,
-    ].join('\n');
-
-    // Step 2: 拼接待签名字符串
-    final credentialScope = '$dateStr/$service/tc3_request';
-    final hashedCanonicalRequest = sha256.convert(utf8.encode(canonicalRequest)).toString();
-    final stringToSign = [
-      algorithm,
-      timestamp,
-      credentialScope,
-      hashedCanonicalRequest,
-    ].join('\n');
-
-    // Step 3: 计算签名
-    List<int> _hmacSha256(List<int> key, String msg) {
-      final hmac = Hmac(sha256, key);
-      return hmac.convert(utf8.encode(msg)).bytes;
-    }
-
-    final secretDate = _hmacSha256(utf8.encode('TC3$secretKey'), dateStr);
-    final secretService = _hmacSha256(secretDate, service);
-    final secretSigning = _hmacSha256(secretService, 'tc3_request');
-    final signatureHmac = Hmac(sha256, secretSigning);
-    final signature = signatureHmac.convert(utf8.encode(stringToSign)).toString();
-
-    // Step 4: 拼接 Authorization
-    final authorization = '$algorithm Credential=$secretId/$credentialScope, '
-        'SignedHeaders=content-type;host, Signature=$signature';
-
-    return {
-      'Content-Type': 'application/json',
-      'Host': host,
-      'X-TC-Action': action,
-      'X-TC-Version': version,
-      'X-TC-Timestamp': timestamp,
-      'Authorization': authorization,
-    };
+  /// 根据模型名返回最大输出 token 数
+  static int _getMaxOutputTokens(String model) {
+    final m = model.toLowerCase();
+    if (m.contains('t1') || m.contains('hunyuan-t1')) return 65536;
+    if (m.contains('a13b') || m.contains('large')) return 32768;
+    if (m.contains('turbos') || m.contains('pro')) return 16384;
+    if (m.contains('turbo') || m.contains('standard')) return 16384;
+    // hunyuan-lite 等保守值
+    return 4096;
   }
 
   @override
-  Future<String> chat(
+  Future<AgentResponse> chat(
     List<Map<String, dynamic>> messages, {
     LLMConfig? config,
     List<Map<String, dynamic>>? tools,
   }) async {
     final cfg = config ?? const LLMConfig(provider: 'hunyuan', model: 'hunyuan-turbo');
-    const url = 'https://hunyuan.tencentcloudapi.com';
+    final modelMaxTokens = _getMaxOutputTokens(cfg.model);
+    final maxTokens = cfg.maxTokens.clamp(1, modelMaxTokens);
+    final baseUrl = _fixBaseUrl(cfg.baseUrl);
+    final url = '$baseUrl/chat/completions';
 
     final body = <String, dynamic>{
-      'Model': cfg.model,
-      'Messages': messages.map((m) =>
-        {'Role': m['role'], 'Content': m['content']}
-      ).toList(),
-      'Temperature': cfg.temperature,
-      'TopP': 0.9,
+      'model': cfg.model,
+      'messages': messages,
+      'temperature': cfg.temperature,
+      'max_tokens': maxTokens,
+      'stream': false,
     };
 
-    if (tools != null && tools.isNotEmpty) {
-      body['Tools'] = tools;
+    // 联网搜索（AI 搜索增强）
+    if (cfg.enableWebSearch) {
+      body['enable_enhancement'] = true;
     }
 
-    final payload = jsonEncode(body);
-    final headers = _generateSignature(cfg.apiKey, cfg.secretKey ?? '', payload);
+    if (tools != null && tools.isNotEmpty) {
+      body['tools'] = tools;
+    }
 
     final response = await _dio.post(
       url,
-      data: payload,
-      options: Options(headers: headers),
+      data: jsonEncode(body),
+      options: Options(
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer ${cfg.apiKey}',
+        },
+      ),
     );
 
     final data = response.data;
-    final responseData = data['Response'];
-
-    if (responseData?['Error'] != null) {
-      throw Exception('混元 API 错误: ${responseData['Error']['Message']}');
+    
+    if (data['error'] != null) {
+      throw Exception('混元 API 错误: ${data['error']['message']}');
     }
 
-    final choices = responseData['Choices'];
+    final choices = data['choices'];
     if (choices != null && choices.isNotEmpty) {
-      final message = choices[0]['Message'];
-      if (message['ToolCalls'] != null) {
-        return jsonEncode(message);
+      final message = choices[0]['message'];
+      final finishReason = parseStopReason(choices[0]['finish_reason'] as String?);
+      if (message['tool_calls'] != null) {
+        final toolCalls = (message['tool_calls'] as List)
+            .map((tc) => ToolCall.fromJson(tc as Map<String, dynamic>))
+            .toList();
+        return AgentResponse.tools(toolCalls);
       }
-      return message['Content'] as String;
+      return AgentResponse.text(message['content'] as String? ?? '', reason: finishReason);
     }
 
     throw Exception('混元 API 返回数据异常');
@@ -149,30 +120,36 @@ class HunyuanProvider implements LLMProvider {
     List<Map<String, dynamic>>? tools,
   }) async* {
     final cfg = config ?? const LLMConfig(provider: 'hunyuan', model: 'hunyuan-turbo');
-    const url = 'https://hunyuan.tencentcloudapi.com';
+    final modelMaxTokens = _getMaxOutputTokens(cfg.model);
+    final maxTokens = cfg.maxTokens.clamp(1, modelMaxTokens);
+    final baseUrl = _fixBaseUrl(cfg.baseUrl);
+    final url = '$baseUrl/chat/completions';
 
     final body = <String, dynamic>{
-      'Model': cfg.model,
-      'Messages': messages.map((m) =>
-        {'Role': m['role'], 'Content': m['content']}
-      ).toList(),
-      'Temperature': cfg.temperature,
-      'TopP': 0.9,
-      'Stream': true,
+      'model': cfg.model,
+      'messages': messages,
+      'temperature': cfg.temperature,
+      'max_tokens': maxTokens,
+      'stream': true,
     };
 
-    if (tools != null && tools.isNotEmpty) {
-      body['Tools'] = tools;
+    // 联网搜索（AI 搜索增强）
+    if (cfg.enableWebSearch) {
+      body['enable_enhancement'] = true;
     }
 
-    final payload = jsonEncode(body);
-    final headers = _generateSignature(cfg.apiKey, cfg.secretKey ?? '', payload);
+    if (tools != null && tools.isNotEmpty) {
+      body['tools'] = tools;
+    }
 
     final response = await _dio.post(
       url,
-      data: payload,
+      data: body,
       options: Options(
-        headers: headers,
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer ${cfg.apiKey}',
+        },
         responseType: ResponseType.stream,
       ),
     );
@@ -193,7 +170,7 @@ class HunyuanProvider implements LLMProvider {
 
           try {
             final data = jsonDecode(jsonStr);
-            final delta = data['Choices']?[0]?['Delta']?['Content'];
+            final delta = data['choices']?[0]?['delta']?['content'];
             if (delta != null && delta is String && delta.isNotEmpty) {
               yield delta;
             }
@@ -205,7 +182,7 @@ class HunyuanProvider implements LLMProvider {
 
   @override
   Future<bool> isAvailable(LLMConfig config) async {
-    if (config.apiKey.isEmpty || (config.secretKey ?? '').isEmpty) return false;
+    if (config.apiKey.isEmpty) return false;
     try {
       await chat(
         [{'role': 'user', 'content': 'hi'}],
@@ -213,7 +190,7 @@ class HunyuanProvider implements LLMProvider {
           provider: 'hunyuan',
           model: 'hunyuan-lite',
           apiKey: config.apiKey,
-          secretKey: config.secretKey,
+          baseUrl: config.baseUrl,
           maxTokens: 10,
         ),
       );
@@ -223,3 +200,4 @@ class HunyuanProvider implements LLMProvider {
     }
   }
 }
+

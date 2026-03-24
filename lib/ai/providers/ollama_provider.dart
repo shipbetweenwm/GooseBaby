@@ -2,12 +2,21 @@ import 'dart:async';
 import 'dart:convert';
 import 'package:dio/dio.dart';
 import '../../models/models.dart';
+import '../agent/agent_types.dart';
 import 'llm_provider.dart';
 
 /// Ollama 本地大模型适配器
 /// 支持运行本地千问、Llama 等开源模型
 class OllamaProvider implements LLMProvider {
+  static const _defaultBaseUrl = 'http://localhost:11434';
   final Dio _dio = Dio();
+
+  /// 规范化 baseUrl：去掉末尾斜杠，确保格式统一
+  String _fixBaseUrl(String? baseUrl) {
+    if (baseUrl == null || baseUrl.isEmpty) return _defaultBaseUrl;
+    var url = baseUrl.endsWith('/') ? baseUrl.substring(0, baseUrl.length - 1) : baseUrl;
+    return url;
+  }
 
   @override
   String get name => 'ollama';
@@ -26,19 +35,16 @@ class OllamaProvider implements LLMProvider {
     'phi3:mini',
   ];
 
-  String _getBaseUrl(LLMConfig? config) {
-    return config?.baseUrl ?? 'http://localhost:11434';
-  }
-
   @override
-  Future<String> chat(
+  Future<AgentResponse> chat(
     List<Map<String, dynamic>> messages, {
     LLMConfig? config,
     List<Map<String, dynamic>>? tools,
   }) async {
     final cfg = config ?? const LLMConfig(provider: 'ollama', model: 'qwen2.5:7b');
+    final baseUrl = _fixBaseUrl(cfg.baseUrl);
     // 使用 OpenAI 兼容接口
-    final url = '${_getBaseUrl(cfg)}/v1/chat/completions';
+    final url = '$baseUrl/v1/chat/completions';
 
     final body = <String, dynamic>{
       'model': cfg.model,
@@ -60,10 +66,16 @@ class OllamaProvider implements LLMProvider {
     );
 
     final choice = response.data['choices'][0];
-    if (choice['message']['tool_calls'] != null) {
-      return jsonEncode(choice['message']);
+    final message = choice['message'];
+    final finishReason = parseStopReason(choice['finish_reason'] as String?);
+
+    if (message['tool_calls'] != null) {
+      final toolCalls = (message['tool_calls'] as List)
+          .map((tc) => ToolCall.fromJson(tc as Map<String, dynamic>))
+          .toList();
+      return AgentResponse.tools(toolCalls);
     }
-    return choice['message']['content'] as String;
+    return AgentResponse.text(message['content'] as String? ?? '', reason: finishReason);
   }
 
   @override
@@ -73,16 +85,25 @@ class OllamaProvider implements LLMProvider {
     List<Map<String, dynamic>>? tools,
   }) async* {
     final cfg = config ?? const LLMConfig(provider: 'ollama', model: 'qwen2.5:7b');
-    final url = '${_getBaseUrl(cfg)}/v1/chat/completions';
+    final baseUrl = _fixBaseUrl(cfg.baseUrl);
+    final url = '$baseUrl/v1/chat/completions';
 
     final body = <String, dynamic>{
       'model': cfg.model,
       'messages': messages,
       'temperature': cfg.temperature,
+      'max_tokens': cfg.maxTokens,
       'stream': true,
     };
 
-    if (tools != null && tools.isNotEmpty) {
+    // 联网搜索
+    if (cfg.enableWebSearch) {
+      body['tools'] = [
+        {'type': 'web_search'},
+        if (tools != null)
+          ...tools,
+      ];
+    } else if (tools != null && tools.isNotEmpty) {
       body['tools'] = tools;
     }
 
@@ -123,7 +144,7 @@ class OllamaProvider implements LLMProvider {
   @override
   Future<bool> isAvailable(LLMConfig config) async {
     try {
-      final url = '${_getBaseUrl(config)}/api/tags';
+      final url = '${_fixBaseUrl(config.baseUrl)}/api/tags';
       final response = await _dio.get(url);
       return response.statusCode == 200;
     } catch (_) {

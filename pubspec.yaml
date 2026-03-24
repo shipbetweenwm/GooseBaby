@@ -30,10 +30,24 @@ dependencies:
   # 状态管理
   provider: ^6.1.1
 
+  # 视频动画（media_kit 支持 Windows 桌面端）
+  media_kit: ^1.2.6
+  media_kit_video: ^2.0.1
+  media_kit_libs_video: ^1.0.7
+
+  # 文件选择
+  file_picker: ^8.0.0
+
+  # URL 打开
+  url_launcher: ^6.2.5
+
   # 工具
   uuid: ^3.0.7
   intl: ^0.19.0
   collection: ^1.18.0
+  path: ^1.9.0
+  mime: ^1.0.5
+  archive: ^4.0.2
 
 dev_dependencies:
   flutter_test:
@@ -49,3 +63,4 @@ flutter:
     - assets/animations/
     - assets/images/
     - assets/sounds/
+    - assets/shaders/

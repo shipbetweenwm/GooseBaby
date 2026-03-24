@@ -320,391 +320,391 @@ class AnimationEngine3D {
 // ============================================================
 
 class GooseAnimations {
-  static AnimationClip idle() => AnimationClip(
+  static AnimationClip idle() => const AnimationClip(
         name: 'idle',
-        duration: const Duration(milliseconds: 2500),
+        duration: Duration(milliseconds: 2500),
         loop: true,
         tracks: [
           // 身体明显呼吸起伏 + 轻微左右摇晃
           BoneTrack(boneName: 'body', keyframes: [
-            const Keyframe(time: 0.0, position: Vec3(0, 0, 0), rotation: Vec3(0, 0, 0)),
-            const Keyframe(time: 0.25, position: Vec3(1.5, -5, 0), rotation: Vec3(0.03, 0.02, 0.01), curve: Curves.easeInOut),
-            const Keyframe(time: 0.5, position: Vec3(0, -7, 0), rotation: Vec3(0.04, 0, 0), curve: Curves.easeInOut),
-            const Keyframe(time: 0.75, position: Vec3(-1.5, -5, 0), rotation: Vec3(0.03, -0.02, -0.01), curve: Curves.easeInOut),
-            const Keyframe(time: 1.0, position: Vec3(0, 0, 0), rotation: Vec3(0, 0, 0)),
+            Keyframe(time: 0.0, position: Vec3(0, 0, 0), rotation: Vec3(0, 0, 0)),
+            Keyframe(time: 0.25, position: Vec3(1.5, -5, 0), rotation: Vec3(0.03, 0.02, 0.01), curve: Curves.easeInOut),
+            Keyframe(time: 0.5, position: Vec3(0, -7, 0), rotation: Vec3(0.04, 0, 0), curve: Curves.easeInOut),
+            Keyframe(time: 0.75, position: Vec3(-1.5, -5, 0), rotation: Vec3(0.03, -0.02, -0.01), curve: Curves.easeInOut),
+            Keyframe(time: 1.0, position: Vec3(0, 0, 0), rotation: Vec3(0, 0, 0)),
           ]),
           // 头部活泼晃动 — 好像在四处张望
           BoneTrack(boneName: 'head', keyframes: [
-            const Keyframe(time: 0.0, rotation: Vec3(0, 0, 0)),
-            const Keyframe(time: 0.2, rotation: Vec3(0.04, 0.08, 0.04), curve: Curves.easeInOut),
-            const Keyframe(time: 0.45, rotation: Vec3(-0.03, 0.03, -0.02), curve: Curves.easeInOut),
-            const Keyframe(time: 0.65, rotation: Vec3(0.02, -0.08, -0.03), curve: Curves.easeInOut),
-            const Keyframe(time: 0.85, rotation: Vec3(-0.02, -0.04, 0.02), curve: Curves.easeInOut),
-            const Keyframe(time: 1.0, rotation: Vec3(0, 0, 0)),
+            Keyframe(time: 0.0, rotation: Vec3(0, 0, 0)),
+            Keyframe(time: 0.2, rotation: Vec3(0.04, 0.08, 0.04), curve: Curves.easeInOut),
+            Keyframe(time: 0.45, rotation: Vec3(-0.03, 0.03, -0.02), curve: Curves.easeInOut),
+            Keyframe(time: 0.65, rotation: Vec3(0.02, -0.08, -0.03), curve: Curves.easeInOut),
+            Keyframe(time: 0.85, rotation: Vec3(-0.02, -0.04, 0.02), curve: Curves.easeInOut),
+            Keyframe(time: 1.0, rotation: Vec3(0, 0, 0)),
           ]),
           // 翅膀呼吸联动 — 幅度加大
           BoneTrack(boneName: 'wing_left', keyframes: [
-            const Keyframe(time: 0.0, rotation: Vec3(0, 0, 0)),
-            const Keyframe(time: 0.3, rotation: Vec3(0, -0.05, -0.12), curve: Curves.easeInOut),
-            const Keyframe(time: 0.7, rotation: Vec3(0, 0.02, 0.03), curve: Curves.easeInOut),
-            const Keyframe(time: 1.0, rotation: Vec3(0, 0, 0)),
+            Keyframe(time: 0.0, rotation: Vec3(0, 0, 0)),
+            Keyframe(time: 0.3, rotation: Vec3(0, -0.05, -0.12), curve: Curves.easeInOut),
+            Keyframe(time: 0.7, rotation: Vec3(0, 0.02, 0.03), curve: Curves.easeInOut),
+            Keyframe(time: 1.0, rotation: Vec3(0, 0, 0)),
           ]),
           BoneTrack(boneName: 'wing_right', keyframes: [
-            const Keyframe(time: 0.0, rotation: Vec3(0, 0, 0)),
-            const Keyframe(time: 0.3, rotation: Vec3(0, 0.05, 0.12), curve: Curves.easeInOut),
-            const Keyframe(time: 0.7, rotation: Vec3(0, -0.02, -0.03), curve: Curves.easeInOut),
-            const Keyframe(time: 1.0, rotation: Vec3(0, 0, 0)),
+            Keyframe(time: 0.0, rotation: Vec3(0, 0, 0)),
+            Keyframe(time: 0.3, rotation: Vec3(0, 0.05, 0.12), curve: Curves.easeInOut),
+            Keyframe(time: 0.7, rotation: Vec3(0, -0.02, -0.03), curve: Curves.easeInOut),
+            Keyframe(time: 1.0, rotation: Vec3(0, 0, 0)),
           ]),
           // 呆毛大幅摇摆 — 像弹簧一样弹动
           BoneTrack(boneName: 'ahoge', keyframes: [
-            const Keyframe(time: 0.0, rotation: Vec3(0, 0, 0)),
-            const Keyframe(time: 0.15, rotation: Vec3(0, 0, 0.25), curve: Curves.easeOut),
-            const Keyframe(time: 0.4, rotation: Vec3(0, 0, -0.2), curve: Curves.easeInOut),
-            const Keyframe(time: 0.6, rotation: Vec3(0, 0, 0.22), curve: Curves.easeInOut),
-            const Keyframe(time: 0.85, rotation: Vec3(0, 0, -0.18), curve: Curves.easeInOut),
-            const Keyframe(time: 1.0, rotation: Vec3(0, 0, 0), curve: Curves.easeIn),
+            Keyframe(time: 0.0, rotation: Vec3(0, 0, 0)),
+            Keyframe(time: 0.15, rotation: Vec3(0, 0, 0.25), curve: Curves.easeOut),
+            Keyframe(time: 0.4, rotation: Vec3(0, 0, -0.2), curve: Curves.easeInOut),
+            Keyframe(time: 0.6, rotation: Vec3(0, 0, 0.22), curve: Curves.easeInOut),
+            Keyframe(time: 0.85, rotation: Vec3(0, 0, -0.18), curve: Curves.easeInOut),
+            Keyframe(time: 1.0, rotation: Vec3(0, 0, 0), curve: Curves.easeIn),
           ]),
           // 脚掌也微微动一下（原地踏步感）
           BoneTrack(boneName: 'foot_left', keyframes: [
-            const Keyframe(time: 0.0, position: Vec3(0, 0, 0)),
-            const Keyframe(time: 0.4, position: Vec3(0, -2, 0), curve: Curves.easeInOut),
-            const Keyframe(time: 0.6, position: Vec3(0, 0, 0), curve: Curves.easeInOut),
-            const Keyframe(time: 1.0, position: Vec3(0, 0, 0)),
+            Keyframe(time: 0.0, position: Vec3(0, 0, 0)),
+            Keyframe(time: 0.4, position: Vec3(0, -2, 0), curve: Curves.easeInOut),
+            Keyframe(time: 0.6, position: Vec3(0, 0, 0), curve: Curves.easeInOut),
+            Keyframe(time: 1.0, position: Vec3(0, 0, 0)),
           ]),
           BoneTrack(boneName: 'foot_right', keyframes: [
-            const Keyframe(time: 0.0, position: Vec3(0, 0, 0)),
-            const Keyframe(time: 0.7, position: Vec3(0, -2, 0), curve: Curves.easeInOut),
-            const Keyframe(time: 0.9, position: Vec3(0, 0, 0), curve: Curves.easeInOut),
-            const Keyframe(time: 1.0, position: Vec3(0, 0, 0)),
+            Keyframe(time: 0.0, position: Vec3(0, 0, 0)),
+            Keyframe(time: 0.7, position: Vec3(0, -2, 0), curve: Curves.easeInOut),
+            Keyframe(time: 0.9, position: Vec3(0, 0, 0), curve: Curves.easeInOut),
+            Keyframe(time: 1.0, position: Vec3(0, 0, 0)),
           ]),
           // 围巾轻微飘动
           BoneTrack(boneName: 'scarf', keyframes: [
-            const Keyframe(time: 0.0, rotation: Vec3(0, 0, 0)),
-            const Keyframe(time: 0.35, rotation: Vec3(0, 0.03, 0.02), curve: Curves.easeInOut),
-            const Keyframe(time: 0.7, rotation: Vec3(0, -0.03, -0.02), curve: Curves.easeInOut),
-            const Keyframe(time: 1.0, rotation: Vec3(0, 0, 0)),
+            Keyframe(time: 0.0, rotation: Vec3(0, 0, 0)),
+            Keyframe(time: 0.35, rotation: Vec3(0, 0.03, 0.02), curve: Curves.easeInOut),
+            Keyframe(time: 0.7, rotation: Vec3(0, -0.03, -0.02), curve: Curves.easeInOut),
+            Keyframe(time: 1.0, rotation: Vec3(0, 0, 0)),
           ]),
         ],
       );
 
-  static AnimationClip dance() => AnimationClip(
+  static AnimationClip dance() => const AnimationClip(
         name: 'dance',
-        duration: const Duration(milliseconds: 1600),
+        duration: Duration(milliseconds: 1600),
         loop: true,
         tracks: [
           // 身体左右摇摆 + 上下弹跳
           BoneTrack(boneName: 'body', keyframes: [
-            const Keyframe(time: 0.0, position: Vec3(0, 0, 0), rotation: Vec3(0, 0, -0.1)),
-            const Keyframe(time: 0.25, position: Vec3(8, -12, 0), rotation: Vec3(0, 0.15, 0.1), curve: Curves.easeOut),
-            const Keyframe(time: 0.5, position: Vec3(0, 0, 0), rotation: Vec3(0, 0, -0.1), curve: Curves.easeIn),
-            const Keyframe(time: 0.75, position: Vec3(-8, -12, 0), rotation: Vec3(0, -0.15, -0.1), curve: Curves.easeOut),
-            const Keyframe(time: 1.0, position: Vec3(0, 0, 0), rotation: Vec3(0, 0, -0.1)),
+            Keyframe(time: 0.0, position: Vec3(0, 0, 0), rotation: Vec3(0, 0, -0.1)),
+            Keyframe(time: 0.25, position: Vec3(8, -12, 0), rotation: Vec3(0, 0.15, 0.1), curve: Curves.easeOut),
+            Keyframe(time: 0.5, position: Vec3(0, 0, 0), rotation: Vec3(0, 0, -0.1), curve: Curves.easeIn),
+            Keyframe(time: 0.75, position: Vec3(-8, -12, 0), rotation: Vec3(0, -0.15, -0.1), curve: Curves.easeOut),
+            Keyframe(time: 1.0, position: Vec3(0, 0, 0), rotation: Vec3(0, 0, -0.1)),
           ]),
           // 头部跟随摇摆
           BoneTrack(boneName: 'head', keyframes: [
-            const Keyframe(time: 0.0, rotation: Vec3(0, 0, 0.08)),
-            const Keyframe(time: 0.25, rotation: Vec3(0.05, 0.12, -0.12), curve: Curves.easeOut),
-            const Keyframe(time: 0.5, rotation: Vec3(0, 0, 0.08)),
-            const Keyframe(time: 0.75, rotation: Vec3(0.05, -0.12, 0.12), curve: Curves.easeOut),
-            const Keyframe(time: 1.0, rotation: Vec3(0, 0, 0.08)),
+            Keyframe(time: 0.0, rotation: Vec3(0, 0, 0.08)),
+            Keyframe(time: 0.25, rotation: Vec3(0.05, 0.12, -0.12), curve: Curves.easeOut),
+            Keyframe(time: 0.5, rotation: Vec3(0, 0, 0.08)),
+            Keyframe(time: 0.75, rotation: Vec3(0.05, -0.12, 0.12), curve: Curves.easeOut),
+            Keyframe(time: 1.0, rotation: Vec3(0, 0, 0.08)),
           ]),
           // 翅膀大幅挥舞
           BoneTrack(boneName: 'wing_left', keyframes: [
-            const Keyframe(time: 0.0, rotation: Vec3(0, 0, 0)),
-            const Keyframe(time: 0.15, rotation: Vec3(0, -0.3, -0.6), curve: Curves.easeOut),
-            const Keyframe(time: 0.35, rotation: Vec3(0, 0, 0), curve: Curves.easeIn),
-            const Keyframe(time: 0.5, rotation: Vec3(0, 0, 0)),
-            const Keyframe(time: 0.65, rotation: Vec3(0, -0.3, -0.6), curve: Curves.easeOut),
-            const Keyframe(time: 0.85, rotation: Vec3(0, 0, 0), curve: Curves.easeIn),
-            const Keyframe(time: 1.0, rotation: Vec3(0, 0, 0)),
+            Keyframe(time: 0.0, rotation: Vec3(0, 0, 0)),
+            Keyframe(time: 0.15, rotation: Vec3(0, -0.3, -0.6), curve: Curves.easeOut),
+            Keyframe(time: 0.35, rotation: Vec3(0, 0, 0), curve: Curves.easeIn),
+            Keyframe(time: 0.5, rotation: Vec3(0, 0, 0)),
+            Keyframe(time: 0.65, rotation: Vec3(0, -0.3, -0.6), curve: Curves.easeOut),
+            Keyframe(time: 0.85, rotation: Vec3(0, 0, 0), curve: Curves.easeIn),
+            Keyframe(time: 1.0, rotation: Vec3(0, 0, 0)),
           ]),
           BoneTrack(boneName: 'wing_right', keyframes: [
-            const Keyframe(time: 0.0, rotation: Vec3(0, 0, 0)),
-            const Keyframe(time: 0.15, rotation: Vec3(0, 0.3, 0.6), curve: Curves.easeOut),
-            const Keyframe(time: 0.35, rotation: Vec3(0, 0, 0), curve: Curves.easeIn),
-            const Keyframe(time: 0.5, rotation: Vec3(0, 0, 0)),
-            const Keyframe(time: 0.65, rotation: Vec3(0, 0.3, 0.6), curve: Curves.easeOut),
-            const Keyframe(time: 0.85, rotation: Vec3(0, 0, 0), curve: Curves.easeIn),
-            const Keyframe(time: 1.0, rotation: Vec3(0, 0, 0)),
+            Keyframe(time: 0.0, rotation: Vec3(0, 0, 0)),
+            Keyframe(time: 0.15, rotation: Vec3(0, 0.3, 0.6), curve: Curves.easeOut),
+            Keyframe(time: 0.35, rotation: Vec3(0, 0, 0), curve: Curves.easeIn),
+            Keyframe(time: 0.5, rotation: Vec3(0, 0, 0)),
+            Keyframe(time: 0.65, rotation: Vec3(0, 0.3, 0.6), curve: Curves.easeOut),
+            Keyframe(time: 0.85, rotation: Vec3(0, 0, 0), curve: Curves.easeIn),
+            Keyframe(time: 1.0, rotation: Vec3(0, 0, 0)),
           ]),
           // 脚交替踏步
           BoneTrack(boneName: 'foot_left', keyframes: [
-            const Keyframe(time: 0.0, position: Vec3(0, 0, 0)),
-            const Keyframe(time: 0.25, position: Vec3(0, -5, 0), curve: Curves.easeOut),
-            const Keyframe(time: 0.5, position: Vec3(0, 0, 0), curve: Curves.easeIn),
-            const Keyframe(time: 1.0, position: Vec3(0, 0, 0)),
+            Keyframe(time: 0.0, position: Vec3(0, 0, 0)),
+            Keyframe(time: 0.25, position: Vec3(0, -5, 0), curve: Curves.easeOut),
+            Keyframe(time: 0.5, position: Vec3(0, 0, 0), curve: Curves.easeIn),
+            Keyframe(time: 1.0, position: Vec3(0, 0, 0)),
           ]),
           BoneTrack(boneName: 'foot_right', keyframes: [
-            const Keyframe(time: 0.0, position: Vec3(0, 0, 0)),
-            const Keyframe(time: 0.5, position: Vec3(0, 0, 0)),
-            const Keyframe(time: 0.75, position: Vec3(0, -5, 0), curve: Curves.easeOut),
-            const Keyframe(time: 1.0, position: Vec3(0, 0, 0), curve: Curves.easeIn),
+            Keyframe(time: 0.0, position: Vec3(0, 0, 0)),
+            Keyframe(time: 0.5, position: Vec3(0, 0, 0)),
+            Keyframe(time: 0.75, position: Vec3(0, -5, 0), curve: Curves.easeOut),
+            Keyframe(time: 1.0, position: Vec3(0, 0, 0), curve: Curves.easeIn),
           ]),
         ],
       );
 
-  static AnimationClip jump() => AnimationClip(
+  static AnimationClip jump() => const AnimationClip(
         name: 'jump',
-        duration: const Duration(milliseconds: 800),
+        duration: Duration(milliseconds: 800),
         loop: false,
         tracks: [
           // 身体跳起
           BoneTrack(boneName: 'body', keyframes: [
-            const Keyframe(time: 0.0, position: Vec3(0, 0, 0), scale: Vec3(1, 1, 1)),
-            const Keyframe(time: 0.15, position: Vec3(0, 5, 0), scale: Vec3(1.1, 0.85, 1), curve: Curves.easeIn),
-            const Keyframe(time: 0.45, position: Vec3(0, -40, 0), scale: Vec3(0.9, 1.15, 1), curve: Curves.easeOut),
-            const Keyframe(time: 0.75, position: Vec3(0, -10, 0), scale: Vec3(1, 1, 1), curve: Curves.easeIn),
-            const Keyframe(time: 0.9, position: Vec3(0, 4, 0), scale: Vec3(1.08, 0.9, 1), curve: Curves.bounceOut),
-            const Keyframe(time: 1.0, position: Vec3(0, 0, 0), scale: Vec3(1, 1, 1)),
+            Keyframe(time: 0.0, position: Vec3(0, 0, 0), scale: Vec3(1, 1, 1)),
+            Keyframe(time: 0.15, position: Vec3(0, 5, 0), scale: Vec3(1.1, 0.85, 1), curve: Curves.easeIn),
+            Keyframe(time: 0.45, position: Vec3(0, -40, 0), scale: Vec3(0.9, 1.15, 1), curve: Curves.easeOut),
+            Keyframe(time: 0.75, position: Vec3(0, -10, 0), scale: Vec3(1, 1, 1), curve: Curves.easeIn),
+            Keyframe(time: 0.9, position: Vec3(0, 4, 0), scale: Vec3(1.08, 0.9, 1), curve: Curves.bounceOut),
+            Keyframe(time: 1.0, position: Vec3(0, 0, 0), scale: Vec3(1, 1, 1)),
           ]),
           // 翅膀在空中展开
           BoneTrack(boneName: 'wing_left', keyframes: [
-            const Keyframe(time: 0.0, rotation: Vec3(0, 0, 0)),
-            const Keyframe(time: 0.3, rotation: Vec3(-0.3, -0.5, -0.8), curve: Curves.easeOut),
-            const Keyframe(time: 0.7, rotation: Vec3(-0.1, -0.2, -0.4), curve: Curves.easeInOut),
-            const Keyframe(time: 1.0, rotation: Vec3(0, 0, 0), curve: Curves.easeIn),
+            Keyframe(time: 0.0, rotation: Vec3(0, 0, 0)),
+            Keyframe(time: 0.3, rotation: Vec3(-0.3, -0.5, -0.8), curve: Curves.easeOut),
+            Keyframe(time: 0.7, rotation: Vec3(-0.1, -0.2, -0.4), curve: Curves.easeInOut),
+            Keyframe(time: 1.0, rotation: Vec3(0, 0, 0), curve: Curves.easeIn),
           ]),
           BoneTrack(boneName: 'wing_right', keyframes: [
-            const Keyframe(time: 0.0, rotation: Vec3(0, 0, 0)),
-            const Keyframe(time: 0.3, rotation: Vec3(-0.3, 0.5, 0.8), curve: Curves.easeOut),
-            const Keyframe(time: 0.7, rotation: Vec3(-0.1, 0.2, 0.4), curve: Curves.easeInOut),
-            const Keyframe(time: 1.0, rotation: Vec3(0, 0, 0), curve: Curves.easeIn),
+            Keyframe(time: 0.0, rotation: Vec3(0, 0, 0)),
+            Keyframe(time: 0.3, rotation: Vec3(-0.3, 0.5, 0.8), curve: Curves.easeOut),
+            Keyframe(time: 0.7, rotation: Vec3(-0.1, 0.2, 0.4), curve: Curves.easeInOut),
+            Keyframe(time: 1.0, rotation: Vec3(0, 0, 0), curve: Curves.easeIn),
           ]),
           // 头微微后仰
           BoneTrack(boneName: 'head', keyframes: [
-            const Keyframe(time: 0.0, rotation: Vec3(0, 0, 0)),
-            const Keyframe(time: 0.3, rotation: Vec3(-0.15, 0, 0), curve: Curves.easeOut),
-            const Keyframe(time: 0.7, rotation: Vec3(0.05, 0, 0)),
-            const Keyframe(time: 1.0, rotation: Vec3(0, 0, 0)),
+            Keyframe(time: 0.0, rotation: Vec3(0, 0, 0)),
+            Keyframe(time: 0.3, rotation: Vec3(-0.15, 0, 0), curve: Curves.easeOut),
+            Keyframe(time: 0.7, rotation: Vec3(0.05, 0, 0)),
+            Keyframe(time: 1.0, rotation: Vec3(0, 0, 0)),
           ]),
         ],
       );
 
-  static AnimationClip spin() => AnimationClip(
+  static AnimationClip spin() => const AnimationClip(
         name: 'spin',
-        duration: const Duration(milliseconds: 1200),
+        duration: Duration(milliseconds: 1200),
         loop: false,
         tracks: [
           // 身体 360° 旋转 + 跳起
           BoneTrack(boneName: 'body', keyframes: [
-            const Keyframe(time: 0.0, position: Vec3(0, 0, 0), rotation: Vec3(0, 0, 0)),
-            const Keyframe(time: 0.1, position: Vec3(0, 4, 0), rotation: Vec3(0, 0, 0)),
-            const Keyframe(time: 0.25, position: Vec3(0, -20, 0), rotation: Vec3(0, pi * 0.5, 0), curve: Curves.easeOut),
-            const Keyframe(time: 0.5, position: Vec3(0, -25, 0), rotation: Vec3(0, pi, 0), curve: Curves.linear),
-            const Keyframe(time: 0.75, position: Vec3(0, -20, 0), rotation: Vec3(0, pi * 1.5, 0), curve: Curves.linear),
-            const Keyframe(time: 0.9, position: Vec3(0, 0, 0), rotation: Vec3(0, pi * 2, 0), curve: Curves.easeIn),
-            const Keyframe(time: 1.0, position: Vec3(0, 0, 0), rotation: Vec3(0, 0, 0)),
+            Keyframe(time: 0.0, position: Vec3(0, 0, 0), rotation: Vec3(0, 0, 0)),
+            Keyframe(time: 0.1, position: Vec3(0, 4, 0), rotation: Vec3(0, 0, 0)),
+            Keyframe(time: 0.25, position: Vec3(0, -20, 0), rotation: Vec3(0, pi * 0.5, 0), curve: Curves.easeOut),
+            Keyframe(time: 0.5, position: Vec3(0, -25, 0), rotation: Vec3(0, pi, 0), curve: Curves.linear),
+            Keyframe(time: 0.75, position: Vec3(0, -20, 0), rotation: Vec3(0, pi * 1.5, 0), curve: Curves.linear),
+            Keyframe(time: 0.9, position: Vec3(0, 0, 0), rotation: Vec3(0, pi * 2, 0), curve: Curves.easeIn),
+            Keyframe(time: 1.0, position: Vec3(0, 0, 0), rotation: Vec3(0, 0, 0)),
           ]),
           // 翅膀展开
           BoneTrack(boneName: 'wing_left', keyframes: [
-            const Keyframe(time: 0.0, rotation: Vec3(0, 0, 0)),
-            const Keyframe(time: 0.2, rotation: Vec3(0, -0.4, -0.9), curve: Curves.easeOut),
-            const Keyframe(time: 0.8, rotation: Vec3(0, -0.4, -0.9)),
-            const Keyframe(time: 1.0, rotation: Vec3(0, 0, 0), curve: Curves.easeIn),
+            Keyframe(time: 0.0, rotation: Vec3(0, 0, 0)),
+            Keyframe(time: 0.2, rotation: Vec3(0, -0.4, -0.9), curve: Curves.easeOut),
+            Keyframe(time: 0.8, rotation: Vec3(0, -0.4, -0.9)),
+            Keyframe(time: 1.0, rotation: Vec3(0, 0, 0), curve: Curves.easeIn),
           ]),
           BoneTrack(boneName: 'wing_right', keyframes: [
-            const Keyframe(time: 0.0, rotation: Vec3(0, 0, 0)),
-            const Keyframe(time: 0.2, rotation: Vec3(0, 0.4, 0.9), curve: Curves.easeOut),
-            const Keyframe(time: 0.8, rotation: Vec3(0, 0.4, 0.9)),
-            const Keyframe(time: 1.0, rotation: Vec3(0, 0, 0), curve: Curves.easeIn),
+            Keyframe(time: 0.0, rotation: Vec3(0, 0, 0)),
+            Keyframe(time: 0.2, rotation: Vec3(0, 0.4, 0.9), curve: Curves.easeOut),
+            Keyframe(time: 0.8, rotation: Vec3(0, 0.4, 0.9)),
+            Keyframe(time: 1.0, rotation: Vec3(0, 0, 0), curve: Curves.easeIn),
           ]),
         ],
       );
 
-  static AnimationClip wave() => AnimationClip(
+  static AnimationClip wave() => const AnimationClip(
         name: 'wave',
-        duration: const Duration(milliseconds: 1200),
+        duration: Duration(milliseconds: 1200),
         loop: false,
         tracks: [
           // 身体微微倾斜
           BoneTrack(boneName: 'body', keyframes: [
-            const Keyframe(time: 0.0, rotation: Vec3(0, 0, 0)),
-            const Keyframe(time: 0.2, rotation: Vec3(0, 0.08, 0.05)),
-            const Keyframe(time: 0.8, rotation: Vec3(0, 0.08, 0.05)),
-            const Keyframe(time: 1.0, rotation: Vec3(0, 0, 0)),
+            Keyframe(time: 0.0, rotation: Vec3(0, 0, 0)),
+            Keyframe(time: 0.2, rotation: Vec3(0, 0.08, 0.05)),
+            Keyframe(time: 0.8, rotation: Vec3(0, 0.08, 0.05)),
+            Keyframe(time: 1.0, rotation: Vec3(0, 0, 0)),
           ]),
           // 右翅膀挥手
           BoneTrack(boneName: 'wing_right', keyframes: [
-            const Keyframe(time: 0.0, rotation: Vec3(0, 0, 0)),
-            const Keyframe(time: 0.15, rotation: Vec3(-0.5, 0.3, 1.2), curve: Curves.easeOut),
-            const Keyframe(time: 0.3, rotation: Vec3(-0.3, 0.5, 0.7), curve: Curves.easeInOut),
-            const Keyframe(time: 0.45, rotation: Vec3(-0.5, 0.3, 1.2), curve: Curves.easeInOut),
-            const Keyframe(time: 0.6, rotation: Vec3(-0.3, 0.5, 0.7), curve: Curves.easeInOut),
-            const Keyframe(time: 0.75, rotation: Vec3(-0.5, 0.3, 1.2), curve: Curves.easeInOut),
-            const Keyframe(time: 0.9, rotation: Vec3(0, 0.1, 0.3), curve: Curves.easeIn),
-            const Keyframe(time: 1.0, rotation: Vec3(0, 0, 0)),
+            Keyframe(time: 0.0, rotation: Vec3(0, 0, 0)),
+            Keyframe(time: 0.15, rotation: Vec3(-0.5, 0.3, 1.2), curve: Curves.easeOut),
+            Keyframe(time: 0.3, rotation: Vec3(-0.3, 0.5, 0.7), curve: Curves.easeInOut),
+            Keyframe(time: 0.45, rotation: Vec3(-0.5, 0.3, 1.2), curve: Curves.easeInOut),
+            Keyframe(time: 0.6, rotation: Vec3(-0.3, 0.5, 0.7), curve: Curves.easeInOut),
+            Keyframe(time: 0.75, rotation: Vec3(-0.5, 0.3, 1.2), curve: Curves.easeInOut),
+            Keyframe(time: 0.9, rotation: Vec3(0, 0.1, 0.3), curve: Curves.easeIn),
+            Keyframe(time: 1.0, rotation: Vec3(0, 0, 0)),
           ]),
           // 头跟随看向挥手方向
           BoneTrack(boneName: 'head', keyframes: [
-            const Keyframe(time: 0.0, rotation: Vec3(0, 0, 0)),
-            const Keyframe(time: 0.2, rotation: Vec3(0.05, 0.1, 0.08)),
-            const Keyframe(time: 0.8, rotation: Vec3(0.05, 0.1, 0.08)),
-            const Keyframe(time: 1.0, rotation: Vec3(0, 0, 0)),
+            Keyframe(time: 0.0, rotation: Vec3(0, 0, 0)),
+            Keyframe(time: 0.2, rotation: Vec3(0.05, 0.1, 0.08)),
+            Keyframe(time: 0.8, rotation: Vec3(0.05, 0.1, 0.08)),
+            Keyframe(time: 1.0, rotation: Vec3(0, 0, 0)),
           ]),
         ],
       );
 
-  static AnimationClip eat() => AnimationClip(
+  static AnimationClip eat() => const AnimationClip(
         name: 'eat',
-        duration: const Duration(milliseconds: 2000),
+        duration: Duration(milliseconds: 2000),
         loop: false,
         tracks: [
           // 身体前倾
           BoneTrack(boneName: 'body', keyframes: [
-            const Keyframe(time: 0.0, rotation: Vec3(0, 0, 0)),
-            const Keyframe(time: 0.15, rotation: Vec3(0.12, 0, 0), curve: Curves.easeOut),
-            const Keyframe(time: 0.85, rotation: Vec3(0.12, 0, 0)),
-            const Keyframe(time: 1.0, rotation: Vec3(0, 0, 0), curve: Curves.easeIn),
+            Keyframe(time: 0.0, rotation: Vec3(0, 0, 0)),
+            Keyframe(time: 0.15, rotation: Vec3(0.12, 0, 0), curve: Curves.easeOut),
+            Keyframe(time: 0.85, rotation: Vec3(0.12, 0, 0)),
+            Keyframe(time: 1.0, rotation: Vec3(0, 0, 0), curve: Curves.easeIn),
           ]),
           // 头上下啄食
           BoneTrack(boneName: 'head', keyframes: [
-            const Keyframe(time: 0.0, rotation: Vec3(0, 0, 0)),
-            const Keyframe(time: 0.2, rotation: Vec3(0.2, 0, 0), curve: Curves.easeOut),
-            const Keyframe(time: 0.3, rotation: Vec3(-0.1, 0, 0), curve: Curves.easeIn),
-            const Keyframe(time: 0.4, rotation: Vec3(0.2, 0, 0), curve: Curves.easeOut),
-            const Keyframe(time: 0.5, rotation: Vec3(-0.1, 0, 0), curve: Curves.easeIn),
-            const Keyframe(time: 0.6, rotation: Vec3(0.2, 0, 0), curve: Curves.easeOut),
-            const Keyframe(time: 0.7, rotation: Vec3(-0.05, 0, 0), curve: Curves.easeIn),
-            const Keyframe(time: 0.85, rotation: Vec3(0, 0, 0)),
-            const Keyframe(time: 1.0, rotation: Vec3(0, 0, 0)),
+            Keyframe(time: 0.0, rotation: Vec3(0, 0, 0)),
+            Keyframe(time: 0.2, rotation: Vec3(0.2, 0, 0), curve: Curves.easeOut),
+            Keyframe(time: 0.3, rotation: Vec3(-0.1, 0, 0), curve: Curves.easeIn),
+            Keyframe(time: 0.4, rotation: Vec3(0.2, 0, 0), curve: Curves.easeOut),
+            Keyframe(time: 0.5, rotation: Vec3(-0.1, 0, 0), curve: Curves.easeIn),
+            Keyframe(time: 0.6, rotation: Vec3(0.2, 0, 0), curve: Curves.easeOut),
+            Keyframe(time: 0.7, rotation: Vec3(-0.05, 0, 0), curve: Curves.easeIn),
+            Keyframe(time: 0.85, rotation: Vec3(0, 0, 0)),
+            Keyframe(time: 1.0, rotation: Vec3(0, 0, 0)),
           ]),
         ],
       );
 
-  static AnimationClip sleep() => AnimationClip(
+  static AnimationClip sleep() => const AnimationClip(
         name: 'sleep',
-        duration: const Duration(milliseconds: 4000),
+        duration: Duration(milliseconds: 4000),
         loop: true,
         tracks: [
           // 身体缓慢起伏
           BoneTrack(boneName: 'body', keyframes: [
-            const Keyframe(time: 0.0, position: Vec3(0, 0, 0), scale: Vec3(1, 1, 1)),
-            const Keyframe(time: 0.5, position: Vec3(0, 2, 0), scale: Vec3(1.03, 0.97, 1), curve: Curves.easeInOut),
-            const Keyframe(time: 1.0, position: Vec3(0, 0, 0), scale: Vec3(1, 1, 1)),
+            Keyframe(time: 0.0, position: Vec3(0, 0, 0), scale: Vec3(1, 1, 1)),
+            Keyframe(time: 0.5, position: Vec3(0, 2, 0), scale: Vec3(1.03, 0.97, 1), curve: Curves.easeInOut),
+            Keyframe(time: 1.0, position: Vec3(0, 0, 0), scale: Vec3(1, 1, 1)),
           ]),
           // 头低垂
           BoneTrack(boneName: 'head', keyframes: [
-            const Keyframe(time: 0.0, rotation: Vec3(0.15, 0, -0.05)),
-            const Keyframe(time: 0.5, rotation: Vec3(0.18, 0, -0.08), curve: Curves.easeInOut),
-            const Keyframe(time: 1.0, rotation: Vec3(0.15, 0, -0.05)),
+            Keyframe(time: 0.0, rotation: Vec3(0.15, 0, -0.05)),
+            Keyframe(time: 0.5, rotation: Vec3(0.18, 0, -0.08), curve: Curves.easeInOut),
+            Keyframe(time: 1.0, rotation: Vec3(0.15, 0, -0.05)),
           ]),
           // 翅膀收紧
           BoneTrack(boneName: 'wing_left', keyframes: [
-            const Keyframe(time: 0.0, rotation: Vec3(0, 0, 0.08)),
-            const Keyframe(time: 1.0, rotation: Vec3(0, 0, 0.08)),
+            Keyframe(time: 0.0, rotation: Vec3(0, 0, 0.08)),
+            Keyframe(time: 1.0, rotation: Vec3(0, 0, 0.08)),
           ]),
           BoneTrack(boneName: 'wing_right', keyframes: [
-            const Keyframe(time: 0.0, rotation: Vec3(0, 0, -0.08)),
-            const Keyframe(time: 1.0, rotation: Vec3(0, 0, -0.08)),
+            Keyframe(time: 0.0, rotation: Vec3(0, 0, -0.08)),
+            Keyframe(time: 1.0, rotation: Vec3(0, 0, -0.08)),
           ]),
         ],
       );
 
-  static AnimationClip happy() => AnimationClip(
+  static AnimationClip happy() => const AnimationClip(
         name: 'happy',
-        duration: const Duration(milliseconds: 1000),
+        duration: Duration(milliseconds: 1000),
         loop: true,
         tracks: [
           // 快速上下蹦跶
           BoneTrack(boneName: 'body', keyframes: [
-            const Keyframe(time: 0.0, position: Vec3(0, 0, 0)),
-            const Keyframe(time: 0.25, position: Vec3(3, -15, 0), curve: Curves.easeOut),
-            const Keyframe(time: 0.5, position: Vec3(0, 0, 0), curve: Curves.easeIn),
-            const Keyframe(time: 0.75, position: Vec3(-3, -15, 0), curve: Curves.easeOut),
-            const Keyframe(time: 1.0, position: Vec3(0, 0, 0), curve: Curves.easeIn),
+            Keyframe(time: 0.0, position: Vec3(0, 0, 0)),
+            Keyframe(time: 0.25, position: Vec3(3, -15, 0), curve: Curves.easeOut),
+            Keyframe(time: 0.5, position: Vec3(0, 0, 0), curve: Curves.easeIn),
+            Keyframe(time: 0.75, position: Vec3(-3, -15, 0), curve: Curves.easeOut),
+            Keyframe(time: 1.0, position: Vec3(0, 0, 0), curve: Curves.easeIn),
           ]),
           // 翅膀快速拍动
           BoneTrack(boneName: 'wing_left', keyframes: [
-            const Keyframe(time: 0.0, rotation: Vec3(0, 0, 0)),
-            const Keyframe(time: 0.15, rotation: Vec3(0, -0.3, -0.7), curve: Curves.easeOut),
-            const Keyframe(time: 0.35, rotation: Vec3(0, 0, 0), curve: Curves.easeIn),
-            const Keyframe(time: 0.65, rotation: Vec3(0, -0.3, -0.7), curve: Curves.easeOut),
-            const Keyframe(time: 0.85, rotation: Vec3(0, 0, 0), curve: Curves.easeIn),
-            const Keyframe(time: 1.0, rotation: Vec3(0, 0, 0)),
+            Keyframe(time: 0.0, rotation: Vec3(0, 0, 0)),
+            Keyframe(time: 0.15, rotation: Vec3(0, -0.3, -0.7), curve: Curves.easeOut),
+            Keyframe(time: 0.35, rotation: Vec3(0, 0, 0), curve: Curves.easeIn),
+            Keyframe(time: 0.65, rotation: Vec3(0, -0.3, -0.7), curve: Curves.easeOut),
+            Keyframe(time: 0.85, rotation: Vec3(0, 0, 0), curve: Curves.easeIn),
+            Keyframe(time: 1.0, rotation: Vec3(0, 0, 0)),
           ]),
           BoneTrack(boneName: 'wing_right', keyframes: [
-            const Keyframe(time: 0.0, rotation: Vec3(0, 0, 0)),
-            const Keyframe(time: 0.15, rotation: Vec3(0, 0.3, 0.7), curve: Curves.easeOut),
-            const Keyframe(time: 0.35, rotation: Vec3(0, 0, 0), curve: Curves.easeIn),
-            const Keyframe(time: 0.65, rotation: Vec3(0, 0.3, 0.7), curve: Curves.easeOut),
-            const Keyframe(time: 0.85, rotation: Vec3(0, 0, 0), curve: Curves.easeIn),
-            const Keyframe(time: 1.0, rotation: Vec3(0, 0, 0)),
+            Keyframe(time: 0.0, rotation: Vec3(0, 0, 0)),
+            Keyframe(time: 0.15, rotation: Vec3(0, 0.3, 0.7), curve: Curves.easeOut),
+            Keyframe(time: 0.35, rotation: Vec3(0, 0, 0), curve: Curves.easeIn),
+            Keyframe(time: 0.65, rotation: Vec3(0, 0.3, 0.7), curve: Curves.easeOut),
+            Keyframe(time: 0.85, rotation: Vec3(0, 0, 0), curve: Curves.easeIn),
+            Keyframe(time: 1.0, rotation: Vec3(0, 0, 0)),
           ]),
           // 头开心地晃动
           BoneTrack(boneName: 'head', keyframes: [
-            const Keyframe(time: 0.0, rotation: Vec3(-0.05, 0, 0)),
-            const Keyframe(time: 0.25, rotation: Vec3(-0.08, 0.1, 0.05)),
-            const Keyframe(time: 0.5, rotation: Vec3(-0.05, 0, 0)),
-            const Keyframe(time: 0.75, rotation: Vec3(-0.08, -0.1, -0.05)),
-            const Keyframe(time: 1.0, rotation: Vec3(-0.05, 0, 0)),
+            Keyframe(time: 0.0, rotation: Vec3(-0.05, 0, 0)),
+            Keyframe(time: 0.25, rotation: Vec3(-0.08, 0.1, 0.05)),
+            Keyframe(time: 0.5, rotation: Vec3(-0.05, 0, 0)),
+            Keyframe(time: 0.75, rotation: Vec3(-0.08, -0.1, -0.05)),
+            Keyframe(time: 1.0, rotation: Vec3(-0.05, 0, 0)),
           ]),
         ],
       );
 
-  static AnimationClip sad() => AnimationClip(
+  static AnimationClip sad() => const AnimationClip(
         name: 'sad',
-        duration: const Duration(milliseconds: 3000),
+        duration: Duration(milliseconds: 3000),
         loop: true,
         tracks: [
           // 身体低沉
           BoneTrack(boneName: 'body', keyframes: [
-            const Keyframe(time: 0.0, position: Vec3(0, 4, 0), rotation: Vec3(0.05, 0, 0)),
-            const Keyframe(time: 0.5, position: Vec3(0, 5, 0), rotation: Vec3(0.06, 0, -0.02), curve: Curves.easeInOut),
-            const Keyframe(time: 1.0, position: Vec3(0, 4, 0), rotation: Vec3(0.05, 0, 0)),
+            Keyframe(time: 0.0, position: Vec3(0, 4, 0), rotation: Vec3(0.05, 0, 0)),
+            Keyframe(time: 0.5, position: Vec3(0, 5, 0), rotation: Vec3(0.06, 0, -0.02), curve: Curves.easeInOut),
+            Keyframe(time: 1.0, position: Vec3(0, 4, 0), rotation: Vec3(0.05, 0, 0)),
           ]),
           // 头低垂
           BoneTrack(boneName: 'head', keyframes: [
-            const Keyframe(time: 0.0, rotation: Vec3(0.15, 0, -0.05)),
-            const Keyframe(time: 0.5, rotation: Vec3(0.18, -0.03, -0.08), curve: Curves.easeInOut),
-            const Keyframe(time: 1.0, rotation: Vec3(0.15, 0, -0.05)),
+            Keyframe(time: 0.0, rotation: Vec3(0.15, 0, -0.05)),
+            Keyframe(time: 0.5, rotation: Vec3(0.18, -0.03, -0.08), curve: Curves.easeInOut),
+            Keyframe(time: 1.0, rotation: Vec3(0.15, 0, -0.05)),
           ]),
           // 翅膀下垂
           BoneTrack(boneName: 'wing_left', keyframes: [
-            const Keyframe(time: 0.0, rotation: Vec3(0.1, 0, 0.15)),
-            const Keyframe(time: 1.0, rotation: Vec3(0.1, 0, 0.15)),
+            Keyframe(time: 0.0, rotation: Vec3(0.1, 0, 0.15)),
+            Keyframe(time: 1.0, rotation: Vec3(0.1, 0, 0.15)),
           ]),
           BoneTrack(boneName: 'wing_right', keyframes: [
-            const Keyframe(time: 0.0, rotation: Vec3(0.1, 0, -0.15)),
-            const Keyframe(time: 1.0, rotation: Vec3(0.1, 0, -0.15)),
+            Keyframe(time: 0.0, rotation: Vec3(0.1, 0, -0.15)),
+            Keyframe(time: 1.0, rotation: Vec3(0.1, 0, -0.15)),
           ]),
         ],
       );
 
-  static AnimationClip fly() => AnimationClip(
+  static AnimationClip fly() => const AnimationClip(
         name: 'fly',
-        duration: const Duration(milliseconds: 600),
+        duration: Duration(milliseconds: 600),
         loop: true,
         tracks: [
           // 身体悬浮上升
           BoneTrack(boneName: 'body', keyframes: [
-            const Keyframe(time: 0.0, position: Vec3(0, -30, 0)),
-            const Keyframe(time: 0.5, position: Vec3(0, -35, 0), curve: Curves.easeInOut),
-            const Keyframe(time: 1.0, position: Vec3(0, -30, 0)),
+            Keyframe(time: 0.0, position: Vec3(0, -30, 0)),
+            Keyframe(time: 0.5, position: Vec3(0, -35, 0), curve: Curves.easeInOut),
+            Keyframe(time: 1.0, position: Vec3(0, -30, 0)),
           ]),
           // 翅膀快速拍打
           BoneTrack(boneName: 'wing_left', keyframes: [
-            const Keyframe(time: 0.0, rotation: Vec3(-0.3, -0.5, -1.0)),
-            const Keyframe(time: 0.5, rotation: Vec3(0.1, 0, 0.2), curve: Curves.easeIn),
-            const Keyframe(time: 1.0, rotation: Vec3(-0.3, -0.5, -1.0), curve: Curves.easeOut),
+            Keyframe(time: 0.0, rotation: Vec3(-0.3, -0.5, -1.0)),
+            Keyframe(time: 0.5, rotation: Vec3(0.1, 0, 0.2), curve: Curves.easeIn),
+            Keyframe(time: 1.0, rotation: Vec3(-0.3, -0.5, -1.0), curve: Curves.easeOut),
           ]),
           BoneTrack(boneName: 'wing_right', keyframes: [
-            const Keyframe(time: 0.0, rotation: Vec3(-0.3, 0.5, 1.0)),
-            const Keyframe(time: 0.5, rotation: Vec3(0.1, 0, -0.2), curve: Curves.easeIn),
-            const Keyframe(time: 1.0, rotation: Vec3(-0.3, 0.5, 1.0), curve: Curves.easeOut),
+            Keyframe(time: 0.0, rotation: Vec3(-0.3, 0.5, 1.0)),
+            Keyframe(time: 0.5, rotation: Vec3(0.1, 0, -0.2), curve: Curves.easeIn),
+            Keyframe(time: 1.0, rotation: Vec3(-0.3, 0.5, 1.0), curve: Curves.easeOut),
           ]),
           // 头微仰
           BoneTrack(boneName: 'head', keyframes: [
-            const Keyframe(time: 0.0, rotation: Vec3(-0.1, 0, 0)),
-            const Keyframe(time: 1.0, rotation: Vec3(-0.1, 0, 0)),
+            Keyframe(time: 0.0, rotation: Vec3(-0.1, 0, 0)),
+            Keyframe(time: 1.0, rotation: Vec3(-0.1, 0, 0)),
           ]),
           // 脚收起
           BoneTrack(boneName: 'foot_left', keyframes: [
-            const Keyframe(time: 0.0, position: Vec3(2, -5, 0)),
-            const Keyframe(time: 1.0, position: Vec3(2, -5, 0)),
+            Keyframe(time: 0.0, position: Vec3(2, -5, 0)),
+            Keyframe(time: 1.0, position: Vec3(2, -5, 0)),
           ]),
           BoneTrack(boneName: 'foot_right', keyframes: [
-            const Keyframe(time: 0.0, position: Vec3(-2, -5, 0)),
-            const Keyframe(time: 1.0, position: Vec3(-2, -5, 0)),
+            Keyframe(time: 0.0, position: Vec3(-2, -5, 0)),
+            Keyframe(time: 1.0, position: Vec3(-2, -5, 0)),
           ]),
         ],
       );

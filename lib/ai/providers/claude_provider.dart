@@ -2,11 +2,20 @@ import 'dart:async';
 import 'dart:convert';
 import 'package:dio/dio.dart';
 import '../../models/models.dart';
+import '../agent/agent_types.dart';
 import 'llm_provider.dart';
 
 /// Claude (Anthropic) 大模型适配器
 class ClaudeProvider implements LLMProvider {
+  static const _defaultBaseUrl = 'https://api.anthropic.com';
   final Dio _dio = Dio();
+
+  /// 规范化 baseUrl：去掉末尾斜杠，确保格式统一
+  String _fixBaseUrl(String? baseUrl) {
+    if (baseUrl == null || baseUrl.isEmpty) return _defaultBaseUrl;
+    var url = baseUrl.endsWith('/') ? baseUrl.substring(0, baseUrl.length - 1) : baseUrl;
+    return url;
+  }
 
   @override
   String get name => 'claude';
@@ -23,20 +32,71 @@ class ClaudeProvider implements LLMProvider {
   ];
 
   @override
-  Future<String> chat(
+  Future<AgentResponse> chat(
     List<Map<String, dynamic>> messages, {
     LLMConfig? config,
     List<Map<String, dynamic>>? tools,
   }) async {
     final cfg = config ?? const LLMConfig(provider: 'claude', model: 'claude-sonnet-4-20250514');
-    final url = '${cfg.baseUrl ?? "https://api.anthropic.com"}/v1/messages';
+    final baseUrl = _fixBaseUrl(cfg.baseUrl);
+    final url = '$baseUrl/v1/messages';
 
-    // Claude 需要把 system 消息单独提取
+    // Claude 需要把 system 消息单独提取，并转换消息格式
     String? systemMsg;
     final chatMessages = <Map<String, dynamic>>[];
-    for (final msg in messages) {
+    for (int i = 0; i < messages.length; i++) {
+      final msg = messages[i];
       if (msg['role'] == 'system') {
-        systemMsg = msg['content'] as String;
+        // 累积所有 system 消息
+        final sysContent = msg['content'] as String? ?? '';
+        systemMsg = systemMsg != null ? '$systemMsg\n\n$sysContent' : sysContent;
+      } else if (msg['role'] == 'tool') {
+        // OpenAI 格式的 role:tool → Claude 的 tool_result 格式
+        // 需要关联到前一个 assistant 消息的 tool_use block
+        final toolCallId = msg['tool_call_id'] as String? ?? '';
+        final content = msg['content'] as String? ?? '';
+        chatMessages.add({
+          'role': 'user',
+          'content': [
+            {
+              'type': 'tool_result',
+              'tool_use_id': toolCallId,
+              'content': content,
+            }
+          ],
+        });
+      } else if (msg['role'] == 'assistant') {
+        // 转换 OpenAI 格式的 assistant 消息（含 tool_calls）为 Claude 格式
+        final toolCalls = msg['tool_calls'] as List<dynamic>?;
+        final textContent = msg['content'] as String?;
+
+        if (toolCalls != null && toolCalls.isNotEmpty) {
+          // 有 tool_calls → 转换为 Claude 的 tool_use blocks
+          final blocks = <Map<String, dynamic>>[];
+          if (textContent != null && textContent.isNotEmpty) {
+            blocks.add({'type': 'text', 'text': textContent});
+          }
+          for (final tc in toolCalls) {
+            final func = tc['function'] as Map<String, dynamic>?;
+            if (func != null) {
+              // 从 id 中提取 Claude 原始 id（如果有的话）
+              String claudeId = tc['id'] as String? ?? '';
+              if (claudeId.startsWith('claude_')) {
+                claudeId = claudeId.substring(7);
+              }
+              blocks.add({
+                'type': 'tool_use',
+                'id': claudeId.isNotEmpty ? claudeId : 'toolu_${DateTime.now().microsecondsSinceEpoch}',
+                'name': func['name'],
+                'input': jsonDecode(func['arguments'] as String? ?? '{}'),
+              });
+            }
+          }
+          chatMessages.add({'role': 'assistant', 'content': blocks});
+        } else {
+          // 纯文本消息
+          chatMessages.add({'role': 'assistant', 'content': textContent ?? ''});
+        }
       } else {
         chatMessages.add(msg);
       }
@@ -78,27 +138,27 @@ class ClaudeProvider implements LLMProvider {
 
     final data = response.data;
     final content = data['content'] as List;
+    final stopReason = parseStopReason(data['stop_reason'] as String?);
 
     // 检查 tool_use
-    for (final block in content) {
-      if (block['type'] == 'tool_use') {
-        return jsonEncode({
-          'tool_calls': [
-            {
-              'function': {
-                'name': block['name'],
-                'arguments': jsonEncode(block['input']),
-              },
-            }
-          ],
-          'content': '',
-        });
-      }
+    final toolUseBlocks = content.where((b) => b['type'] == 'tool_use').toList();
+    if (toolUseBlocks.isNotEmpty) {
+      final toolCalls = toolUseBlocks.map((block) {
+        return ToolCall(
+          id: 'claude_${block['id'] ?? DateTime.now().microsecondsSinceEpoch}',
+          name: block['name'] as String? ?? '',
+          arguments: (block['input'] as Map<String, dynamic>?) ?? {},
+        );
+      }).toList();
+      return AgentResponse.tools(toolCalls);
     }
 
     // 文本内容
     final textBlocks = content.where((b) => b['type'] == 'text');
-    return textBlocks.map((b) => b['text']).join('');
+    return AgentResponse.text(
+      textBlocks.map((b) => b['text']).join(''),
+      reason: stopReason,
+    );
   }
 
   @override
@@ -108,13 +168,56 @@ class ClaudeProvider implements LLMProvider {
     List<Map<String, dynamic>>? tools,
   }) async* {
     final cfg = config ?? const LLMConfig(provider: 'claude', model: 'claude-sonnet-4-20250514');
-    final url = '${cfg.baseUrl ?? "https://api.anthropic.com"}/v1/messages';
+    final baseUrl = _fixBaseUrl(cfg.baseUrl);
+    final url = '$baseUrl/v1/messages';
 
     String? systemMsg;
     final chatMessages = <Map<String, dynamic>>[];
-    for (final msg in messages) {
+    for (int i = 0; i < messages.length; i++) {
+      final msg = messages[i];
       if (msg['role'] == 'system') {
-        systemMsg = msg['content'] as String;
+        final sysContent = msg['content'] as String? ?? '';
+        systemMsg = systemMsg != null ? '$systemMsg\n\n$sysContent' : sysContent;
+      } else if (msg['role'] == 'tool') {
+        final toolCallId = msg['tool_call_id'] as String? ?? '';
+        final content = msg['content'] as String? ?? '';
+        chatMessages.add({
+          'role': 'user',
+          'content': [
+            {
+              'type': 'tool_result',
+              'tool_use_id': toolCallId,
+              'content': content,
+            }
+          ],
+        });
+      } else if (msg['role'] == 'assistant') {
+        final toolCalls = msg['tool_calls'] as List<dynamic>?;
+        final textContent = msg['content'] as String?;
+        if (toolCalls != null && toolCalls.isNotEmpty) {
+          final blocks = <Map<String, dynamic>>[];
+          if (textContent != null && textContent.isNotEmpty) {
+            blocks.add({'type': 'text', 'text': textContent});
+          }
+          for (final tc in toolCalls) {
+            final func = tc['function'] as Map<String, dynamic>?;
+            if (func != null) {
+              String claudeId = tc['id'] as String? ?? '';
+              if (claudeId.startsWith('claude_')) {
+                claudeId = claudeId.substring(7);
+              }
+              blocks.add({
+                'type': 'tool_use',
+                'id': claudeId.isNotEmpty ? claudeId : 'toolu_${DateTime.now().microsecondsSinceEpoch}',
+                'name': func['name'],
+                'input': jsonDecode(func['arguments'] as String? ?? '{}'),
+              });
+            }
+          }
+          chatMessages.add({'role': 'assistant', 'content': blocks});
+        } else {
+          chatMessages.add({'role': 'assistant', 'content': textContent ?? ''});
+        }
       } else {
         chatMessages.add(msg);
       }
@@ -129,6 +232,38 @@ class ClaudeProvider implements LLMProvider {
     };
 
     if (systemMsg != null) body['system'] = systemMsg;
+
+    // 深度思考
+    if (cfg.enableDeepThink) {
+      body['thinking'] = {
+        'type': 'enabled',
+        'budget_tokens': 10000,
+      };
+      body['max_tokens'] = (cfg.maxTokens < 10000) ? 16000 : cfg.maxTokens;
+    }
+
+    // 合并 tools（联网搜索 + Function Calling），避免后者覆盖前者
+    final allTools = <Map<String, dynamic>>[];
+    if (cfg.enableWebSearch) {
+      allTools.add({
+        'type': 'web_search_20250305',
+        'name': 'web_search',
+        'max_uses': 5,
+      });
+    }
+    if (tools != null && tools.isNotEmpty) {
+      for (final t in tools) {
+        final func = t['function'] as Map<String, dynamic>;
+        allTools.add({
+          'name': func['name'],
+          'description': func['description'],
+          'input_schema': func['parameters'],
+        });
+      }
+    }
+    if (allTools.isNotEmpty) {
+      body['tools'] = allTools;
+    }
 
     final response = await _dio.post(
       url,

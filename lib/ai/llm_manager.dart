@@ -2,12 +2,14 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:hive/hive.dart';
 import '../models/models.dart';
+import 'agent/agent_types.dart';
 import 'providers/llm_provider.dart';
 import 'providers/qwen_provider.dart';
 import 'providers/hunyuan_provider.dart';
 import 'providers/openai_provider.dart';
 import 'providers/claude_provider.dart';
 import 'providers/ollama_provider.dart';
+import 'providers/chatglm_provider.dart';
 import 'prompts.dart';
 
 /// LLM 管理器
@@ -21,13 +23,12 @@ class LLMManager extends ChangeNotifier {
   LLMConfig get currentConfig => _currentConfig;
 
   LLMManager() {
-    // 注册所有模型提供者
     _providers['qwen'] = QwenProvider();
     _providers['hunyuan'] = HunyuanProvider();
     _providers['openai'] = OpenAIProvider();
     _providers['claude'] = ClaudeProvider();
     _providers['ollama'] = OllamaProvider();
-
+    _providers['chatglm'] = ChatGLMProvider();
     _loadConfig();
   }
 
@@ -36,11 +37,21 @@ class LLMManager extends ChangeNotifier {
     final box = Hive.box('settings');
     final saved = box.get('llm_config');
     if (saved != null && saved is Map) {
-      _currentConfig = LLMConfig.fromJson(Map<String, dynamic>.from(saved));
+      var config = LLMConfig.fromJson(Map<String, dynamic>.from(saved));
+      if (config.maxTokens < 81920) {
+        config = config.copyWith(maxTokens: 81920);
+        box.put('llm_config', config.toJson());
+      }
+      if (config.provider == 'hunyuan' &&
+          config.baseUrl != null &&
+          config.baseUrl!.contains('hunyuan.tencentcloudapi.com')) {
+        config = config.copyWith(baseUrl: 'https://api.hunyuan.cloud.tencent.com/v1');
+        box.put('llm_config', config.toJson());
+      }
+      _currentConfig = config;
     }
   }
 
-  /// 保存模型配置
   void setConfig(LLMConfig config) {
     _currentConfig = config;
     final box = Hive.box('settings');
@@ -48,7 +59,6 @@ class LLMManager extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// 获取所有可用的模型提供者信息
   List<Map<String, dynamic>> getAvailableProviders() {
     return _providers.entries.map((e) => <String, dynamic>{
       'name': e.value.name,
@@ -57,16 +67,19 @@ class LLMManager extends ChangeNotifier {
     }).toList();
   }
 
-  /// 获取当前提供者
-  LLMProvider? get _currentProvider => _providers[_currentConfig.provider];
+  LLMProvider? get currentProvider => _providers[_currentConfig.provider];
 
-  /// 同步对话（带鹅宝人格 + 记忆上下文）
-  Future<String> chat(
-    List<ChatMessage> chatHistory, {
+  /// 同步对话（带鹅宝人格），返回结构化响应
+  Future<AgentResponse> chat({
+    required List<ChatMessage> chatHistory,
     List<Map<String, dynamic>>? tools,
     String? memoryContext,
+    String? improvementContext,
+    String? agentSkillsPrompt,
+    String? envPrompt,
+    bool workMode = false,
   }) async {
-    final provider = _currentProvider;
+    final provider = currentProvider;
     if (provider == null) {
       throw Exception('未配置模型提供者: ${_currentConfig.provider}');
     }
@@ -75,44 +88,57 @@ class LLMManager extends ChangeNotifier {
     notifyListeners();
 
     try {
-      // 构建消息列表：系统人格 + 记忆 + 对话历史
-      final messages = <Map<String, dynamic>>[];
-
-      // 1. 系统人格 Prompt
-      String systemPrompt = GoosePrompts.systemPrompt;
-      if (memoryContext != null && memoryContext.isNotEmpty) {
-        systemPrompt += '\n\n## 关于主人的记忆\n$memoryContext';
-      }
-      messages.add({'role': 'system', 'content': systemPrompt});
-
-      // 2. 对话历史（最近 20 轮）
-      final recentHistory = chatHistory.length > 40
-          ? chatHistory.sublist(chatHistory.length - 40)
-          : chatHistory;
-      for (final msg in recentHistory) {
-        messages.add(msg.toApiMessage());
-      }
-
-      final response = await provider.chat(
-        messages,
-        config: _currentConfig,
-        tools: tools,
+      final messages = _buildMessages(
+        chatHistory: chatHistory,
+        workMode: workMode,
+        memoryContext: memoryContext,
+        improvementContext: improvementContext,
+        agentSkillsPrompt: agentSkillsPrompt,
+        envPrompt: envPrompt,
       );
 
-      return response;
+      return await provider.chat(messages, config: _currentConfig, tools: tools);
     } finally {
       _isProcessing = false;
       notifyListeners();
+    }
+  }
+
+  /// 使用原始消息列表调用 LLM（保留 tool_calls/tool 等 API 字段）
+  Future<AgentResponse> chatWithMessages(
+    List<Map<String, dynamic>> rawMessages, {
+    List<Map<String, dynamic>>? tools,
+  }) async {
+    final provider = currentProvider;
+    if (provider == null) {
+      throw Exception('未配置模型提供者: ${_currentConfig.provider}');
+    }
+    return await provider.chat(rawMessages, config: _currentConfig, tools: tools);
+  }
+
+  /// 原始对话（供 self-improvement 等内部模块使用）
+  Future<String> chatRaw(List<Map<String, dynamic>> messages) async {
+    final provider = currentProvider;
+    if (provider == null) {
+      throw Exception('未配置模型提供者: ${_currentConfig.provider}');
+    }
+    try {
+      final resp = await provider.chat(messages, config: _currentConfig);
+      return resp.text;
+    } catch (e) {
+      debugPrint('🦢 chatRaw 调用失败: $e');
+      return '';
     }
   }
 
   /// 流式对话
-  Stream<String> chatStream(
-    List<ChatMessage> chatHistory, {
+  Stream<String> chatStream({
+    required List<ChatMessage> chatHistory,
     List<Map<String, dynamic>>? tools,
     String? memoryContext,
+    bool workMode = false,
   }) async* {
-    final provider = _currentProvider;
+    final provider = currentProvider;
     if (provider == null) {
       throw Exception('未配置模型提供者: ${_currentConfig.provider}');
     }
@@ -121,60 +147,67 @@ class LLMManager extends ChangeNotifier {
     notifyListeners();
 
     try {
-      final messages = <Map<String, dynamic>>[];
-
-      String systemPrompt = GoosePrompts.systemPrompt;
-      if (memoryContext != null && memoryContext.isNotEmpty) {
-        systemPrompt += '\n\n## 关于主人的记忆\n$memoryContext';
-      }
-      messages.add({'role': 'system', 'content': systemPrompt});
-
-      final recentHistory = chatHistory.length > 40
-          ? chatHistory.sublist(chatHistory.length - 40)
-          : chatHistory;
-      for (final msg in recentHistory) {
-        messages.add(msg.toApiMessage());
-      }
-
-      yield* provider.chatStream(
-        messages,
-        config: _currentConfig,
-        tools: tools,
+      final messages = _buildMessages(
+        chatHistory: chatHistory,
+        workMode: workMode,
+        memoryContext: memoryContext,
       );
+
+      yield* provider.chatStream(messages, config: _currentConfig, tools: tools);
     } finally {
       _isProcessing = false;
       notifyListeners();
     }
   }
 
-  /// 从 AI 回复中提取情绪标签
+  /// 构建 messages 列表（system prompt + 对话历史）
+  List<Map<String, dynamic>> _buildMessages({
+    required List<ChatMessage> chatHistory,
+    bool workMode = false,
+    String? memoryContext,
+    String? improvementContext,
+    String? agentSkillsPrompt,
+    String? envPrompt,
+  }) {
+    final messages = <Map<String, dynamic>>[];
+
+    String systemPrompt = workMode
+        ? GoosePrompts.workModeSystemPrompt
+        : GoosePrompts.systemPrompt;
+    if (memoryContext != null && memoryContext.isNotEmpty) {
+      systemPrompt += '\n\n## 关于主人的记忆\n$memoryContext';
+    }
+    if (improvementContext != null && improvementContext.isNotEmpty) {
+      systemPrompt += '\n\n$improvementContext';
+    }
+    if (agentSkillsPrompt != null && agentSkillsPrompt.isNotEmpty) {
+      systemPrompt += '\n\n$agentSkillsPrompt';
+    }
+    if (envPrompt != null && envPrompt.isNotEmpty) {
+      systemPrompt += envPrompt;
+    }
+    messages.add({'role': 'system', 'content': systemPrompt});
+
+    final recentHistory = chatHistory.length > 40
+        ? chatHistory.sublist(chatHistory.length - 40)
+        : chatHistory;
+    for (final msg in recentHistory) {
+      messages.add(msg.toApiMessage());
+    }
+    return messages;
+  }
+
   String extractEmotion(String response) {
     final lower = response.toLowerCase();
-    if (lower.contains('😊') || lower.contains('开心') || lower.contains('嘿嘿') || lower.contains('哈哈')) {
-      return 'happy';
-    }
-    if (lower.contains('😢') || lower.contains('难过') || lower.contains('伤心')) {
-      return 'sad';
-    }
-    if (lower.contains('🤔') || lower.contains('让我想想') || lower.contains('思考')) {
-      return 'thinking';
-    }
-    if (lower.contains('😳') || lower.contains('害羞') || lower.contains('不好意思')) {
-      return 'shy';
-    }
-    if (lower.contains('🤩') || lower.contains('太棒了') || lower.contains('厉害')) {
-      return 'excited';
-    }
-    if (lower.contains('😤') || lower.contains('生气') || lower.contains('哼')) {
-      return 'angry';
-    }
-    if (lower.contains('😴') || lower.contains('困') || lower.contains('好累')) {
-      return 'sleepy';
-    }
+    if (lower.contains('😊') || lower.contains('开心') || lower.contains('嘿嘿') || lower.contains('哈哈')) return 'happy';
+    if (lower.contains('😢') || lower.contains('难过') || lower.contains('伤心')) return 'sad';
+    if (lower.contains('😳') || lower.contains('害羞') || lower.contains('不好意思')) return 'shy';
+    if (lower.contains('🤩') || lower.contains('太棒了') || lower.contains('厉害')) return 'excited';
+    if (lower.contains('😤') || lower.contains('生气') || lower.contains('哼')) return 'angry';
+    if (lower.contains('😴') || lower.contains('困') || lower.contains('好累')) return 'sleepy';
     return 'normal';
   }
 
-  /// 测试模型连接
   Future<bool> testConnection(LLMConfig config) async {
     final provider = _providers[config.provider];
     if (provider == null) return false;

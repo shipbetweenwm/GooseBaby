@@ -2,11 +2,20 @@ import 'dart:async';
 import 'dart:convert';
 import 'package:dio/dio.dart';
 import '../../models/models.dart';
+import '../agent/agent_types.dart';
 import 'llm_provider.dart';
 
 /// OpenAI GPT 大模型适配器
 class OpenAIProvider implements LLMProvider {
+  static const _defaultBaseUrl = 'https://api.openai.com/v1';
   final Dio _dio = Dio();
+
+  /// 规范化 baseUrl：去掉末尾斜杠，确保格式统一
+  String _fixBaseUrl(String? baseUrl) {
+    if (baseUrl == null || baseUrl.isEmpty) return _defaultBaseUrl;
+    var url = baseUrl.endsWith('/') ? baseUrl.substring(0, baseUrl.length - 1) : baseUrl;
+    return url;
+  }
 
   @override
   String get name => 'openai';
@@ -23,13 +32,14 @@ class OpenAIProvider implements LLMProvider {
   ];
 
   @override
-  Future<String> chat(
+  Future<AgentResponse> chat(
     List<Map<String, dynamic>> messages, {
     LLMConfig? config,
     List<Map<String, dynamic>>? tools,
   }) async {
     final cfg = config ?? const LLMConfig(provider: 'openai', model: 'gpt-4o-mini');
-    final url = '${cfg.baseUrl ?? "https://api.openai.com"}/v1/chat/completions';
+    final baseUrl = _fixBaseUrl(cfg.baseUrl);
+    final url = '$baseUrl/chat/completions';
 
     final body = <String, dynamic>{
       'model': cfg.model,
@@ -54,10 +64,16 @@ class OpenAIProvider implements LLMProvider {
     );
 
     final choice = response.data['choices'][0];
-    if (choice['message']['tool_calls'] != null) {
-      return jsonEncode(choice['message']);
+    final message = choice['message'];
+    final finishReason = parseStopReason(choice['finish_reason'] as String?);
+
+    if (message['tool_calls'] != null) {
+      final toolCalls = (message['tool_calls'] as List)
+          .map((tc) => ToolCall.fromJson(tc as Map<String, dynamic>))
+          .toList();
+      return AgentResponse.tools(toolCalls);
     }
-    return choice['message']['content'] as String;
+    return AgentResponse.text(message['content'] as String? ?? '', reason: finishReason);
   }
 
   @override
@@ -67,7 +83,8 @@ class OpenAIProvider implements LLMProvider {
     List<Map<String, dynamic>>? tools,
   }) async* {
     final cfg = config ?? const LLMConfig(provider: 'openai', model: 'gpt-4o-mini');
-    final url = '${cfg.baseUrl ?? "https://api.openai.com"}/v1/chat/completions';
+    final baseUrl = _fixBaseUrl(cfg.baseUrl);
+    final url = '$baseUrl/chat/completions';
 
     final body = <String, dynamic>{
       'model': cfg.model,
@@ -77,8 +94,24 @@ class OpenAIProvider implements LLMProvider {
       'stream': true,
     };
 
+    // 深度思考（与 tools 互斥：reasoning 会挤占 max_tokens）
+    if (cfg.enableDeepThink && (tools == null || tools.isEmpty)) {
+      body['reasoning_effort'] = 'high';
+    }
+
+    // 合并 tools
+    final allTools = <Map<String, dynamic>>[];
+    if (cfg.enableWebSearch) {
+      allTools.add({
+        'type': 'web_search',
+        'web_search': {},
+      });
+    }
     if (tools != null && tools.isNotEmpty) {
-      body['tools'] = tools;
+      allTools.addAll(tools.cast<Map<String, dynamic>>());
+    }
+    if (allTools.isNotEmpty) {
+      body['tools'] = allTools;
     }
 
     final response = await _dio.post(

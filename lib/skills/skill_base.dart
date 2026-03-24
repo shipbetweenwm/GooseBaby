@@ -1,22 +1,21 @@
 /// 鹅宝技能系统 - 基础协议定义
 /// 所有技能都需要实现 [GooseSkill] 抽象类
+library;
 
 /// 技能执行结果
 class SkillResult {
   final bool success;
   final String message;
   final Map<String, dynamic>? data;
-  final String? displayWidget; // 可选：前端渲染提示
 
   const SkillResult({
     required this.success,
     required this.message,
     this.data,
-    this.displayWidget,
   });
 
-  factory SkillResult.ok(String message, {Map<String, dynamic>? data, String? displayWidget}) {
-    return SkillResult(success: true, message: message, data: data, displayWidget: displayWidget);
+  factory SkillResult.ok(String message, {Map<String, dynamic>? data}) {
+    return SkillResult(success: true, message: message, data: data);
   }
 
   factory SkillResult.fail(String message) {
@@ -27,7 +26,6 @@ class SkillResult {
     'success': success,
     'message': message,
     if (data != null) 'data': data,
-    if (displayWidget != null) 'displayWidget': displayWidget,
   };
 }
 
