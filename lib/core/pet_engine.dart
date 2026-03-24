@@ -62,7 +62,7 @@ class PetEngine extends ChangeNotifier {
   int _healthReminderInterval = 30; // 健康提醒间隔（分钟），默认30分钟
   bool _alwaysOnTop = true;
   double _opacity = 1.0;
-  double _scale = 1.0;
+  double _scale = 0.85; // 中等大小（默认0.85，范围0.5-1.25）
 
   bool get autoRoam => _autoRoam;
   bool get soundEnabled => _soundEnabled;
@@ -1090,6 +1090,7 @@ class PetEngine extends ChangeNotifier {
   }
 
   /// 鹅宝主动情绪表达（由行为引擎定时触发）
+  /// 注意：传递的是情绪类型和场景提示，由 UI 层调用 LLM 生成个性化内容
   void _checkEmotionalBehavior() {
     if (_isWorking) return;
 
@@ -1098,7 +1099,8 @@ class PetEngine extends ChangeNotifier {
     // 好久没被摸 → 求关注
     if (minutesSinceInteraction > 90 && _random.nextDouble() < 0.2) {
       _state = _state.copyWith(currentAction: 'idle', emotion: 'sad');
-      onEmotionalBehavior?.call('主人...摸摸鹅宝嘛~ 🥺', 'seekAttention');
+      // 传递场景提示，由 UI 层生成个性化内容
+      onEmotionalBehavior?.call('seekAttention', '好久没互动了，撒娇求关注');
       notifyListeners();
       return;
     }
@@ -1106,22 +1108,22 @@ class PetEngine extends ChangeNotifier {
     // mood 很低持续 → 闹脾气
     if (_state.mood < 25 && _random.nextDouble() < 0.15) {
       _state = _state.copyWith(currentAction: 'slouch', emotion: 'sad');
-      onEmotionalBehavior?.call('鹅宝不开心...', 'upset');
+      onEmotionalBehavior?.call('upset', '心情不好，闹小脾气');
       notifyListeners();
       return;
     }
 
-    // mood 很高 → 主动撒娇
+    // mood 很高 → 主动开心撒娇
     if (_state.mood > 85 && _random.nextDouble() < 0.1) {
       _state = _state.copyWith(currentAction: 'happy_jump', emotion: 'happy');
-      onEmotionalBehavior?.call('嘿嘿~ 鹅宝今天好开心呀！', 'happy');
+      onEmotionalBehavior?.call('happy', '心情特别好，开心地表达喜悦');
       notifyListeners();
       return;
     }
 
     // 饿了很久 → 撒娇求吃
     if (_state.hunger < 15 && _random.nextDouble() < 0.25) {
-      onEmotionalBehavior?.call('主人...鹅宝肚子咕咕叫了...🥺', 'hungry');
+      onEmotionalBehavior?.call('hungry', '很饿了，撒娇求吃的');
       return;
     }
   }

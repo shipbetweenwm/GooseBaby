@@ -46,6 +46,8 @@ class ConversationMessage {
   final String? skillResult;
   final bool isError;
   final List<MessageAttachment> attachments;
+  /// 工具调用期间产生的 API 消息序列（用于多轮会话上下文）
+  final List<Map<String, dynamic>>? apiMessages;
 
   ConversationMessage({
     required this.content,
@@ -54,6 +56,7 @@ class ConversationMessage {
     this.skillResult,
     this.isError = false,
     this.attachments = const [],
+    this.apiMessages,
   });
 
   Map<String, dynamic> toJson() => {
@@ -63,6 +66,7 @@ class ConversationMessage {
         'skillResult': skillResult,
         'isError': isError,
         'attachments': attachments.map((a) => a.toJson()).toList(),
+        'apiMessages': apiMessages,
       };
 
   factory ConversationMessage.fromJson(Map<String, dynamic> json) => ConversationMessage(
@@ -75,6 +79,9 @@ class ConversationMessage {
                 ?.map((a) => MessageAttachment.fromJson(Map<String, dynamic>.from(a)))
                 .toList() ??
             [],
+        apiMessages: (json['apiMessages'] as List?)
+                ?.map((m) => Map<String, dynamic>.from(m as Map))
+                .toList(),
       );
 }
 
@@ -203,6 +210,18 @@ class ConversationManager extends ChangeNotifier {
     await _saveConversations();
   }
 
+  /// 替换指定会话的全部消息（用于防止切换会话后保存到错误会话）
+  Future<void> updateMessagesFor(String conversationId, List<ConversationMessage> messages) async {
+    try {
+      final conv = _conversations.firstWhere((c) => c.id == conversationId);
+      conv.messages = List.from(messages);
+      conv.updatedAt = DateTime.now();
+      await _saveConversations();
+    } catch (_) {
+      debugPrint('🦢 未找到会话 $conversationId');
+    }
+  }
+
   /// 更新会话标题
   Future<void> updateTitle(String id, String newTitle) async {
     try {
@@ -221,5 +240,50 @@ class ConversationManager extends ChangeNotifier {
     conv.messages.clear();
     conv.updatedAt = DateTime.now();
     await _saveConversations();
+  }
+
+  /// 静态方法：获取当天所有会话内容摘要（用于日记生成）
+  /// 直接读取 Hive box，无需初始化 ConversationManager 实例
+  static Future<String> getTodayConversationsSummary() async {
+    try {
+      final box = await Hive.openBox('conversations');
+      final data = box.get('conversations', defaultValue: <dynamic>[]);
+      
+      if (data is! List || data.isEmpty) return '';
+      
+      final now = DateTime.now();
+      final today = DateTime(now.year, now.month, now.day);
+      
+      final buffer = StringBuffer();
+      int totalMessages = 0;
+      const maxMessages = 50; // 最多展示 50 条消息
+      
+      for (final item in data) {
+        if (item is! Map) continue;
+        final conv = Conversation.fromJson(Map<String, dynamic>.from(item));
+        
+        for (final msg in conv.messages) {
+          // 只取今天的消息
+          final msgDate = DateTime(msg.timestamp.year, msg.timestamp.month, msg.timestamp.day);
+          if (msgDate == today) {
+            final role = msg.isUser ? '主人' : '鹅宝';
+            final time = '${msg.timestamp.hour.toString().padLeft(2, '0')}:${msg.timestamp.minute.toString().padLeft(2, '0')}';
+            // 截取过长的消息
+            final content = msg.content.length > 100 
+                ? '${msg.content.substring(0, 100)}...' 
+                : msg.content;
+            buffer.writeln('[$time] $role: $content');
+            totalMessages++;
+            if (totalMessages >= maxMessages) break;
+          }
+        }
+        if (totalMessages >= maxMessages) break;
+      }
+      
+      return buffer.toString();
+    } catch (e) {
+      debugPrint('📔 获取今日会话失败: $e');
+      return '';
+    }
   }
 }

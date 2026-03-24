@@ -1180,15 +1180,12 @@ class _PetSettingsState2 extends State<_PetSettings> {
           ),
           _SettingToggle(
             title: '智能关怀',
-            subtitle: '结合天气/时间/对话的贴心关心',
-            value: engine.notificationEnabled,
-            onChanged: (v) => engine.setNotificationEnabled(v),
-          ),
-          _SettingToggle(
-            title: '健康关怀',
-            subtitle: '久坐/喝水/休息提醒，关心你的身体',
-            value: engine.healthReminderEnabled,
-            onChanged: (v) => engine.setHealthReminderEnabled(v),
+            subtitle: '贴心关心 + 健康/喝水/休息提醒',
+            value: engine.notificationEnabled && engine.healthReminderEnabled,
+            onChanged: (v) {
+              engine.setNotificationEnabled(v);
+              engine.setHealthReminderEnabled(v);
+            },
           ),
           if (engine.healthReminderEnabled)
             Padding(

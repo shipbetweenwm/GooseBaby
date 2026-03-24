@@ -2,7 +2,6 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
-import 'package:hive/hive.dart';
 import 'package:window_manager/window_manager.dart';
 import '../../ai/llm_manager.dart';
 import '../../ai/agent/agent_types.dart';
@@ -61,10 +60,14 @@ class _ChatPanelState extends State<ChatPanel> with SingleTickerProviderStateMix
   /// 当前会话的取消令牌（用于中断 AgentLoop）
   CancellationToken? _cancellationToken;
 
-  /// 会话管理器（工作模式）
+  /// 会话管理器（两种模式共用）
   ConversationManager? _conversationManager;
   /// 当前选中的会话ID
   String? _currentConversationId;
+  /// 当前正在处理的会话ID（防止切换会话后保存到错误会话）
+  String? _processingConversationId;
+  /// 是否显示会话列表（两种模式都可控制）
+  bool _showConversationList = true;
 
   double get _chatFontSize => StorageManager.getSetting<double>('chat_font_size', defaultValue: 14.0) ?? 14.0;
 
@@ -168,98 +171,37 @@ class _ChatPanelState extends State<ChatPanel> with SingleTickerProviderStateMix
   }
 
   void _initializeMode() {
-    // 工作模式：初始化会话管理器
-    if (widget.workMode) {
-      _conversationManager = ConversationManager();
-      _conversationManager!.initialize().then((_) {
-        if (mounted) {
-          setState(() {
-            _currentConversationId = _conversationManager!.currentConversationId;
-          });
-          _loadConversationMessages();
-        }
-      });
-    } else {
-      // 休闲模式：加载历史对话
-      _loadChatHistory();
-    }
-  }
-
-  /// 从 Hive 加载聊天历史
-  void _loadChatHistory() {
-    try {
-      final box = Hive.box('chat_history');
-      final history = box.get('messages', defaultValue: <dynamic>[]);
-      if (history is List && history.isNotEmpty) {
-        for (final item in history) {
-          if (item is Map) {
-            final map = Map<String, dynamic>.from(item);
-            // 解析附件
-            final attachmentsRaw = map['attachments'] as List?;
-            final attachments = attachmentsRaw
-                ?.map((a) => MessageAttachment.fromJson(Map<String, dynamic>.from(a)))
-                .toList() ?? <MessageAttachment>[];
-            _messages.add(_ChatMessage(
-              content: map['content'] as String? ?? '',
-              isUser: map['isUser'] as bool? ?? false,
-              timestamp: DateTime.tryParse(map['timestamp'] as String? ?? '') ?? DateTime.now(),
-              skillResult: map['skillResult'] as String?,
-              isError: map['isError'] as bool? ?? false,
-              attachments: attachments,
-            ));
-          }
-        }
+    // 两种模式统一使用 ConversationManager 管理会话
+    _conversationManager = ConversationManager();
+    _conversationManager!.initialize().then((_) {
+      if (mounted) {
+        setState(() {
+          _currentConversationId = _conversationManager!.currentConversationId;
+        });
+        // 统一加载当前会话消息
+        _loadConversationMessages();
       }
-    } catch (e) {
-      debugPrint('🦢 加载聊天历史失败: $e');
-    }
-
-    // 如果没有历史消息，添加欢迎消息
-    if (_messages.isEmpty) {
-      _messages.add(_ChatMessage(
-        content: '嘎~ 鹅宝来啦！你想聊什么呀？双击鹅宝或者直接打字都可以哦~ 🦢',
-        isUser: false,
-        timestamp: DateTime.now(),
-      ));
-    }
-
-    // 初始加载时立即跳到底部（不使用动画），并二次确认
-    _scrollToBottom(jump: true);
-    // 再延迟一帧确保 ListView 完全布局后仍在底部
-    Future.delayed(const Duration(milliseconds: 50), () {
-      if (mounted) _scrollToBottom(jump: true);
     });
   }
 
-  /// 保存聊天历史到 Hive
+
+  /// 保存聊天历史（统一使用 ConversationManager）
+  /// 使用 _processingConversationId 确保保存到正确的会话
   void _saveChatHistory() {
     try {
-      if (widget.workMode && _conversationManager != null && _currentConversationId != null) {
-        // 工作模式：替换当前会话的全部消息（幂等，避免重复保存）
-        _conversationManager!.updateMessages(_messages.map((m) => ConversationMessage(
+      // 优先使用正在处理的会话ID，否则使用当前会话ID
+      final targetId = _processingConversationId ?? _currentConversationId;
+      if (_conversationManager != null && targetId != null) {
+        // 两种模式统一：替换目标会话的全部消息
+        _conversationManager!.updateMessagesFor(targetId, _messages.map((m) => ConversationMessage(
           content: m.content,
           isUser: m.isUser,
           timestamp: m.timestamp,
           skillResult: m.skillResult,
           isError: m.isError,
           attachments: m.attachments,
+          apiMessages: m.apiMessages,
         )).toList());
-      } else {
-        // 休闲模式：保存到 Hive
-        final box = Hive.box('chat_history');
-        // 只保留最近 200 条
-        final toSave = _messages.length > 200
-            ? _messages.sublist(_messages.length - 200)
-            : _messages;
-        final data = toSave.map((m) => {
-          'content': m.content,
-          'isUser': m.isUser,
-          'timestamp': m.timestamp.toIso8601String(),
-          'skillResult': m.skillResult,
-          'isError': m.isError,
-          'attachments': m.attachments.map((a) => a.toJson()).toList(),
-        }).toList();
-        box.put('messages', data);
       }
     } catch (e) {
       debugPrint('🦢 保存聊天历史失败: $e');
@@ -473,6 +415,8 @@ class _ChatPanelState extends State<ChatPanel> with SingleTickerProviderStateMix
     if (text.isEmpty && attachments.isEmpty) return;
     if (_isLoading) return;
 
+    // 记住当前会话ID，防止切换会话后保存到错误会话
+    _processingConversationId = _currentConversationId;
     _inputController.clear();
 
     // 检测"记住"类指令，直接保存到长期记忆（不走工具链）
@@ -827,6 +771,8 @@ class _ChatPanelState extends State<ChatPanel> with SingleTickerProviderStateMix
         _cancellationToken = null;
       });
       _scrollToBottom();
+      // 清除正在处理的会话ID
+      _processingConversationId = null;
     }
   }
 
@@ -1085,12 +1031,12 @@ class _ChatPanelState extends State<ChatPanel> with SingleTickerProviderStateMix
             ),
           ],
         ),
-        child: widget.workMode
+        child: (_showConversationList && _conversationManager != null)
             ? Row(
                 children: [
-                  // 左侧会话列表（工作模式）
+                  // 左侧会话列表（根据状态显示/隐藏）
                   SizedBox(
-                    width: 260, // 增加到260px
+                    width: 240,
                     child: _buildConversationList(),
                   ),
                   // 右侧聊天区域
@@ -1145,26 +1091,45 @@ class _ChatPanelState extends State<ChatPanel> with SingleTickerProviderStateMix
                 ],
               ),
             ),
-            // 模式切换按钮
+            // 会话列表显示/隐藏按钮（两种模式都可用）
+            _HeaderButton(
+              icon: Icon(
+                _showConversationList ? Icons.list : Icons.list_alt,
+                size: 18,
+                color: _showConversationList ? const Color(0xFF4FC3F7) : Colors.grey,
+              ),
+              label: _showConversationList ? '隐藏列表' : '显示列表',
+              onPressed: () {
+                setState(() {
+                  _showConversationList = !_showConversationList;
+                });
+              },
+              tooltip: _showConversationList ? '隐藏会话列表' : '显示会话列表',
+            ),
+            // 模式切换按钮（显示当前状态，点击切换）
             if (widget.onToggleMode != null)
-              IconButton(
+              _HeaderButton(
                 icon: Icon(
-                  widget.workMode ? Icons.work_outline : Icons.chat_bubble_outline,
-                  size: 20,
-                  color: widget.workMode ? const Color(0xFF4FC3F7) : Colors.grey,
+                  widget.workMode ? Icons.work : Icons.chat_bubble,
+                  size: 18,
+                  color: widget.workMode ? const Color(0xFF4FC3F7) : const Color(0xFFFFB74D),
                 ),
+                label: widget.workMode ? '工作' : '休闲',
                 onPressed: widget.onToggleMode,
-                tooltip: widget.workMode ? '切换到休闲模式' : '切换到工作模式',
+                tooltip: widget.workMode ? '当前：工作模式（点击切换到休闲模式）' : '当前：休闲模式（点击切换到工作模式）',
+                isActive: true,
               ),
             // 复制全部对话
-            IconButton(
-              icon: const Icon(Icons.copy, size: 18, color: Colors.grey),
+            _HeaderButton(
+              icon: const Icon(Icons.copy, size: 16, color: Colors.grey),
+              label: '复制',
               onPressed: _copyAllMessages,
               tooltip: '复制全部对话',
             ),
             // 清空对话
-            IconButton(
-              icon: const Icon(Icons.delete_outline, size: 20, color: Colors.grey),
+            _HeaderButton(
+              icon: const Icon(Icons.delete_outline, size: 18, color: Colors.grey),
+              label: '清空',
               onPressed: () {
                 setState(() {
                   _messages.clear();
@@ -1178,10 +1143,11 @@ class _ChatPanelState extends State<ChatPanel> with SingleTickerProviderStateMix
               },
               tooltip: '清空对话',
             ),
-            IconButton(
-              icon: const Icon(Icons.close, size: 20, color: Colors.grey),
+            _HeaderButton(
+              icon: const Icon(Icons.close, size: 18, color: Colors.grey),
+              label: '关闭',
               onPressed: widget.onClose,
-              tooltip: '关闭',
+              tooltip: '关闭对话框',
             ),
           ],
         ),
@@ -1413,10 +1379,10 @@ class _ChatPanelState extends State<ChatPanel> with SingleTickerProviderStateMix
   /// 从当前会话加载消息（工作模式）
   void _loadConversationMessages() {
     if (_conversationManager == null || _currentConversationId == null) return;
-    
+
     final conversation = _conversationManager!.conversations
         .firstWhere((c) => c.id == _currentConversationId);
-    
+
     setState(() {
       _messages.clear();
       _messages.addAll(conversation.messages.map((m) => _ChatMessage(
@@ -1426,9 +1392,19 @@ class _ChatPanelState extends State<ChatPanel> with SingleTickerProviderStateMix
         skillResult: m.skillResult,
         isError: m.isError,
         attachments: m.attachments,
+        apiMessages: m.apiMessages,
       )));
+
+      // 如果没有历史消息，添加欢迎消息
+      if (_messages.isEmpty) {
+        _messages.add(_ChatMessage(
+          content: '嘎~ 鹅宝来啦！你想聊什么呀？双击鹅宝或者直接打字都可以哦~ 🦢',
+          isUser: false,
+          timestamp: DateTime.now(),
+        ));
+      }
     });
-    
+
     // 切换会话时立即跳到底部
     _scrollToBottom(jump: true);
     Future.delayed(const Duration(milliseconds: 50), () {
@@ -1919,4 +1895,60 @@ class _ConversationItem extends StatelessWidget {
     );
   }
 }
+
+/// 头部按钮组件（带图标和文字标签）
+class _HeaderButton extends StatelessWidget {
+  final Widget icon;
+  final String label;
+  final VoidCallback? onPressed;
+  final String? tooltip;
+  final bool isActive;
+
+  const _HeaderButton({
+    required this.icon,
+    required this.label,
+    this.onPressed,
+    this.tooltip,
+    this.isActive = false,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final button = InkWell(
+      onTap: onPressed,
+      borderRadius: BorderRadius.circular(8),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+        decoration: isActive
+            ? BoxDecoration(
+                color: Colors.black.withOpacity(0.05),
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: Colors.black.withOpacity(0.1)),
+              )
+            : null,
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            icon,
+            const SizedBox(width: 4),
+            Text(
+              label,
+              style: TextStyle(
+                fontSize: 12,
+                color: isActive ? Colors.black87 : Colors.grey,
+                fontWeight: isActive ? FontWeight.w600 : FontWeight.w500,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+
+    if (tooltip != null) {
+      return Tooltip(message: tooltip!, child: button);
+    }
+    return button;
+  }
+}
+
 

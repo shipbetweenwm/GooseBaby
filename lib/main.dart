@@ -48,9 +48,22 @@ void main() async {
     try {
       await windowManager.ensureInitialized();
 
-      const windowOptions = WindowOptions(
-        size: Size(600, 450),
-        minimumSize: Size(180, 250),
+      // 先获取屏幕尺寸，用于计算窗口初始大小
+      // 初始窗口大小 = 宠物区域大小（400x450）
+      const Size windowSize = Size(400, 450);
+      const Size minSize = Size(180, 250);
+
+      try {
+        final primaryScreen = await screenRetriever.getPrimaryDisplay();
+        final screenSize = primaryScreen.size;
+        debugPrint('🦢 屏幕尺寸: ${screenSize.width} x ${screenSize.height}');
+      } catch (e) {
+        debugPrint('🦢 获取屏幕尺寸失败，使用默认值: $e');
+      }
+
+      final windowOptions = WindowOptions(
+        size: windowSize,
+        minimumSize: minSize,
         center: false,
         backgroundColor: Colors.transparent,
         skipTaskbar: true,
@@ -63,22 +76,19 @@ void main() async {
         await windowManager.setHasShadow(false);
         await windowManager.setAlwaysOnTop(true);
 
-        // 计算屏幕右下角位置（留出任务栏空间）
-        const petWidth = 600.0;
-        const petHeight = 450.0;
+        // 计算窗口位置：右下角固定
         Offset startPos = const Offset(900, 400); // 回退默认值
         try {
           // 使用 screen_retriever 获取主屏幕尺寸
           final primaryScreen = await screenRetriever.getPrimaryDisplay();
           final screenSize = primaryScreen.size;
-          debugPrint('🦢 屏幕尺寸: ${screenSize.width} x ${screenSize.height}');
 
           // 防御：如果获取到的屏幕尺寸不合理（太小或为零），使用回退值
-          if (screenSize.width > petWidth && screenSize.height > petHeight) {
-            // 右下角：距右边缘 20px，距底部 80px（留出任务栏）
+          if (screenSize.width > windowSize.width && screenSize.height > windowSize.height) {
+            // 右下角：窗口右下角固定在屏幕右下角附近（距右边缘 20px，距底部 80px）
             startPos = Offset(
-              screenSize.width - petWidth - 20,
-              screenSize.height - petHeight - 80,
+              screenSize.width - windowSize.width - 20,
+              screenSize.height - windowSize.height - 80,
             );
           } else {
             debugPrint('🦢 屏幕尺寸异常(${screenSize.width}x${screenSize.height})，使用默认位置');
@@ -92,7 +102,7 @@ void main() async {
           startPos.dx.clamp(0, double.infinity),
           startPos.dy.clamp(0, double.infinity),
         );
-        debugPrint('🦢 窗口初始位置: (${startPos.dx}, ${startPos.dy})');
+        debugPrint('🦢 窗口初始位置: (${startPos.dx}, ${startPos.dy})，大小: ${windowSize.width}x${windowSize.height}');
         await windowManager.setPosition(startPos);
 
         await windowManager.setPreventClose(true);

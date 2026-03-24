@@ -3,6 +3,7 @@ import 'package:flutter/foundation.dart';
 import 'package:hive/hive.dart';
 import '../models/models.dart';
 import '../services/weather_service.dart';
+import '../ui/chat/conversation_manager.dart';
 
 /// 宠物日记服务 — 用鹅宝的口吻记录每天和主人的互动
 class DiaryService extends ChangeNotifier {
@@ -19,9 +20,17 @@ class DiaryService extends ChangeNotifier {
 
   // 日记存储
   final List<DiaryEntry> _entries = [];
-  
+
   // 定时器
   Timer? _dailyTimer;
+
+  /// LLM 回调（由外部注入，用于定时生成日记）
+  Future<String> Function(String systemPrompt, String userMessage)? _llmChatCallback;
+
+  /// 设置 LLM 回调
+  void setLlmCallback(Future<String> Function(String systemPrompt, String userMessage)? callback) {
+    _llmChatCallback = callback;
+  }
 
   List<DiaryEntry> get entries => List.unmodifiable(_entries);
   DiaryEntry? get todayEntry => _entries.isNotEmpty ? 
@@ -137,11 +146,13 @@ class DiaryService extends ChangeNotifier {
   /// 生成每日日记
   /// [petMood] [petHunger] [petEnergy] 宠物当前状态
   /// [llmChatCallback] LLM 调用回调（由外部提供，避免直接依赖 LLMManager）
+  /// [todayConversationsCallback] 获取当天所有会话内容的回调（可选，默认自动获取）
   Future<void> _generateDailyDiary({
     double petMood = 80,
     double petHunger = 70,
     double petEnergy = 90,
     Future<String> Function(String systemPrompt, String userMessage)? llmChatCallback,
+    String Function()? todayConversationsCallback,
   }) async {
     try {
       final now = DateTime.now();
@@ -151,6 +162,14 @@ class DiaryService extends ChangeNotifier {
 
       // 获取天气信息
       final weather = await WeatherService.instance.getWeather();
+      
+      // 获取今日所有会话内容（优先使用回调，否则自动获取）
+      String? todayConversations;
+      if (todayConversationsCallback != null) {
+        todayConversations = todayConversationsCallback();
+      } else {
+        todayConversations = await ConversationManager.getTodayConversationsSummary();
+      }
       
       // 构建日记生成 prompt
       final diaryPrompt = _buildDiaryPrompt(
@@ -164,12 +183,14 @@ class DiaryService extends ChangeNotifier {
         petMood: petMood,
         petHunger: petHunger,
         petEnergy: petEnergy,
+        todayConversations: todayConversations,
       );
 
-      // 调用 LLM 生成日记内容（如果没有提供回调，使用默认内容）
+      // 调用 LLM 生成日记内容（优先使用传入的回调，其次使用存储的回调，最后使用模板）
       String content;
-      if (llmChatCallback != null) {
-        content = await llmChatCallback(diaryPrompt, '请为今天写一篇日记');
+      final effectiveCallback = llmChatCallback ?? _llmChatCallback;
+      if (effectiveCallback != null) {
+        content = await effectiveCallback(diaryPrompt, '请为今天写一篇日记');
       } else {
         // 无 LLM 时使用模板生成
         content = _generateTemplateDiary(now, avgHappiness);
@@ -221,6 +242,7 @@ class DiaryService extends ChangeNotifier {
     required double petMood,
     required double petHunger,
     required double petEnergy,
+    String? todayConversations,
   }) {
     final buffer = StringBuffer();
     
@@ -239,6 +261,13 @@ class DiaryService extends ChangeNotifier {
     buffer.writeln('心情: ${petMood.toStringAsFixed(0)}/100');
     buffer.writeln('饱食度: ${petHunger.toStringAsFixed(0)}/100');
     buffer.writeln('精力: ${petEnergy.toStringAsFixed(0)}/100');
+    
+    // 今日对话摘要（如果有）
+    if (todayConversations != null && todayConversations.isNotEmpty) {
+      buffer.writeln('');
+      buffer.writeln('【今日对话摘要】');
+      buffer.writeln(todayConversations);
+    }
     
     if (highlights.isNotEmpty) {
       buffer.writeln('');
@@ -304,17 +333,20 @@ class DiaryService extends ChangeNotifier {
 
   /// 手动触发生成日记（用于测试或补记）
   /// [llmChatCallback] LLM 调用回调（由外部提供）
+  /// [todayConversationsCallback] 获取当天所有会话内容的回调
   Future<void> generateNow({
     double petMood = 80,
     double petHunger = 70,
     double petEnergy = 90,
     Future<String> Function(String systemPrompt, String userMessage)? llmChatCallback,
+    String Function()? todayConversationsCallback,
   }) async {
     await _generateDailyDiary(
       petMood: petMood,
       petHunger: petHunger,
       petEnergy: petEnergy,
       llmChatCallback: llmChatCallback,
+      todayConversationsCallback: todayConversationsCallback,
     );
   }
 
@@ -339,9 +371,11 @@ class DiaryService extends ChangeNotifier {
   /// 重新生成指定日记的内容
   /// [entryId] 要重新生成的日记ID
   /// [llmChatCallback] LLM 调用回调
+  /// [todayConversationsCallback] 获取当天所有会话内容的回调（仅当重新生成今天的日记时使用）
   Future<bool> regenerateEntry(
     String entryId, {
     Future<String> Function(String systemPrompt, String userMessage)? llmChatCallback,
+    String Function()? todayConversationsCallback,
   }) async {
     try {
       final index = _entries.indexWhere((e) => e.id == entryId);
@@ -355,6 +389,15 @@ class DiaryService extends ChangeNotifier {
       // 获取天气信息
       final weather = await WeatherService.instance.getWeather();
 
+      // 检查是否是今天的日记，如果是则获取今日会话内容
+      final now = DateTime.now();
+      final isToday = oldEntry.date.year == now.year && 
+                      oldEntry.date.month == now.month && 
+                      oldEntry.date.day == now.day;
+      final todayConversations = (isToday && todayConversationsCallback != null) 
+          ? todayConversationsCallback() 
+          : null;
+
       // 构建日记生成 prompt
       final diaryPrompt = _buildDiaryPrompt(
         date: oldEntry.date,
@@ -367,6 +410,7 @@ class DiaryService extends ChangeNotifier {
         petMood: 80,
         petHunger: 70,
         petEnergy: 90,
+        todayConversations: todayConversations,
       );
 
       // 调用 LLM 生成新内容

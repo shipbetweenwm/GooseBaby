@@ -10,6 +10,7 @@ import '../../ai/prompts.dart';
 import '../../models/models.dart';
 import '../../services/weather_service.dart';
 import '../../services/smart_care_context.dart';
+import '../../services/diary_service.dart';
 import '../../skills/skill_manager.dart';
 import '../../skills/scheduled_task.dart';
 import '../../utils/storage.dart';
@@ -49,6 +50,12 @@ class _PetWindowState extends State<PetWindow> with TickerProviderStateMixin, Wi
   /// 鼠标是否悬浮在宠物区域上（用于控制名字和进度条显示）
   bool _isHovering = false;
 
+  /// 鼠标是否悬浮在菜单上
+  bool _isMenuHovering = false;
+
+  /// 菜单延迟隐藏定时器
+  Timer? _menuHideTimer;
+
   /// 宠物说话气泡
   String? _bubbleText;
   Timer? _bubbleTimer;
@@ -74,11 +81,11 @@ class _PetWindowState extends State<PetWindow> with TickerProviderStateMixin, Wi
     final w = screenW * 0.382 - _petWindowWidth + 500;
     return w.clamp(380.0, 600.0);
   }
-  /// 设置面板宽度（比商店面板稍大，最小 420，最大 680）
+  /// 设置面板宽度（稍大以容纳更多内容，最小 480，最大 780）
   double get _settingsPanelWidth {
     final screenW = _screenSize.width;
-    final w = screenW * 0.42 - _petWindowWidth + 550;
-    return w.clamp(420.0, 680.0);
+    final w = screenW * 0.45 - _petWindowWidth + 600;
+    return w.clamp(480.0, 780.0);
   }
   /// 日记面板宽度（比商店面板更大，最小 500，最大 750）
   double get _diaryPanelWidth {
@@ -86,8 +93,8 @@ class _PetWindowState extends State<PetWindow> with TickerProviderStateMixin, Wi
     final w = screenW * 0.45 - _petWindowWidth + 600;
     return w.clamp(500.0, 750.0);
   }
-  /// 宠物区域原始窗口宽度
-  static const double _petWindowWidth = 600;
+  /// 宠物区域原始窗口宽度（减小以拉近与对话框的距离）
+  static const double _petWindowWidth = 400;
   /// 宠物区域原始窗口高度
   static const double _petWindowHeight = 450;
   /// 面板窗口高度（屏幕高度 * 0.618，最小 550，最大 900）
@@ -97,14 +104,19 @@ class _PetWindowState extends State<PetWindow> with TickerProviderStateMixin, Wi
     return h.clamp(550.0, 900.0);
   }
 
+
   /// 缓存的屏幕尺寸
   Size _screenSize = const Size(1920, 1080); // 默认回退值
 
   /// 当前左侧面板扩展的宽度（用于窗口调整）
   double _currentExpandWidth = 0;
 
-  /// 聊天模式：false=休闲模式(360px)，true=工作模式(600px)
-  bool _chatWorkMode = false;
+  /// 初始窗口高度（不带面板时的高度，通常是屏幕高度的 0.618）
+  double _initialWindowHeight = 450;
+
+  /// 聊天模式：false=休闲模式，true=工作模式
+  /// 默认工作模式，提供更专业的AI助手体验
+  bool _chatWorkMode = true;
 
   // 功能栏滑入/滑出动画
   late AnimationController _menuAnimController;
@@ -158,10 +170,31 @@ class _PetWindowState extends State<PetWindow> with TickerProviderStateMixin, Wi
     );
 
     // 设置引擎回调
-    WidgetsBinding.instance.addPostFrameCallback((_) {
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
       // 获取屏幕尺寸用于面板自适应
       final mediaQuery = MediaQuery.of(context);
       _screenSize = mediaQuery.size;
+
+      // 获取初始窗口高度（用于关闭面板时恢复）
+      try {
+        final size = await windowManager.getSize();
+        _initialWindowHeight = size.height;
+        _currentPanelHeight = size.height;
+      } catch (_) {}
+
+      // 设置日记服务的 LLM 回调（用于定时生成日记）
+      try {
+        final llmManager = context.read<LLMManager>();
+        DiaryService.instance.setLlmCallback((systemPrompt, userMessage) async {
+          final messages = [
+            {'role': 'system', 'content': systemPrompt},
+            {'role': 'user', 'content': userMessage},
+          ];
+          return await llmManager.chatRaw(messages);
+        });
+      } catch (e) {
+        debugPrint('🦢 设置日记 LLM 回调失败: $e');
+      }
 
       final engine = context.read<PetEngine>();
 
@@ -179,10 +212,10 @@ class _PetWindowState extends State<PetWindow> with TickerProviderStateMixin, Wi
         }
       };
 
-      // 主动情绪表达回调 → 显示气泡
-      engine.onEmotionalBehavior = (message, emotionType) {
+      // 主动情绪表达回调 → LLM 生成个性化内容
+      engine.onEmotionalBehavior = (emotionType, sceneHint) {
         if (mounted) {
-          _showBubble(message);
+          _generateEmotionalBubble(emotionType, sceneHint);
         }
       };
 
@@ -248,6 +281,7 @@ class _PetWindowState extends State<PetWindow> with TickerProviderStateMixin, Wi
     _hoverAnimController.dispose();
     _bubbleAnimController.dispose();
     _bubbleTimer?.cancel();
+    _menuHideTimer?.cancel();
     super.dispose();
   }
 
@@ -370,6 +404,90 @@ class _PetWindowState extends State<PetWindow> with TickerProviderStateMixin, Wi
       if (mounted) {
         final fallbacks = GoosePrompts.healthReminderPrompts;
         _showBubble(fallbacks[DateTime.now().second % fallbacks.length]);
+      }
+    }
+  }
+
+  /// 鹅宝情绪表达 → LLM 生成个性化气泡内容
+  /// [emotionType] 情绪类型：happy/sad/upset/seekAttention/hungry
+  /// [sceneHint] 场景提示：描述当前情绪产生的原因
+  Future<void> _generateEmotionalBubble(String emotionType, String sceneHint) async {
+    if (!mounted) return;
+    try {
+      final engine = context.read<PetEngine>();
+      final llmManager = context.read<LLMManager>();
+      final memoryManager = context.read<MemoryManager>();
+
+      if (llmManager.isProcessing) return;
+
+      final stateContext = GoosePrompts.getStateContext(
+        mood: engine.happiness,
+        hunger: engine.hunger,
+        energy: engine.energy,
+        level: engine.state.level,
+        companionDays: engine.state.companionDays,
+        companionRhythm: engine.getCompanionRhythm(),
+      );
+
+      final memoryContext = memoryManager.getMemoryContext('情绪表达');
+
+      // 构建情绪类型到语气描述的映射
+      String toneGuide;
+      switch (emotionType) {
+        case 'happy':
+          toneGuide = '开心、活泼、撒娇，表达喜悦';
+          break;
+        case 'sad':
+        case 'upset':
+          toneGuide = '有点委屈、低落，但不失可爱';
+          break;
+        case 'seekAttention':
+          toneGuide = '撒娇、求关注、卖萌';
+          break;
+        case 'hungry':
+          toneGuide = '撒娇、可怜巴巴、求投喂';
+          break;
+        default:
+          toneGuide = '自然、可爱';
+      }
+
+      final emotionContext = GoosePrompts.careMessageSystemPrompt(
+        stateContext: stateContext,
+        memoryContext: memoryContext,
+        careType: '情绪表达：$sceneHint（语气：$toneGuide）',
+        emotionalContext: memoryManager.getEmotionalContext(),
+      );
+
+      final messages = [
+        ChatMessage(
+          id: DateTime.now().millisecondsSinceEpoch.toString(),
+          role: 'user',
+          content: '请用鹅宝的口吻，根据当前情绪说一句话（25字以内），不要用引号',
+          timestamp: DateTime.now(),
+        ),
+      ];
+
+      final response = await llmManager.chat(
+        chatHistory: messages,
+        memoryContext: emotionContext,
+      );
+
+      if (mounted && response.text.isNotEmpty) {
+        final displayText = response.text.split('\n').first.trim();
+        _showBubble(displayText);
+      }
+    } catch (e) {
+      debugPrint('🦢 生成情绪表达失败: $e');
+      // 失败时使用简单回退
+      if (mounted) {
+        final fallbacks = {
+          'happy': '嘿嘿~ 鹅宝好开心呀！✨',
+          'sad': '呜...鹅宝有点难过...',
+          'upset': '鹅宝不开心了哼~',
+          'seekAttention': '主人~ 看看鹅宝嘛 🥺',
+          'hungry': '主人...鹅宝肚子饿饿...',
+        };
+        _showBubble(fallbacks[emotionType] ?? '嘎~');
       }
     }
   }
@@ -662,8 +780,8 @@ class _PetWindowState extends State<PetWindow> with TickerProviderStateMixin, Wi
                 width: _petWindowWidth,
                 child: Center(
                   child: MouseRegion(
-                    onEnter: (_) => _onHoverEnter(),
-                    onExit: (_) => _onHoverExit(),
+                    onEnter: (_) => _onMenuHoverEnter(),
+                    onExit: (_) => _onMenuHoverExit(),
                     child: AnimatedBuilder(
                       animation: _hoverFadeAnimation,
                       builder: (context, child) {
@@ -809,6 +927,69 @@ class _PetWindowState extends State<PetWindow> with TickerProviderStateMixin, Wi
                 ),
               ),
             ),
+            // 上边缘拖拽
+            Positioned(
+              left: 8,
+              top: 0,
+              right: 8,
+              child: GestureDetector(
+                onPanStart: (_) => windowManager.startResizing(ResizeEdge.top),
+                child: MouseRegion(
+                  cursor: SystemMouseCursors.resizeUpDown,
+                  child: Container(height: 5, color: Colors.transparent),
+                ),
+              ),
+            ),
+            // 下边缘拖拽
+            Positioned(
+              left: 8,
+              bottom: 0,
+              right: 8,
+              child: GestureDetector(
+                onPanStart: (_) => windowManager.startResizing(ResizeEdge.bottom),
+                child: MouseRegion(
+                  cursor: SystemMouseCursors.resizeUpDown,
+                  child: Container(height: 5, color: Colors.transparent),
+                ),
+              ),
+            ),
+            // 右边缘拖拽（在宠物区域左侧）
+            Positioned(
+              right: _petWindowWidth,
+              top: 8,
+              bottom: 8,
+              child: GestureDetector(
+                onPanStart: (_) => windowManager.startResizing(ResizeEdge.right),
+                child: MouseRegion(
+                  cursor: SystemMouseCursors.resizeLeftRight,
+                  child: Container(width: 5, color: Colors.transparent),
+                ),
+              ),
+            ),
+            // 右上角拖拽
+            Positioned(
+              right: _petWindowWidth,
+              top: 0,
+              child: GestureDetector(
+                onPanStart: (_) => windowManager.startResizing(ResizeEdge.topRight),
+                child: MouseRegion(
+                  cursor: SystemMouseCursors.resizeUpRightDownLeft,
+                  child: Container(width: 10, height: 10, color: Colors.transparent),
+                ),
+              ),
+            ),
+            // 右下角拖拽
+            Positioned(
+              right: _petWindowWidth,
+              bottom: 0,
+              child: GestureDetector(
+                onPanStart: (_) => windowManager.startResizing(ResizeEdge.bottomRight),
+                child: MouseRegion(
+                  cursor: SystemMouseCursors.resizeUpLeftDownRight,
+                  child: Container(width: 10, height: 10, color: Colors.transparent),
+                ),
+              ),
+            ),
           ],
 
           // 烟花庆祝动画（覆盖在最上层）
@@ -845,10 +1026,45 @@ class _PetWindowState extends State<PetWindow> with TickerProviderStateMixin, Wi
       _isHovering = false;
       // 注意：不在这里调用 engine.onMouseLeave()
       // 动画恢复由 PetCanvas 的 _onMouseExit 和控制器状态机自动处理
-      // 如果菜单没打开，才隐藏
+      // 如果菜单没打开，才隐藏状态条
       if (!_showMenu) {
         _hoverAnimController.reverse();
       }
+      // 如果菜单打开了但鼠标移出，延迟 2 秒隐藏菜单
+      if (_showMenu && !_isMenuHovering) {
+        _scheduleMenuHide();
+      }
+    }
+  }
+
+  /// 延迟隐藏菜单（2秒后执行，可被取消）
+  void _scheduleMenuHide() {
+    _menuHideTimer?.cancel();
+    _menuHideTimer = Timer(const Duration(seconds: 2), () {
+      if (mounted && _showMenu && !_isHovering && !_isMenuHovering) {
+        _hideMenu();
+      }
+    });
+  }
+
+  /// 取消延迟隐藏菜单
+  void _cancelMenuHide() {
+    _menuHideTimer?.cancel();
+    _menuHideTimer = null;
+  }
+
+  /// 鼠标进入菜单区域
+  void _onMenuHoverEnter() {
+    _isMenuHovering = true;
+    _cancelMenuHide();
+  }
+
+  /// 鼠标离开菜单区域
+  void _onMenuHoverExit() {
+    _isMenuHovering = false;
+    // 如果鼠标也不在宠物上，延迟隐藏菜单
+    if (!_isHovering && _showMenu) {
+      _scheduleMenuHide();
     }
   }
 
@@ -869,12 +1085,15 @@ class _PetWindowState extends State<PetWindow> with TickerProviderStateMixin, Wi
   Future<void> _expandWindow(double panelWidth) async {
     try {
       final pos = await windowManager.getPosition();
+      final size = await windowManager.getSize();
       final panelHeight = _currentPanelHeight;
-      // 调整y位置：因为窗口高度变化，宠物在底部对齐
-      final heightDiff = panelHeight - _petWindowHeight;
-      // 先设置位置和尺寸，再更新内部状态，减少视觉跳动
+      // 保持窗口右下角位置不变
+      // 向左扩展：增加窗口宽度，位置向左移动
+      // 高度变化：保持底部位置不变
+      final heightDiff = panelHeight - size.height;
       final newPos = Offset(pos.dx - panelWidth, pos.dy - heightDiff);
-      final newSize = Size(_petWindowWidth + panelWidth, panelHeight);
+      final newSize = Size(size.width + panelWidth, panelHeight);
+      debugPrint('🦢 窗口扩展: 从 ${size.width.toStringAsFixed(0)}x${size.height.toStringAsFixed(0)} 到 ${newSize.width.toStringAsFixed(0)}x${newSize.height.toStringAsFixed(0)}');
       await Future.wait([
         windowManager.setPosition(newPos),
         windowManager.setSize(newSize),
@@ -930,18 +1149,21 @@ class _PetWindowState extends State<PetWindow> with TickerProviderStateMixin, Wi
     if (_currentExpandWidth <= 0) return;
     try {
       final pos = await windowManager.getPosition();
+      final size = await windowManager.getSize();
       final shrink = _currentExpandWidth;
-      final panelHeight = _currentPanelHeight;
-      _currentExpandWidth = 0;
-      // 调整y位置：因为窗口高度变化，宠物在底部对齐
-      final heightDiff = panelHeight - _petWindowHeight;
-      // 先设置位置和尺寸，减少视觉跳动
+      // 保持窗口右下角位置不变
+      // 收缩时：向右移动位置，减少窗口宽度
+      // 高度恢复到初始高度，保持底部位置不变
+      final heightDiff = size.height - _initialWindowHeight;
       final newPos = Offset(pos.dx + shrink, pos.dy + heightDiff);
-      const newSize = Size(_petWindowWidth, _petWindowHeight);
+      final newSize = Size(size.width - shrink, _initialWindowHeight);
+      debugPrint('🦢 窗口收缩: 从 ${size.width.toStringAsFixed(0)}x${size.height.toStringAsFixed(0)} 到 ${newSize.width.toStringAsFixed(0)}x${newSize.height.toStringAsFixed(0)}');
       await Future.wait([
         windowManager.setPosition(newPos),
         windowManager.setSize(newSize),
       ]);
+      // 操作成功后再更新状态
+      _currentExpandWidth = 0;
     } catch (e) {
       debugPrint('🦢 窗口缩小失败: $e');
     }
@@ -1032,9 +1254,16 @@ class _PetWindowState extends State<PetWindow> with TickerProviderStateMixin, Wi
                     : _shopPanelWidth;
         // 优先使用用户记住的宽度（仅对聊天面板生效）
         final savedWidth = panel == 'chat' ? _loadPanelWidth(defaultWidth) : defaultWidth;
-        // 加载保存的面板高度（仅聊天面板）
+        // 面板高度：优先使用保存的高度，否则使用当前窗口高度（第一次打开时保持高度不变）
         if (panel == 'chat') {
-          _currentPanelHeight = _loadPanelHeight(_panelWindowHeight);
+          final savedHeight = _loadPanelHeight(0);
+          if (savedHeight > 0) {
+            _currentPanelHeight = savedHeight;
+          } else {
+            // 第一次打开：保持当前窗口高度不变
+            final currentSize = await windowManager.getSize();
+            _currentPanelHeight = currentSize.height;
+          }
         } else {
           _currentPanelHeight = _panelWindowHeight;
         }
@@ -1106,11 +1335,12 @@ class _PetWindowState extends State<PetWindow> with TickerProviderStateMixin, Wi
   }
 
   void _hideMenu() {
+    _cancelMenuHide();
     _menuAnimController.reverse().then((_) {
       if (mounted) {
         setState(() => _showMenu = false);
         // 如果鼠标不在上面了，隐藏状态条
-        if (!_isHovering) {
+        if (!_isHovering && !_isMenuHovering) {
           _hoverAnimController.reverse();
         }
       }

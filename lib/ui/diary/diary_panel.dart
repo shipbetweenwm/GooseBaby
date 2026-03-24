@@ -3,6 +3,7 @@ import 'package:provider/provider.dart';
 import '../../models/models.dart';
 import '../../services/diary_service.dart';
 import '../../ai/llm_manager.dart';
+import '../chat/conversation_manager.dart';
 
 /// 宠物日记面板
 class DiaryPanel extends StatefulWidget {
@@ -129,8 +130,11 @@ class _DiaryPanelState extends State<DiaryPanel> {
           IconButton(
             icon: const Icon(Icons.edit_note, size: 20, color: Color(0xFF8D6E63)),
             onPressed: () async {
-              // 生成模板日记（无需 LLM）
-              await DiaryService.instance.generateNow();
+              // 获取今日会话内容并生成日记
+              final conversations = await ConversationManager.getTodayConversationsSummary();
+              await DiaryService.instance.generateNow(
+                todayConversationsCallback: () => conversations,
+              );
               if (mounted) {
                 ScaffoldMessenger.of(context).showSnackBar(
                   const SnackBar(content: Text('日记已生成~'), duration: Duration(seconds: 2)),
@@ -525,6 +529,9 @@ class _DiaryPanelState extends State<DiaryPanel> {
     try {
       final llmManager = context.read<LLMManager>();
       
+      // 获取今日会话内容（仅当重新生成今天的日记时使用）
+      final conversations = await ConversationManager.getTodayConversationsSummary();
+      
       final success = await DiaryService.instance.regenerateEntry(
         entry.id,
         llmChatCallback: (systemPrompt, userMessage) async {
@@ -534,6 +541,7 @@ class _DiaryPanelState extends State<DiaryPanel> {
           ];
           return await llmManager.chatRaw(messages);
         },
+        todayConversationsCallback: () => conversations,
       );
 
       if (mounted) {
