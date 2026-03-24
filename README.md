@@ -109,6 +109,10 @@
 
 ### 智能体技能系统 🔧
 
+<div align="center">
+<img src="assets/images/agent.png" width="500" alt="智能体技能">
+</div>
+
 鹅宝不只是会卖萌，还能成为你的**效率助手**！
 
 #### 📦 内置能力
