@@ -6,6 +6,8 @@
 
 一个有长期记忆、有情绪、还会帮你干活的桌面萌宠 🕊️
 
+![鹅宝动画](assets/images/animation.gif)
+
 </div>
 
 ---
