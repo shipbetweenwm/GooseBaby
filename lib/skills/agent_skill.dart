@@ -248,24 +248,25 @@ class AgentSkill extends GooseSkill {
   ///   - "scripts/fetch.js arg1" → "绝对路径/scripts/fetch.js arg1"
   ///   - "python scripts/process.py" → "python 绝对路径/scripts/process.py"
   ///   - "./scripts/helper.sh" → "绝对路径/scripts/helper.sh"
+  /// 会自动处理 ZIP 包内多层目录的情况
   String _resolveScriptPaths(String command) {
     if (sourcePath == null) return command;
 
     String resolved = command;
-    final sep = Platform.isWindows ? '\\' : '/';
 
     // 模式 1：命令以 "scripts/" 或 "./scripts/" 开头
     if (resolved.startsWith('scripts/') || resolved.startsWith('./scripts/')) {
       final clean = resolved.startsWith('./') ? resolved.substring(2) : resolved;
-      resolved = '$sourcePath$sep$clean';
+      final scriptPath = _findActualScriptPath(clean);
+      resolved = scriptPath;
     }
     // 模式 2：命令中包含 " scripts/" 参数（如 "python scripts/xxx.py arg1"）
     else if (resolved.contains(' scripts/')) {
-      resolved = resolved.replaceAll(' scripts/', ' $sourcePath${sep}scripts/');
+      resolved = _replaceScriptPath(resolved, ' scripts/');
     }
     // 模式 3：命令中包含 " ./scripts/"
     else if (resolved.contains(' ./scripts/')) {
-      resolved = resolved.replaceAll(' ./scripts/', ' $sourcePath${sep}scripts/');
+      resolved = _replaceScriptPath(resolved, ' ./scripts/');
     }
 
     // 统一路径分隔符（Windows 下将 / 替换为 \）
@@ -274,6 +275,51 @@ class AgentSkill extends GooseSkill {
     }
 
     return resolved;
+  }
+
+  /// 查找脚本的实际路径（处理 ZIP 包多层目录问题）
+  String _findActualScriptPath(String scriptRelPath) {
+    final sep = Platform.isWindows ? '\\' : '/';
+    
+    // 1. 直接拼接 sourcePath
+    final directPath = '$sourcePath$sep$scriptRelPath';
+    if (File(directPath).existsSync()) {
+      return directPath;
+    }
+    
+    // 2. 在父目录中查找（处理 ZIP 包一层包裹的情况）
+    final parentDir = Directory(sourcePath!).parent;
+    try {
+      for (final entity in parentDir.listSync()) {
+        if (entity is Directory) {
+          final candidatePath = '${entity.path}$sep$scriptRelPath';
+          if (File(candidatePath).existsSync()) {
+            debugPrint('🤖 脚本路径修正: $directPath → $candidatePath');
+            return candidatePath;
+          }
+        }
+      }
+    } catch (_) {}
+    
+    // 3. 都找不到，返回原始路径（后续会报文件不存在错误）
+    return directPath;
+  }
+
+  /// 替换命令中的脚本路径
+  String _replaceScriptPath(String command, String pattern) {
+    final idx = command.indexOf(pattern);
+    if (idx < 0) return command;
+    
+    // 提取 scripts/xxx 部分
+    final afterPattern = command.substring(idx + pattern.length);
+    final spaceIdx = afterPattern.indexOf(' ');
+    final scriptPart = spaceIdx > 0 ? afterPattern.substring(0, spaceIdx) : afterPattern;
+    final restPart = spaceIdx > 0 ? afterPattern.substring(spaceIdx) : '';
+    
+    final scriptRelPath = 'scripts/$scriptPart';
+    final actualPath = _findActualScriptPath(scriptRelPath);
+    
+    return command.substring(0, idx) + ' ' + actualPath + restPart;
   }
 
   /// 检查命令是否引用了 scripts/ 下的本地脚本
@@ -286,6 +332,7 @@ class AgentSkill extends GooseSkill {
   }
 
   /// 从命令中提取脚本的绝对路径（用于存在性校验）
+  /// 会自动处理 ZIP 包内多层目录的情况
   String? _extractScriptPath(String command) {
     if (sourcePath == null) return null;
     final sep = Platform.isWindows ? '\\' : '/';
@@ -297,9 +344,55 @@ class AgentSkill extends GooseSkill {
       final relPath = 'scripts/${match.group(1)!}';
       // 只取脚本文件名部分（去掉后续参数）
       final parts = relPath.split(' ');
-      return '$sourcePath$sep${parts[0]}';
+      final scriptRelPath = parts[0];
+      
+      // 尝试多种可能的路径
+      final candidatePaths = <String>[
+        // 1. 直接拼接 sourcePath
+        '$sourcePath$sep$scriptRelPath',
+        // 2. sourcePath 可能已经是子目录，尝试向上查找
+        ..._findScriptInParentDirs(sourcePath!, scriptRelPath),
+      ];
+      
+      for (final path in candidatePaths) {
+        if (File(path).existsSync()) {
+          return path;
+        }
+      }
+      
+      // 都不存在，返回默认路径（后续会报文件不存在错误）
+      return '$sourcePath$sep$scriptRelPath';
     }
     return null;
+  }
+
+  /// 在父目录中查找脚本文件（处理 ZIP 包多层目录问题）
+  List<String> _findScriptInParentDirs(String basePath, String scriptRelPath) {
+    final results = <String>[];
+    final sep = Platform.isWindows ? '\\' : '/';
+    
+    // 向上最多查找 2 层目录
+    String currentPath = basePath;
+    for (int i = 0; i < 2; i++) {
+      final parentDir = Directory(currentPath).parent;
+      if (parentDir.path == currentPath) break; // 已到达根目录
+      
+      // 在父目录的子目录中查找 scripts/
+      try {
+        for (final entity in parentDir.listSync()) {
+          if (entity is Directory) {
+            final candidatePath = '${entity.path}$sep$scriptRelPath';
+            if (File(candidatePath).existsSync()) {
+              results.add(candidatePath);
+            }
+          }
+        }
+      } catch (_) {}
+      
+      currentPath = parentDir.path;
+    }
+    
+    return results;
   }
 
   /// 检查命令是否在允许范围内

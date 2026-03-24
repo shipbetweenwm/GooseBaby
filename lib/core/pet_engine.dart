@@ -3,6 +3,7 @@ import 'dart:math';
 import 'package:flutter/foundation.dart';
 import 'package:hive/hive.dart';
 import '../models/models.dart';
+import '../services/diary_service.dart';
 import 'achievement_manager.dart';
 
 /// 宠物行为引擎
@@ -16,6 +17,16 @@ class PetEngine extends ChangeNotifier {
   Timer? _proactiveTimer; // 主动搭话定时器
   Timer? _healthReminderTimer; // 健康提醒定时器（每小时提醒喝水/上厕所）
   final Random _random = Random();
+
+  // ── 金币系统 ──
+  /// 今日挂机已获得的金币数
+  int _dailyIdleCoins = 0;
+  /// 上次重置挂机金币的日期（用于每日重置）
+  String _lastIdleResetDate = '';
+  /// 每日挂机金币上限
+  static const int _maxDailyIdleCoins = 100;
+  /// 挂机金币间隔（秒）
+  static const int _idleCoinIntervalSeconds = 60;
 
   /// 成就管理器引用（由外部设置，用于触发成就事件）
   AchievementManager? achievementManager;
@@ -245,8 +256,11 @@ class PetEngine extends ChangeNotifier {
       } catch (_) {}
     }
 
-    // 计算离线期间的金币奖励
-    _calculateOfflineCoins(box);
+    // 加载挂机金币状态
+    _loadIdleCoinState();
+
+    // 更新最后在线时间
+    box.put('last_online_time', DateTime.now().toIso8601String());
 
     // 延迟触发里程碑和欢迎检测（等 PetWindow 设置回调后）
     Future.delayed(const Duration(seconds: 2), () {
@@ -255,23 +269,7 @@ class PetEngine extends ChangeNotifier {
     });
   }
 
-  /// 计算离线期间的金币奖励
-  void _calculateOfflineCoins(Box box) {
-    final lastOnline = box.get('last_online_time');
-    if (lastOnline != null) {
-      try {
-        final lastTime = DateTime.parse(lastOnline as String);
-        final offlineMinutes = DateTime.now().difference(lastTime).inMinutes;
-        if (offlineMinutes > 1) {
-          // 离线每分钟 1 金币，上限 500
-          final offlineCoins = offlineMinutes.clamp(0, 500);
-          _state = _state.copyWith(coins: _state.coins + offlineCoins);
-          debugPrint('🦢 离线 $offlineMinutes 分钟，奖励 $offlineCoins 金币');
-        }
-      } catch (_) {}
-    }
-    box.put('last_online_time', DateTime.now().toIso8601String());
-  }
+
 
   /// 保存宠物状态
   void _saveState() {
@@ -297,8 +295,8 @@ class PetEngine extends ChangeNotifier {
       _updatePosition();
     });
 
-    // 金币挂机引擎 - 每30秒+1金币
-    _coinTimer = Timer.periodic(const Duration(seconds: 30), (_) {
+    // 金币挂机引擎 - 每60秒+1金币（每日上限100）
+    _coinTimer = Timer.periodic(const Duration(seconds: _idleCoinIntervalSeconds), (_) {
       _earnCoin();
     });
 
@@ -395,15 +393,70 @@ class PetEngine extends ChangeNotifier {
     });
   }
 
-  /// 挂机赚金币
+  /// 挂机赚金币（每日有上限）
   void _earnCoin() {
-    final bonus = _state.level; // 等级越高，赚得越多
+    // 检查是否需要重置每日挂机金币
+    _checkDailyIdleReset();
+
+    // 如果今日挂机金币已达上限，不再获取
+    if (_dailyIdleCoins >= _maxDailyIdleCoins) {
+      return;
+    }
+
+    // 每次挂机获取 1 金币（与等级无关，增加难度）
+    final bonus = 1;
+    _dailyIdleCoins += bonus;
     _state = _state.copyWith(coins: _state.coins + bonus);
     // 记录成就金币事件
     achievementManager?.recordCoinsEarned(bonus);
     _saveState();
     notifyListeners();
   }
+
+  /// 检查是否需要重置每日挂机金币
+  void _checkDailyIdleReset() {
+    final today = DateTime.now().toIso8601String().substring(0, 10); // YYYY-MM-DD
+    if (_lastIdleResetDate != today) {
+      _dailyIdleCoins = 0;
+      _lastIdleResetDate = today;
+      _saveIdleCoinState();
+    }
+  }
+
+  /// 保存挂机金币状态
+  void _saveIdleCoinState() {
+    final box = Hive.box('pet_state');
+    box.put('daily_idle_coins', _dailyIdleCoins);
+    box.put('last_idle_reset_date', _lastIdleResetDate);
+  }
+
+  /// 加载挂机金币状态
+  void _loadIdleCoinState() {
+    final box = Hive.box('pet_state');
+    _dailyIdleCoins = box.get('daily_idle_coins', defaultValue: 0) as int;
+    _lastIdleResetDate = box.get('last_idle_reset_date', defaultValue: '') as String;
+    _checkDailyIdleReset();
+  }
+
+  /// 对话获取金币（每次对话获得更多金币）
+  void earnChatCoins() {
+    // 对话奖励：5-15 金币随机，等级越高越多
+    final baseCoins = 5;
+    final levelBonus = _state.level;
+    final randomBonus = _random.nextInt(10); // 0-9 随机
+    final totalCoins = baseCoins + (levelBonus ~/ 2) + randomBonus;
+
+    _state = _state.copyWith(coins: _state.coins + totalCoins);
+    achievementManager?.recordCoinsEarned(totalCoins);
+    _saveState();
+    notifyListeners();
+    debugPrint('🦢 对话奖励 $totalCoins 金币（基础$baseCoins + 等级${levelBonus ~/ 2} + 随机$randomBonus）');
+  }
+
+  /// 获取今日挂机金币信息
+  int get dailyIdleCoins => _dailyIdleCoins;
+  int get maxDailyIdleCoins => _maxDailyIdleCoins;
+  int get remainingIdleCoins => (_maxDailyIdleCoins - _dailyIdleCoins).clamp(0, _maxDailyIdleCoins);
 
   /// 商店购买物品
   bool buyItem(ShopItem item) {
@@ -665,6 +718,9 @@ class PetEngine extends ChangeNotifier {
     _saveState();
     notifyListeners();
 
+    // 记录日记互动
+    DiaryService.instance.recordInteraction(type: 'tap');
+
     // 2秒后恢复正常
     Future.delayed(const Duration(seconds: 2), () {
       _updateBehavior();
@@ -689,6 +745,8 @@ class PetEngine extends ChangeNotifier {
     }
     // 记录成就事件
     achievementManager?.recordPat();
+    // 记录日记互动
+    DiaryService.instance.recordInteraction(type: 'pat', happiness: _state.mood);
     _checkLevelUp();
     _saveState();
     notifyListeners();
@@ -736,6 +794,8 @@ class PetEngine extends ChangeNotifier {
     );
     // 记录成就事件
     achievementManager?.recordFeeding();
+    // 记录日记互动
+    DiaryService.instance.recordInteraction(type: 'feed', happiness: _state.mood);
     _checkLevelUp();
     _saveState();
     notifyListeners();
@@ -763,6 +823,8 @@ class PetEngine extends ChangeNotifier {
     );
     // 记录成就事件
     achievementManager?.recordBath();
+    // 记录日记互动
+    DiaryService.instance.recordInteraction(type: 'bath', happiness: _state.mood);
     _checkLevelUp();
     _saveState();
     notifyListeners();

@@ -336,6 +336,79 @@ class DiaryService extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// 重新生成指定日记的内容
+  /// [entryId] 要重新生成的日记ID
+  /// [llmChatCallback] LLM 调用回调
+  Future<bool> regenerateEntry(
+    String entryId, {
+    Future<String> Function(String systemPrompt, String userMessage)? llmChatCallback,
+  }) async {
+    try {
+      final index = _entries.indexWhere((e) => e.id == entryId);
+      if (index < 0) {
+        debugPrint('📔 未找到要重新生成的日记: $entryId');
+        return false;
+      }
+
+      final oldEntry = _entries[index];
+      
+      // 获取天气信息
+      final weather = await WeatherService.instance.getWeather();
+
+      // 构建日记生成 prompt
+      final diaryPrompt = _buildDiaryPrompt(
+        date: oldEntry.date,
+        interactionCount: oldEntry.interactionCount,
+        messageCount: oldEntry.messageCount,
+        highlights: oldEntry.highlights,
+        avgHappiness: oldEntry.avgHappiness ?? 75.0,
+        weather: weather?.brief ?? oldEntry.weather,
+        specialEvent: oldEntry.specialEvent,
+        petMood: 80,
+        petHunger: 70,
+        petEnergy: 90,
+      );
+
+      // 调用 LLM 生成新内容
+      String content;
+      if (llmChatCallback != null) {
+        content = await llmChatCallback(diaryPrompt, '请重新为这一天写一篇日记');
+      } else {
+        content = _generateTemplateDiary(oldEntry.date, oldEntry.avgHappiness ?? 75.0);
+      }
+
+      content = content.trim();
+      if (content.isEmpty) {
+        debugPrint('📔 生成的内容为空');
+        return false;
+      }
+
+      // 创建新日记条目（保持原ID和日期，更新内容）
+      final newEntry = DiaryEntry(
+        id: oldEntry.id,
+        date: oldEntry.date,
+        content: content,
+        mood: oldEntry.mood,
+        interactionCount: oldEntry.interactionCount,
+        messageCount: oldEntry.messageCount,
+        highlights: oldEntry.highlights,
+        avgHappiness: oldEntry.avgHappiness,
+        weather: oldEntry.weather,
+        specialEvent: oldEntry.specialEvent,
+      );
+
+      _entries[index] = newEntry;
+      await _saveEntries();
+      notifyListeners();
+      
+      debugPrint('📔 日记重新生成成功: ${newEntry.formattedDate}');
+      return true;
+    } catch (e) {
+      debugPrint('📔 重新生成日记失败: $e');
+      return false;
+    }
+  }
+
   @override
   void dispose() {
     _dailyTimer?.cancel();

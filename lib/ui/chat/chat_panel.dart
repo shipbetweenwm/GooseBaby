@@ -14,6 +14,7 @@ import '../../core/pet_engine.dart';
 import '../../models/models.dart';
 import '../../skills/skill_manager.dart';
 import '../../skills/skill_file_utils.dart';
+import '../../services/diary_service.dart';
 import '../../utils/storage.dart';
 import 'widgets/rich_message_bubble.dart';
 import 'widgets/enhanced_input_bar.dart';
@@ -511,6 +512,10 @@ class _ChatPanelState extends State<ChatPanel> with SingleTickerProviderStateMix
     // 记录成就事件（对话）
     petEngine.achievementManager?.recordChat();
 
+    // 记录日记统计（用户发送消息 + 互动）
+    DiaryService.instance.recordMessage();
+    DiaryService.instance.recordInteraction(type: 'chat');
+
     // 构建消息内容（如果有文件附件，将文件信息附加到消息中）
     String messageContent = text;
     if (attachments.isNotEmpty) {
@@ -759,6 +764,12 @@ class _ChatPanelState extends State<ChatPanel> with SingleTickerProviderStateMix
         _streamingContent = '';
         _toolCallSteps.clear();
       });
+
+      // 记录日记统计（AI 回复）
+      DiaryService.instance.recordMessage();
+
+      // 对话完成奖励金币
+      petEngine.earnChatCoins();
 
       _saveChatHistory();
 

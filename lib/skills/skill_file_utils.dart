@@ -7,8 +7,12 @@ import 'package:path/path.dart' as p;
 class SkillFileUtils {
   SkillFileUtils._();
 
+  /// 用户自定义的工作目录（通过设置面板配置）
+  /// 如果为 null，则使用默认工作目录（桌面）
+  static String? _customWorkingDir;
+
   /// 当前会话的工作目录（每次对话独立，避免文件名冲突）
-  /// 如果为 null，则回退到 defaultWorkingDir（桌面）
+  /// 如果为 null，则回退到 effectiveBaseWorkingDir
   static String? _sessionWorkingDir;
 
   /// 默认工作目录：用户桌面
@@ -23,10 +27,23 @@ class SkillFileUtils {
     return home;
   }
 
+  /// 获取当前有效的基础工作目录（用户自定义或默认）
+  static String get effectiveBaseWorkingDir =>
+      _customWorkingDir ?? defaultWorkingDir;
+
   /// 获取当前有效的工作目录
-  /// 如果设置了 sessionWorkingDir 则使用它，否则回退到桌面
+  /// 如果设置了 sessionWorkingDir 则使用它，否则回退到 effectiveBaseWorkingDir
   static String get effectiveWorkingDir =>
-      _sessionWorkingDir ?? defaultWorkingDir;
+      _sessionWorkingDir ?? effectiveBaseWorkingDir;
+
+  /// 设置用户自定义工作目录
+  static set customWorkingDir(String? path) {
+    _customWorkingDir = path;
+    debugPrint('📁 自定义工作目录: $path');
+  }
+
+  /// 获取用户自定义工作目录
+  static String? get customWorkingDir => _customWorkingDir;
 
   /// 设置当前会话的工作目录
   /// 在每次发消息前由 chat_panel 调用

@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../../models/models.dart';
 import '../../services/diary_service.dart';
+import '../../ai/llm_manager.dart';
 
 /// 宠物日记面板
 class DiaryPanel extends StatefulWidget {
@@ -17,6 +18,7 @@ class _DiaryPanelState extends State<DiaryPanel> {
   DiaryEntry? _selectedEntry;
   final _searchController = TextEditingController();
   String _searchQuery = '';
+  bool _isRegenerating = false;
   
   @override
   void initState() {
@@ -330,6 +332,24 @@ class _DiaryPanelState extends State<DiaryPanel> {
                   style: const TextStyle(fontSize: 12, color: Colors.grey),
                 ),
               ],
+              const Spacer(),
+              // 重新写按钮
+              if (_isRegenerating)
+                const SizedBox(
+                  width: 20,
+                  height: 20,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                )
+              else
+                TextButton.icon(
+                  onPressed: () => _regenerateEntry(entry),
+                  icon: const Icon(Icons.refresh, size: 16),
+                  label: const Text('重新写', style: TextStyle(fontSize: 12)),
+                  style: TextButton.styleFrom(
+                    foregroundColor: const Color(0xFF8D6E63),
+                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                  ),
+                ),
             ],
           ),
           
@@ -493,6 +513,58 @@ class _DiaryPanelState extends State<DiaryPanel> {
       case 'sad': return '😢';
       case 'excited': return '🤩';
       default: return '😐';
+    }
+  }
+
+  /// 重新生成日记
+  Future<void> _regenerateEntry(DiaryEntry entry) async {
+    if (_isRegenerating) return;
+
+    setState(() => _isRegenerating = true);
+
+    try {
+      final llmManager = context.read<LLMManager>();
+      
+      final success = await DiaryService.instance.regenerateEntry(
+        entry.id,
+        llmChatCallback: (systemPrompt, userMessage) async {
+          final messages = [
+            {'role': 'system', 'content': systemPrompt},
+            {'role': 'user', 'content': userMessage},
+          ];
+          return await llmManager.chatRaw(messages);
+        },
+      );
+
+      if (mounted) {
+        if (success) {
+          // 更新选中的日记（重新获取最新的条目）
+          final newEntry = DiaryService.instance.entries.firstWhere(
+            (e) => e.id == entry.id,
+            orElse: () => entry,
+          );
+          setState(() => _selectedEntry = newEntry);
+          
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('日记已重新生成~'),
+              duration: Duration(seconds: 2),
+            ),
+          );
+        } else {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('生成失败，请稍后重试'),
+              duration: Duration(seconds: 2),
+              backgroundColor: Colors.red,
+            ),
+          );
+        }
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _isRegenerating = false);
+      }
     }
   }
 }

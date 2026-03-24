@@ -338,7 +338,7 @@ class SkillPackManifest {
 class SkillLoader {
 
   /// 从 ZIP 文件加载技能（OpenClaw 标准格式）
-  /// 将 ZIP 解压到临时目录，然后按 Agent Skill 格式加载
+  /// 将 ZIP 解压到固定目录（去掉 .zip 后缀），确保脚本路径持久有效
   static Future<List<GooseSkill>> loadFromZip(String zipPath) async {
     final skills = <GooseSkill>[];
 
@@ -349,38 +349,56 @@ class SkillLoader {
         return skills;
       }
 
-      // 每次解压到唯一临时目录，避免冲突
-      final extractDir = '${zipPath}_extracted';
+      // 解压到固定目录：去掉 .zip 后缀
+      // 例如: skills/baidu-search-1.1.3.zip → skills/baidu-search-1.1.3
+      String extractDir = zipPath;
+      if (extractDir.toLowerCase().endsWith('.zip')) {
+        extractDir = extractDir.substring(0, extractDir.length - 4);
+      }
 
       // 读取 ZIP 文件
       final bytes = await zipFile.readAsBytes();
       final archive = ZipDecoder().decodeBytes(bytes);
 
-      // 清理旧解压目录
       final extractDirectory = Directory(extractDir);
+      
+      // 如果目录已存在且是旧解压内容，检查是否需要更新
+      bool needExtract = true;
       if (await extractDirectory.exists()) {
-        await extractDirectory.delete(recursive: true);
-      }
-      await extractDirectory.create(recursive: true);
-
-      for (final file in archive) {
-        try {
-          final filePath = p.join(extractDir, file.name);
-          if (file.isFile) {
-            final outFile = File(filePath);
-            await outFile.parent.create(recursive: true);
-            // content 是 List<int> 类型
-            final bytes = Uint8List.fromList(file.content);
-            await outFile.writeAsBytes(bytes);
-          } else {
-            await Directory(filePath).create(recursive: true);
-          }
-        } catch (e) {
-          debugPrint('🦢 解压文件失败: ${file.name} - $e');
+        // 检查是否有 SKILL.md 文件（已解压过的标志）
+        final skillMd = File('$extractDir/SKILL.md');
+        if (await skillMd.exists()) {
+          // 已解压过，跳过解压，直接加载
+          needExtract = false;
+          debugPrint('🦢 技能目录已存在，跳过解压: $extractDir');
+        } else {
+          // 目录存在但没有 SKILL.md，可能是旧格式，重新解压
+          await extractDirectory.delete(recursive: true);
         }
       }
 
-      debugPrint('🦢 ZIP 解压完成: $extractDir (${archive.length} 个文件)');
+      if (needExtract) {
+        await extractDirectory.create(recursive: true);
+
+        for (final file in archive) {
+          try {
+            final filePath = p.join(extractDir, file.name);
+            if (file.isFile) {
+              final outFile = File(filePath);
+              await outFile.parent.create(recursive: true);
+              // content 是 List<int> 类型
+              final bytes = Uint8List.fromList(file.content);
+              await outFile.writeAsBytes(bytes);
+            } else {
+              await Directory(filePath).create(recursive: true);
+            }
+          } catch (e) {
+            debugPrint('🦢 解压文件失败: ${file.name} - $e');
+          }
+        }
+
+        debugPrint('🦢 ZIP 解压完成: $extractDir (${archive.length} 个文件)');
+      }
 
       // 从解压目录加载技能
       final skillMd = File('$extractDir/SKILL.md');

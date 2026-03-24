@@ -1,8 +1,10 @@
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:window_manager/window_manager.dart';
 import 'package:hive/hive.dart';
+import 'package:path/path.dart' as p;
 import '../../ai/llm_manager.dart';
 import '../../ai/memory/memory_manager.dart';
 import '../../core/pet_engine.dart';
@@ -11,6 +13,7 @@ import '../../skills/skill_manager.dart';
 import '../../skills/skill_base.dart';
 import '../../skills/agent_skill.dart';
 import '../../skills/script_skill.dart';
+import '../../skills/skill_file_utils.dart';
 import '../../utils/storage.dart';
 import 'scheduled_task_panel.dart';
 
@@ -26,8 +29,23 @@ class SettingsPanel extends StatefulWidget {
 
 class _SettingsPanelState extends State<SettingsPanel> {
   int _selectedTab = 0;
+  String _workingDir = '';
 
   final _tabs = const ['🧠 AI模型', '🎮 技能', '⏰ 定时任务', '🦢 宠物', '📋 关于'];
+
+  @override
+  void initState() {
+    super.initState();
+    _loadWorkingDir();
+  }
+
+  void _loadWorkingDir() {
+    final saved = StorageManager.getSetting<String>('working_directory');
+    if (saved != null && Directory(saved).existsSync()) {
+      _workingDir = saved;
+      SkillFileUtils.customWorkingDir = saved;
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -45,11 +63,82 @@ class _SettingsPanelState extends State<SettingsPanel> {
       child: Column(
         children: [
           _buildTitleBar(),
+          _buildWorkingDirSection(),
           _buildTabBar(),
           Expanded(child: _buildTabContent()),
         ],
       ),
     );
+  }
+
+  /// 工作目录设置区域
+  Widget _buildWorkingDirSection() {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+      decoration: const BoxDecoration(
+        color: Color(0xFFF8F9FA),
+        border: Border(bottom: BorderSide(color: Color(0xFFEEEEEE))),
+      ),
+      child: Row(
+        children: [
+          const Icon(Icons.folder_outlined, size: 18, color: Colors.grey),
+          const SizedBox(width: 8),
+          const Text('工作目录:', style: TextStyle(fontSize: 13, color: Colors.grey)),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              _workingDir.isEmpty ? '默认（桌面）' : p.basename(_workingDir),
+              style: TextStyle(
+                fontSize: 13,
+                color: _workingDir.isEmpty ? Colors.grey : Colors.black87,
+              ),
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+          TextButton(
+            onPressed: _selectWorkingDir,
+            style: TextButton.styleFrom(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+              minimumSize: Size.zero,
+            ),
+            child: const Text('选择', style: TextStyle(fontSize: 12)),
+          ),
+          if (_workingDir.isNotEmpty) ...[
+            const SizedBox(width: 4),
+            TextButton(
+              onPressed: _resetWorkingDir,
+              style: TextButton.styleFrom(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+                minimumSize: Size.zero,
+              ),
+              child: const Text('重置', style: TextStyle(fontSize: 12, color: Colors.grey)),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Future<void> _selectWorkingDir() async {
+    final result = await FilePicker.platform.getDirectoryPath(
+      dialogTitle: '选择工作目录',
+      initialDirectory: _workingDir.isNotEmpty ? _workingDir : null,
+    );
+    if (result != null && mounted) {
+      setState(() {
+        _workingDir = result;
+      });
+      StorageManager.setSetting('working_directory', result);
+      SkillFileUtils.customWorkingDir = result;
+    }
+  }
+
+  void _resetWorkingDir() {
+    setState(() {
+      _workingDir = '';
+    });
+    Hive.box('settings').delete('working_directory');
+    SkillFileUtils.customWorkingDir = null;
   }
 
   Widget _buildTitleBar() {

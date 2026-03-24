@@ -18,7 +18,7 @@ import '../chat/conversation_manager.dart';
 import '../settings/settings_panel.dart';
 import '../shop/shop_panel.dart';
 import '../achievement/achievement_panel.dart';
-import '../games/game_panel.dart';
+
 import '../widgets/tray_manager.dart';
 import '../widgets/firework_celebration.dart';
 import '../diary/diary_panel.dart';
@@ -37,10 +37,8 @@ class _PetWindowState extends State<PetWindow> with TickerProviderStateMixin, Wi
   bool _showSettings = false;
   bool _showMenu = false;
   bool _showShop = false;
-  bool _showSkills = false;
   bool _showPetStats = false;
   bool _showAchievements = false;
-  bool _showGames = false;
   bool _showDiary = false;
 
   /// 烟花庆祝动画状态
@@ -70,11 +68,17 @@ class _PetWindowState extends State<PetWindow> with TickerProviderStateMixin, Wi
     final w = screenW * 0.618;
     return w.clamp(650.0, 1100.0);
   }
-  /// 商店/设置面板宽度（屏幕宽度 * 0.382 - 宠物区域宽度，最小 380，最大 600）
+  /// 商店面板宽度（屏幕宽度 * 0.382 - 宠物区域宽度，最小 380，最大 600）
   double get _shopPanelWidth {
     final screenW = _screenSize.width;
     final w = screenW * 0.382 - _petWindowWidth + 500;
     return w.clamp(380.0, 600.0);
+  }
+  /// 设置面板宽度（比商店面板稍大，最小 420，最大 680）
+  double get _settingsPanelWidth {
+    final screenW = _screenSize.width;
+    final w = screenW * 0.42 - _petWindowWidth + 550;
+    return w.clamp(420.0, 680.0);
   }
   /// 日记面板宽度（比商店面板更大，最小 500，最大 750）
   double get _diaryPanelWidth {
@@ -730,19 +734,6 @@ class _PetWindowState extends State<PetWindow> with TickerProviderStateMixin, Wi
               ),
             ),
 
-          // 技能面板（在左侧展开，不覆盖宠物）
-          if (_showSkills)
-            Positioned(
-              left: 0,
-              top: 0,
-              bottom: 0,
-              right: _petWindowWidth,
-              child: _SkillPanel(
-                onClose: () => _togglePanel('skills'),
-                onOpenSettings: () => _togglePanel('settings'),
-              ),
-            ),
-
           // 宠物属性面板（在左侧展开，不覆盖宠物）
           if (_showPetStats)
             Positioned(
@@ -767,18 +758,6 @@ class _PetWindowState extends State<PetWindow> with TickerProviderStateMixin, Wi
               ),
             ),
 
-          // 游戏面板（在左侧展开，不覆盖宠物）
-          if (_showGames)
-            Positioned(
-              left: 0,
-              top: 0,
-              bottom: 0,
-              right: _petWindowWidth,
-              child: GamePanel(
-                onClose: () => _togglePanel('games'),
-              ),
-            ),
-
           // 日记面板（在左侧展开，不覆盖宠物）
           if (_showDiary)
             Positioned(
@@ -792,7 +771,7 @@ class _PetWindowState extends State<PetWindow> with TickerProviderStateMixin, Wi
             ),
 
           // ====== 窗口边缘拖拽resize区域（任意左侧面板打开时） ======
-          if (_showChat || _showShop || _showSkills || _showSettings || _showPetStats || _showAchievements || _showGames || _showDiary) ...[
+          if (_showChat || _showShop || _showSettings || _showPetStats || _showAchievements || _showDiary) ...[
             // 左边缘拖拽
             Positioned(
               left: 0,
@@ -980,10 +959,8 @@ class _PetWindowState extends State<PetWindow> with TickerProviderStateMixin, Wi
     try {
       final isOpen = panel == 'chat' ? _showChat
           : panel == 'shop' ? _showShop
-          : panel == 'skills' ? _showSkills
           : panel == 'petStats' ? _showPetStats
           : panel == 'achievements' ? _showAchievements
-          : panel == 'games' ? _showGames
           : panel == 'diary' ? _showDiary
           : _showSettings;
 
@@ -1002,11 +979,9 @@ class _PetWindowState extends State<PetWindow> with TickerProviderStateMixin, Wi
           setState(() {
             if (panel == 'chat') _showChat = false;
             if (panel == 'shop') _showShop = false;
-            if (panel == 'skills') _showSkills = false;
             if (panel == 'settings') _showSettings = false;
             if (panel == 'petStats') _showPetStats = false;
             if (panel == 'achievements') _showAchievements = false;
-            if (panel == 'games') _showGames = false;
             if (panel == 'diary') _showDiary = false;
           });
         }
@@ -1016,17 +991,15 @@ class _PetWindowState extends State<PetWindow> with TickerProviderStateMixin, Wi
       } else {
         // 先关闭已打开的其他面板
         final hadExpand = _currentExpandWidth > 0;
-        if (_showChat || _showShop || _showSkills || _showSettings || _showPetStats || _showAchievements || _showGames || _showDiary) {
+        if (_showChat || _showShop || _showSettings || _showPetStats || _showAchievements || _showDiary) {
           // 先隐藏旧面板UI
           if (mounted) {
             setState(() {
               _showChat = false;
               _showShop = false;
-              _showSkills = false;
               _showSettings = false;
               _showPetStats = false;
               _showAchievements = false;
-              _showGames = false;
               _showDiary = false;
             });
           }
@@ -1041,22 +1014,22 @@ class _PetWindowState extends State<PetWindow> with TickerProviderStateMixin, Wi
           setState(() {
             if (panel == 'chat') _showChat = true;
             if (panel == 'shop') _showShop = true;
-            if (panel == 'skills') _showSkills = true;
             if (panel == 'settings') _showSettings = true;
             if (panel == 'petStats') _showPetStats = true;
             if (panel == 'achievements') _showAchievements = true;
-            if (panel == 'games') _showGames = true;
             if (panel == 'diary') _showDiary = true;
           });
         }
         // 等待一帧，确保UI已渲染
         await Future.delayed(const Duration(milliseconds: 16));
-        // 默认宽度（日记面板使用更大的宽度）
+        // 默认宽度（不同面板使用不同宽度）
         final defaultWidth = panel == 'chat'
             ? (_chatWorkMode ? _chatPanelWorkWidth : _chatPanelWidth)
             : panel == 'diary'
                 ? _diaryPanelWidth
-                : _shopPanelWidth;
+                : panel == 'settings'
+                    ? _settingsPanelWidth
+                    : _shopPanelWidth;
         // 优先使用用户记住的宽度（仅对聊天面板生效）
         final savedWidth = panel == 'chat' ? _loadPanelWidth(defaultWidth) : defaultWidth;
         // 加载保存的面板高度（仅聊天面板）
@@ -1228,22 +1201,6 @@ class _PetWindowState extends State<PetWindow> with TickerProviderStateMixin, Wi
               },
             ),
             _MenuButton(
-              icon: '🎮',
-              label: '技能',
-              onTap: () {
-                _hideMenu();
-                _togglePanel('skills');
-              },
-            ),
-            _MenuButton(
-              icon: '🎯',
-              label: '游戏',
-              onTap: () {
-                _hideMenu();
-                _togglePanel('games');
-              },
-            ),
-            _MenuButton(
               icon: '⚙️',
               label: '设置',
               onTap: () {
@@ -1257,113 +1214,6 @@ class _PetWindowState extends State<PetWindow> with TickerProviderStateMixin, Wi
     );
   }
 
-}
-
-/// 技能面板（左侧展开，不覆盖宠物）
-class _SkillPanel extends StatelessWidget {
-  final VoidCallback onClose;
-  final VoidCallback onOpenSettings;
-
-  const _SkillPanel({required this.onClose, required this.onOpenSettings});
-
-  @override
-  Widget build(BuildContext context) {
-    final skillManager = context.watch<SkillManager>();
-
-    return Container(
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: const BorderRadius.only(
-          topRight: Radius.circular(16),
-          bottomRight: Radius.circular(16),
-        ),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withOpacity(0.1),
-            blurRadius: 10,
-            offset: const Offset(2, 0),
-          ),
-        ],
-      ),
-      child: Column(
-        children: [
-          // 标题栏（可拖动窗口）
-          GestureDetector(
-            onPanStart: (_) => windowManager.startDragging(),
-            child: Container(
-              padding: const EdgeInsets.fromLTRB(20, 16, 12, 8),
-              child: Row(
-                children: [
-                  const Text(
-                    '🦢 鹅宝技能',
-                    style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-                  ),
-                  const Spacer(),
-                  // 打开完整技能管理
-                  TextButton.icon(
-                    icon: const Icon(Icons.settings, size: 14),
-                    label: const Text('管理', style: TextStyle(fontSize: 12)),
-                    onPressed: onOpenSettings,
-                    style: TextButton.styleFrom(
-                      foregroundColor: const Color(0xFF4FC3F7),
-                      padding: const EdgeInsets.symmetric(horizontal: 8),
-                    ),
-                  ),
-                  IconButton(
-                    icon: const Icon(Icons.close, size: 18),
-                    onPressed: onClose,
-                    padding: EdgeInsets.zero,
-                    constraints: const BoxConstraints(),
-                  ),
-                ],
-              ),
-            ),
-          ),
-          const Divider(height: 1),
-          // 技能列表（可滚动）
-          Expanded(
-            child: ListView(
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-              children: [
-                ...skillManager.getSkillsByCategory().entries.map((entry) {
-                  return Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Padding(
-                        padding: const EdgeInsets.only(top: 8, bottom: 4),
-                        child: Text(
-                          entry.key,
-                          style: TextStyle(
-                            fontSize: 13,
-                            color: Colors.grey.shade600,
-                            fontWeight: FontWeight.w600,
-                          ),
-                        ),
-                      ),
-                      ...entry.value.map((skill) {
-                        return ListTile(
-                          dense: true,
-                          leading: Text(skill.icon, style: const TextStyle(fontSize: 20)),
-                          title: Text(skill.name),
-                          subtitle: Text(
-                            skill.description,
-                            maxLines: 2,
-                            overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(fontSize: 11),
-                          ),
-                          contentPadding: EdgeInsets.zero,
-                        );
-                      }),
-                    ],
-                  );
-                }),
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
 }
 
 /// 宠物说话气泡
