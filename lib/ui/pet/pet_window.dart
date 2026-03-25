@@ -93,10 +93,10 @@ class _PetWindowState extends State<PetWindow> with TickerProviderStateMixin, Wi
     final w = screenW * 0.45 - _petWindowWidth + 600;
     return w.clamp(500.0, 750.0);
   }
-  /// 宠物区域原始窗口宽度（减小以拉近与对话框的距离）
-  static const double _petWindowWidth = 400;
+  /// 宠物区域原始窗口宽度（缩小以减少空余空间）
+  static const double _petWindowWidth = 200;
   /// 宠物区域原始窗口高度
-  static const double _petWindowHeight = 450;
+  static const double _petWindowHeight = 340;
   /// 面板窗口高度（屏幕高度 * 0.618，最小 550，最大 900）
   double get _panelWindowHeight {
     final screenH = _screenSize.height;
@@ -676,8 +676,8 @@ class _PetWindowState extends State<PetWindow> with TickerProviderStateMixin, Wi
                           children: [
                           // 鹅宝画布 + 说话气泡
                           SizedBox(
-                            width: 400,
-                            height: 340,
+                            width: 200,
+                            height: 300,
                             child: Stack(
                               clipBehavior: Clip.none,
                               children: [
@@ -691,26 +691,29 @@ class _PetWindowState extends State<PetWindow> with TickerProviderStateMixin, Wi
                                     onDragStart: _onDragStart,
                                   ),
                                 ),
-                                // 说话气泡（左上角）
+                                // 说话气泡（顶部居中，指向右下方宠物）
                                 if (_bubbleText != null)
                                   Positioned(
-                                    top: 0,
+                                    top: -50, // 上移到画布外部
                                     left: 0,
-                                    child: AnimatedBuilder(
-                                      animation: _bubbleAnimController,
-                                      builder: (context, child) {
-                                        return Transform.translate(
-                                          offset: Offset(
-                                            _bubbleSlideAnimation.value,
-                                            _bubbleSlideAnimation.value * 0.5,
-                                          ),
-                                          child: Opacity(
-                                            opacity: _bubbleFadeAnimation.value,
-                                            child: child,
-                                          ),
-                                        );
-                                      },
-                                      child: _SpeechBubble(text: _bubbleText!),
+                                    right: 0,
+                                    child: Center(
+                                      child: AnimatedBuilder(
+                                        animation: _bubbleAnimController,
+                                        builder: (context, child) {
+                                          return Transform.translate(
+                                            offset: Offset(
+                                              _bubbleSlideAnimation.value,
+                                              _bubbleSlideAnimation.value * 0.5,
+                                            ),
+                                            child: Opacity(
+                                              opacity: _bubbleFadeAnimation.value,
+                                              child: child,
+                                            ),
+                                          );
+                                        },
+                                        child: _SpeechBubble(text: _bubbleText!),
+                                      ),
                                     ),
                                   ),
                               ],
@@ -733,7 +736,7 @@ class _PetWindowState extends State<PetWindow> with TickerProviderStateMixin, Wi
               bottom: 0,
               right: 0,
               child: SizedBox(
-                width: _petWindowWidth,
+                width: 420, // 固定宽度，确保功能按钮完整显示
                 child: Center(
                   child: MouseRegion(
                     onEnter: (_) => _onMenuHoverEnter(),
