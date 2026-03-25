@@ -93,10 +93,10 @@ class _PetWindowState extends State<PetWindow> with TickerProviderStateMixin, Wi
     final w = screenW * 0.45 - _petWindowWidth + 600;
     return w.clamp(500.0, 750.0);
   }
-  /// 宠物区域原始窗口宽度（与视频尺寸匹配）
-  static const double _petWindowWidth = 180;
-  /// 宠物区域原始窗口高度（与视频高度匹配）
-  static const double _petWindowHeight = 300;
+  /// 宠物区域原始窗口宽度（与视频宽度一致）
+  static const double _petWindowWidth = 157;
+  /// 宠物区域原始窗口高度（视频高度 + 气泡空间）
+  static const double _petWindowHeight = 340;
   /// 面板窗口高度（屏幕高度 * 0.618，最小 550，最大 900）
   double get _panelWindowHeight {
     final screenH = _screenSize.height;
@@ -662,70 +662,65 @@ class _PetWindowState extends State<PetWindow> with TickerProviderStateMixin, Wi
                 alignment: Alignment.bottomCenter, // 对齐到底部
                 child: SizedBox(
                   height: _petWindowHeight, // 限制宠物区域高度
-                  child: MouseRegion(
-                    cursor: SystemMouseCursors.click,
-                    onEnter: (_) => _onHoverEnter(),
-                    onExit: (_) => _onHoverExit(),
-                    child: Opacity(
-                      opacity: engine.opacity,
-                      child: Transform.scale(
-                        scale: engine.scale,
-                        child: Column(
-                          mainAxisSize: MainAxisSize.max,
-                          mainAxisAlignment: MainAxisAlignment.end,
-                          children: [
-                          // 鹅宝画布 + 说话气泡
-                          SizedBox(
-                            width: 180,
-                            height: 280,
-                            child: Stack(
-                              clipBehavior: Clip.none,
-                              children: [
-                                // 鹅宝画布（居中）
-                                Center(
-                                  child: PetCanvas(
-                                    key: _petCanvasKey,
-                                    engine: engine,
-                                    onTap: _onPetTap,
-                                    onDoubleTap: _onPetDoubleTap,
-                                    onDragStart: _onDragStart,
+                  child: Stack(
+                    clipBehavior: Clip.none,
+                    children: [
+                      // 说话气泡（在窗口顶部，居中）
+                      if (_bubbleText != null)
+                        Positioned(
+                          top: 0,
+                          left: -80,
+                          right: -80,
+                          child: Center(
+                            child: AnimatedBuilder(
+                              animation: _bubbleAnimController,
+                              builder: (context, child) {
+                                return Transform.translate(
+                                  offset: Offset(
+                                    _bubbleSlideAnimation.value,
+                                    _bubbleSlideAnimation.value * 0.5,
                                   ),
-                                ),
-                                // 说话气泡（顶部居中）
-                                if (_bubbleText != null)
-                                  Positioned(
-                                    top: -55,
-                                    left: -50, // 向左扩展，让气泡在视频正上方居中
-                                    right: -50,
-                                    child: Center(
-                                      child: AnimatedBuilder(
-                                        animation: _bubbleAnimController,
-                                        builder: (context, child) {
-                                          return Transform.translate(
-                                            offset: Offset(
-                                              _bubbleSlideAnimation.value,
-                                              _bubbleSlideAnimation.value * 0.5,
-                                            ),
-                                            child: Opacity(
-                                              opacity: _bubbleFadeAnimation.value,
-                                              child: child,
-                                            ),
-                                          );
-                                        },
-                                        child: _SpeechBubble(text: _bubbleText!),
-                                      ),
-                                    ),
+                                  child: Opacity(
+                                    opacity: _bubbleFadeAnimation.value,
+                                    child: child,
                                   ),
-                              ],
+                                );
+                              },
+                              child: _SpeechBubble(text: _bubbleText!),
                             ),
                           ),
-                          const SizedBox(height: 8),
-                        ],
-                      ),  // Column
-                    ),  // Transform.scale
-                  ),  // Opacity
-                ),  // MouseRegion
-              ),  // SizedBox (height: _petWindowHeight)
+                        ),
+                      // 视频容器（靠底部）
+                      Positioned(
+                        bottom: 0,
+                        left: 0,
+                        right: 0,
+                        child: MouseRegion(
+                          cursor: SystemMouseCursors.click,
+                          onEnter: (_) => _onHoverEnter(),
+                          onExit: (_) => _onHoverExit(),
+                          child: Opacity(
+                            opacity: engine.opacity,
+                            child: Transform.scale(
+                              scale: engine.scale,
+                              child: SizedBox(
+                                width: 157,
+                                height: 280,
+                                child: PetCanvas(
+                                  key: _petCanvasKey,
+                                  engine: engine,
+                                  onTap: _onPetTap,
+                                  onDoubleTap: _onPetDoubleTap,
+                                  onDragStart: _onDragStart,
+                                ),
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),  // SizedBox (height: _petWindowHeight)
             ),  // Align
           ),  // SizedBox (width: _petWindowWidth)
         ),  // Positioned
