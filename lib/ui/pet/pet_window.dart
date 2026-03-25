@@ -95,8 +95,8 @@ class _PetWindowState extends State<PetWindow> with TickerProviderStateMixin, Wi
   }
   /// 宠物区域原始窗口宽度（与视频宽度一致）
   static const double _petWindowWidth = 157;
-  /// 宠物区域原始窗口高度（气泡 + 功能栏 + 视频）
-  static const double _petWindowHeight = 400;
+  /// 宠物区域原始窗口高度（气泡 + 视频 + 功能栏）
+  static const double _petWindowHeight = 460;
   /// 面板窗口高度（屏幕高度 * 0.618，最小 550，最大 900）
   double get _panelWindowHeight {
     final screenH = _screenSize.height;
@@ -665,10 +665,10 @@ class _PetWindowState extends State<PetWindow> with TickerProviderStateMixin, Wi
                   child: Stack(
                     clipBehavior: Clip.none,
                     children: [
-                      // 说话气泡（在窗口顶部，居中）
+                      // 说话气泡（在视频上方，居中）
                       if (_bubbleText != null)
                         Positioned(
-                          top: 0,
+                          bottom: 340, // 功能栏55 + 视频280 + 间距5
                           left: -80,
                           right: -80,
                           child: Center(
@@ -725,27 +725,25 @@ class _PetWindowState extends State<PetWindow> with TickerProviderStateMixin, Wi
           ),  // SizedBox (width: _petWindowWidth)
         ),  // Positioned
 
-          // 功能栏（在视频正下方）
+          // 功能栏（在视频正下方，居中显示）
           if (_showMenu)
             Positioned(
               bottom: 0,
-              right: 0,
-              child: SizedBox(
-                width: 420, // 固定宽度，确保功能按钮完整显示
-                child: Center(
-                  child: MouseRegion(
-                    onEnter: (_) => _onMenuHoverEnter(),
-                    onExit: (_) => _onMenuHoverExit(),
-                    child: AnimatedBuilder(
-                      animation: _hoverFadeAnimation,
-                      builder: (context, child) {
-                        return Opacity(
-                          opacity: _hoverFadeAnimation.value,
-                          child: child,
-                        );
-                      },
-                      child: _buildInlineToolbar(),
-                    ),
+              left: -131, // (420-157)/2 = 131.5，让功能栏相对视频居中
+              right: -132,
+              child: Center(
+                child: MouseRegion(
+                  onEnter: (_) => _onMenuHoverEnter(),
+                  onExit: (_) => _onMenuHoverExit(),
+                  child: AnimatedBuilder(
+                    animation: _hoverFadeAnimation,
+                    builder: (context, child) {
+                      return Opacity(
+                        opacity: _hoverFadeAnimation.value,
+                        child: child,
+                      );
+                    },
+                    child: _buildInlineToolbar(),
                   ),
                 ),
               ),
@@ -1369,14 +1367,6 @@ class _PetWindowState extends State<PetWindow> with TickerProviderStateMixin, Wi
               onTap: () {
                 _hideMenu();
                 _togglePanel('shop');
-              },
-            ),
-            _MenuButton(
-              icon: '🏆',
-              label: '成就',
-              onTap: () {
-                _hideMenu();
-                _togglePanel('achievements');
               },
             ),
             _MenuButton(
