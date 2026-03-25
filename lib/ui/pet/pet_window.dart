@@ -95,8 +95,8 @@ class _PetWindowState extends State<PetWindow> with TickerProviderStateMixin, Wi
   }
   /// 宠物区域原始窗口宽度（与视频宽度一致）
   static const double _petWindowWidth = 157;
-  /// 宠物区域原始窗口高度（视频高度 + 气泡空间）
-  static const double _petWindowHeight = 340;
+  /// 宠物区域原始窗口高度（气泡 + 功能栏 + 视频）
+  static const double _petWindowHeight = 400;
   /// 面板窗口高度（屏幕高度 * 0.618，最小 550，最大 900）
   double get _panelWindowHeight {
     final screenH = _screenSize.height;
@@ -725,10 +725,10 @@ class _PetWindowState extends State<PetWindow> with TickerProviderStateMixin, Wi
           ),  // SizedBox (width: _petWindowWidth)
         ),  // Positioned
 
-          // 功能栏（固定在宠物区域底部，不影响宠物位置）
+          // 功能栏（悬浮在视频上方，不影响下方空间）
           if (_showMenu)
             Positioned(
-              bottom: 0,
+              bottom: 285, // 视频高度 280 + 间距 5
               right: 0,
               child: SizedBox(
                 width: 420, // 固定宽度，确保功能按钮完整显示
