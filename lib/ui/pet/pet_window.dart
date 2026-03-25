@@ -93,9 +93,9 @@ class _PetWindowState extends State<PetWindow> with TickerProviderStateMixin, Wi
     final w = screenW * 0.45 - _petWindowWidth + 600;
     return w.clamp(500.0, 750.0);
   }
-  /// 宠物区域原始窗口宽度（与视频宽度一致）
-  static const double _petWindowWidth = 157;
-  /// 宠物区域原始窗口高度（气泡 + 视频 + 功能栏）
+  /// 宠物区域原始窗口宽度（视频宽度 + 右侧功能栏）
+  static const double _petWindowWidth = 200;
+  /// 宠物区域原始窗口高度（气泡 + 视频）
   static const double _petWindowHeight = 460;
   /// 面板窗口高度（屏幕高度 * 0.618，最小 550，最大 900）
   double get _panelWindowHeight {
@@ -668,9 +668,9 @@ class _PetWindowState extends State<PetWindow> with TickerProviderStateMixin, Wi
                       // 说话气泡（在视频上方，居中）
                       if (_bubbleText != null)
                         Positioned(
-                          bottom: 340, // 功能栏55 + 视频280 + 间距5
-                          left: -80,
-                          right: -80,
+                          bottom: 285, // 视频高度 280 + 间距 5
+                          left: -60,
+                          right: -17, // 右侧考虑功能栏空间
                           child: Center(
                             child: AnimatedBuilder(
                               animation: _bubbleAnimController,
@@ -690,11 +690,11 @@ class _PetWindowState extends State<PetWindow> with TickerProviderStateMixin, Wi
                             ),
                           ),
                         ),
-                      // 视频容器（底部留出功能栏空间）
+                      // 视频容器（居中，底部对齐）
                       Positioned(
-                        bottom: 55, // 功能栏高度
+                        bottom: 0,
                         left: 0,
-                        right: 0,
+                        right: 43, // 右侧留出功能栏空间
                         child: MouseRegion(
                           cursor: SystemMouseCursors.click,
                           onEnter: (_) => _onHoverEnter(),
@@ -725,26 +725,24 @@ class _PetWindowState extends State<PetWindow> with TickerProviderStateMixin, Wi
           ),  // SizedBox (width: _petWindowWidth)
         ),  // Positioned
 
-          // 功能栏（在视频正下方，居中显示）
+          // 功能栏（竖向排列，在宠物右侧）
           if (_showMenu)
             Positioned(
+              right: 0,
+              top: 60, // 留出气泡空间
               bottom: 0,
-              left: -131, // (420-157)/2 = 131.5，让功能栏相对视频居中
-              right: -132,
-              child: Center(
-                child: MouseRegion(
-                  onEnter: (_) => _onMenuHoverEnter(),
-                  onExit: (_) => _onMenuHoverExit(),
-                  child: AnimatedBuilder(
-                    animation: _hoverFadeAnimation,
-                    builder: (context, child) {
-                      return Opacity(
-                        opacity: _hoverFadeAnimation.value,
-                        child: child,
-                      );
-                    },
-                    child: _buildInlineToolbar(),
-                  ),
+              child: MouseRegion(
+                onEnter: (_) => _onMenuHoverEnter(),
+                onExit: (_) => _onMenuHoverExit(),
+                child: AnimatedBuilder(
+                  animation: _hoverFadeAnimation,
+                  builder: (context, child) {
+                    return Opacity(
+                      opacity: _hoverFadeAnimation.value,
+                      child: child,
+                    );
+                  },
+                  child: _buildInlineToolbar(),
                 ),
               ),
             ),
@@ -1325,10 +1323,10 @@ class _PetWindowState extends State<PetWindow> with TickerProviderStateMixin, Wi
         );
       },
       child: Container(
-        padding: const EdgeInsets.symmetric(vertical: 6, horizontal: 4),
+        padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 4),
         decoration: BoxDecoration(
           color: Colors.white,
-          borderRadius: BorderRadius.circular(20),
+          borderRadius: BorderRadius.circular(16),
           boxShadow: [
             BoxShadow(
               color: Colors.black.withOpacity(0.12),
@@ -1342,7 +1340,7 @@ class _PetWindowState extends State<PetWindow> with TickerProviderStateMixin, Wi
             ),
           ],
         ),
-        child: Row(
+        child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
             _MenuButton(
@@ -2116,15 +2114,15 @@ class _MenuButton extends StatelessWidget {
       onTap: onTap,
       borderRadius: BorderRadius.circular(12),
       child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Text(icon, style: const TextStyle(fontSize: 20)),
-            const SizedBox(height: 2),
+            Text(icon, style: const TextStyle(fontSize: 18)),
+            const SizedBox(height: 1),
             Text(
               label,
-              style: const TextStyle(fontSize: 10, color: Color(0xFF616161)),
+              style: const TextStyle(fontSize: 9, color: Color(0xFF616161)),
             ),
           ],
         ),
