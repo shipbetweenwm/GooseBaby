@@ -97,8 +97,8 @@ class _PetWindowState extends State<PetWindow> with TickerProviderStateMixin, Wi
     final w = screenW * 0.45 - _petWindowWidth + 600;
     return w.clamp(500.0, 750.0);
   }
-  /// 宠物区域原始窗口宽度（仅视频宽度，功能栏在下方横排）
-  static const double _petWindowWidth = 157;
+  /// 宠物区域原始窗口宽度（菜单栏宽度，功能栏在下方横排）
+  static const double _petWindowWidth = 220;
   /// 宠物区域原始窗口高度（气泡 + 视频 + 底部功能栏）
   // ignore: unused_field
   static const double _petWindowHeight = 400;
@@ -154,21 +154,18 @@ class _PetWindowState extends State<PetWindow> with TickerProviderStateMixin, Wi
           'right': size.width, 'bottom': size.height,
         });
       } else {
-        // 宠物视频区域（right:0, bottom:50, width:157, height:280）
-        // 即：left = windowWidth - 157, top = windowHeight - 50 - 280
-        //     right = windowWidth, bottom = windowHeight - 50
-        final petLeft = size.width - 157;
-        final petTop = size.height - 330;  // 50 + 280 = 330
+        // 宠物视频区域（往左偏移 10px，上方 30px 穿透）
+        final petWidth = 157.0;
         rects.add({
-          'left': petLeft,
-          'top': petTop,
-          'right': size.width,
-          'bottom': size.height - 50,
+          'left': size.width - petWidth - 25,
+          'top': size.height - 230,  // 50 + 280 - 30 = 300（上方 30px 可点击穿透）
+          'right': size.width - 60,
+          'bottom': size.height - 30,
         });
-        // 功能栏（底部横排，约 180x50）
+        // 功能栏（底部横排）
         if (_showMenu) {
           rects.add({
-            'left': size.width - 180,
+            'left': 0,
             'top': size.height - 50,
             'right': size.width,
             'bottom': size.height,
@@ -703,6 +700,7 @@ class _PetWindowState extends State<PetWindow> with TickerProviderStateMixin, Wi
     return Material(
       type: MaterialType.transparency,
       child: Stack(
+        clipBehavior: Clip.none,  // 允许菜单栏和气泡溢出窗口边界
         children: [
           // ══════ 气泡（穿透点击，仅展示） ══════
           if (_bubbleText != null)
@@ -740,8 +738,8 @@ class _PetWindowState extends State<PetWindow> with TickerProviderStateMixin, Wi
 
           // ══════ 宠物视频（仅视频区域响应点击，其余穿透） ══════
           Positioned(
-            right: 0,
-            bottom: 50, // 底部留出功能栏空间
+            right: 35,  // 往左偏移 10px
+            bottom: 0, // 底部留出功能栏空间
             child: MouseRegion(
               cursor: SystemMouseCursors.click,
               onEnter: (_) => _onHoverEnter(),
@@ -766,7 +764,7 @@ class _PetWindowState extends State<PetWindow> with TickerProviderStateMixin, Wi
             ),
           ),
 
-          // ══════ 功能栏（仅按钮区域响应点击） ══════
+          // ══════ 功能栏（居中显示在宠物正下方） ══════
           if (_showMenu)
             Positioned(
               right: 0,

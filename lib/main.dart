@@ -49,9 +49,9 @@ void main() async {
       await windowManager.ensureInitialized();
 
       // 先获取屏幕尺寸，用于计算窗口初始大小
-      // 初始窗口大小 = 宠物区域大小（400x450）
-      const Size windowSize = Size(400, 450);
-      const Size minSize = Size(180, 250);
+      // 初始窗口大小 = 宽度 250（菜单栏宽度+余量），高度 320（视频 280 + 菜单栏 40）
+      const Size windowSize = Size(250, 280);
+      const Size minSize = Size(300, 300);
 
       try {
         final primaryScreen = await screenRetriever.getPrimaryDisplay();

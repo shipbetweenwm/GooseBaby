@@ -425,7 +425,7 @@ class _AIModelSettingsState extends State<_AIModelSettings> {
           Container(
             padding: const EdgeInsets.all(12),
             decoration: BoxDecoration(
-              color: Colors.white.withValues(alpha: 0.7),
+              color: Colors.white.withOpacity(0.7),
               borderRadius: BorderRadius.circular(12),
             ),
             child: Column(
@@ -451,7 +451,7 @@ class _AIModelSettingsState extends State<_AIModelSettings> {
                     style: TextStyle(fontSize: 11, color: Colors.grey[500]),
                   ),
                   value: _enableWebSearch,
-                  activeThumbColor: const Color(0xFF4FC3F7),
+                  activeColor: const Color(0xFF4FC3F7),
                   onChanged: (v) => setState(() => _enableWebSearch = v),
                 ),
                 SwitchListTile(
@@ -465,7 +465,7 @@ class _AIModelSettingsState extends State<_AIModelSettings> {
                     style: TextStyle(fontSize: 11, color: Colors.grey[500]),
                   ),
                   value: _enableDeepThink,
-                  activeThumbColor: const Color(0xFF4FC3F7),
+                  activeColor: const Color(0xFF4FC3F7),
                   onChanged: _selectedProvider == 'ollama'
                       ? null // Ollama 本地模型不支持
                       : (v) => setState(() => _enableDeepThink = v),
@@ -1254,10 +1254,10 @@ class _PetSettingsState2 extends State<_PetSettings> {
             children: [
               Expanded(
                 child: Slider(
-                  value: engine.scale.clamp(0.5, 1.25),
+                  value: engine.scale.clamp(0.5, 1.0),
                   onChanged: (v) => engine.setScale(v),
                   min: 0.5,
-                  max: 1.25,
+                  max: 1.0,
                   activeColor: const Color(0xFF4FC3F7),
                 ),
               ),
