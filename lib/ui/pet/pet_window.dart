@@ -674,18 +674,6 @@ class _PetWindowState extends State<PetWindow> with TickerProviderStateMixin, Wi
                           mainAxisSize: MainAxisSize.max,
                           mainAxisAlignment: MainAxisAlignment.end,
                           children: [
-                          // 状态指示器 + 金币 （悬浮才显示）
-                          AnimatedBuilder(
-                            animation: _hoverFadeAnimation,
-                            builder: (context, child) {
-                              return Opacity(
-                                opacity: _hoverFadeAnimation.value,
-                                child: child,
-                              );
-                            },
-                            child: _StatusBar(engine: engine),
-                          ),
-                          const SizedBox(height: 8),
                           // 鹅宝画布 + 说话气泡
                           SizedBox(
                             width: 400,
@@ -726,38 +714,6 @@ class _PetWindowState extends State<PetWindow> with TickerProviderStateMixin, Wi
                                     ),
                                   ),
                               ],
-                            ),
-                          ),
-                          const SizedBox(height: 4),
-                          // 名字 + 等级（悬浮才显示）
-                          AnimatedBuilder(
-                            animation: _hoverFadeAnimation,
-                            builder: (context, child) {
-                              return Opacity(
-                                opacity: _hoverFadeAnimation.value,
-                                child: child,
-                              );
-                            },
-                            child: Container(
-                              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-                              decoration: BoxDecoration(
-                                color: Colors.white.withOpacity(0.9),
-                                borderRadius: BorderRadius.circular(12),
-                                boxShadow: [
-                                  BoxShadow(
-                                    color: Colors.black.withOpacity(0.05),
-                                    blurRadius: 4,
-                                  ),
-                                ],
-                              ),
-                              child: Text(
-                                '🦢 鹅宝 Lv.${engine.state.level}',
-                                style: const TextStyle(
-                                  fontSize: 14,
-                                  fontWeight: FontWeight.w600,
-                                  color: Color(0xFF424242),
-                                ),
-                              ),
                             ),
                           ),
                           const SizedBox(height: 8),
@@ -837,6 +793,9 @@ class _PetWindowState extends State<PetWindow> with TickerProviderStateMixin, Wi
               child: ShopPanel(
                 onClose: () => _togglePanel('shop'),
                 onItemBought: _onShopItemBought,
+                onShowBubble: (message) {
+                  if (mounted) _showBubble(message);
+                },
               ),
             ),
 
@@ -1510,88 +1469,6 @@ class _SpeechBubblePainter extends CustomPainter {
 
   @override
   bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
-}
-
-/// 状态指示条（显示心情、饥饿度、健康度、精力、清洁度 + 金币）
-class _StatusBar extends StatelessWidget {
-  final PetEngine engine;
-
-  const _StatusBar({required this.engine});
-
-  @override
-  Widget build(BuildContext context) {
-    // 检测是否有低属性（低于20）
-    final hasWarning = engine.hunger < 20 ||
-        engine.energy < 20 ||
-        engine.health < 20 ||
-        engine.happiness < 20 ||
-        engine.clean < 20;
-
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-      decoration: BoxDecoration(
-        color: hasWarning
-            ? Colors.red.withOpacity(0.12)
-            : Colors.white.withOpacity(0.85),
-        borderRadius: BorderRadius.circular(16),
-        border: hasWarning
-            ? Border.all(color: Colors.red.withOpacity(0.3), width: 1)
-            : null,
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          _MiniBar(icon: '❤️', value: engine.happiness / 100, color: Colors.red, warn: engine.happiness < 20),
-          const SizedBox(width: 6),
-          _MiniBar(icon: '🍖', value: engine.hunger / 100, color: Colors.orange, warn: engine.hunger < 20),
-          const SizedBox(width: 6),
-          _MiniBar(icon: '💚', value: engine.health / 100, color: Colors.green, warn: engine.health < 20),
-          const SizedBox(width: 6),
-          _MiniBar(icon: '⚡', value: engine.energy / 100, color: Colors.blue, warn: engine.energy < 20),
-          const SizedBox(width: 6),
-          _MiniBar(icon: '🧼', value: engine.clean / 100, color: Colors.cyan, warn: engine.clean < 20),
-          const SizedBox(width: 8),
-          // 金币
-          Text(
-            '🪙${engine.coins}',
-            style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: Color(0xFFFF8F00)),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _MiniBar extends StatelessWidget {
-  final String icon;
-  final double value;
-  final Color color;
-  final bool warn;
-
-  const _MiniBar({required this.icon, required this.value, required this.color, this.warn = false});
-
-  @override
-  Widget build(BuildContext context) {
-    return Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Text(icon, style: const TextStyle(fontSize: 11)),
-        const SizedBox(width: 2),
-        SizedBox(
-          width: 28,
-          height: 5,
-          child: ClipRRect(
-            borderRadius: BorderRadius.circular(3),
-            child: LinearProgressIndicator(
-              value: value.clamp(0, 1),
-              backgroundColor: warn ? Colors.red.shade100 : Colors.grey.shade200,
-              valueColor: AlwaysStoppedAnimation(warn ? Colors.red : color),
-            ),
-          ),
-        ),
-      ],
-    );
-  }
 }
 
 /// 宠物属性面板（展示鹅宝详细属性、状态和成长信息）

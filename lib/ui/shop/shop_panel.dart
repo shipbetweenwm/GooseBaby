@@ -8,8 +8,9 @@ import '../../models/models.dart';
 class ShopPanel extends StatefulWidget {
   final VoidCallback? onClose;
   final void Function(ShopItem item)? onItemBought;
+  final void Function(String message)? onShowBubble;
 
-  const ShopPanel({super.key, this.onClose, this.onItemBought});
+  const ShopPanel({super.key, this.onClose, this.onItemBought, this.onShowBubble});
 
   @override
   State<ShopPanel> createState() => _ShopPanelState();
@@ -163,25 +164,13 @@ class _ShopPanelState extends State<ShopPanel> {
 
   void _buyItem(PetEngine engine, ShopItem item) {
     if (engine.buyItem(item)) {
-      // 购买成功
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('${item.icon} 成功购买了${item.name}！鹅宝好开心~ 🦢'),
-          backgroundColor: const Color(0xFF66BB6A),
-          duration: const Duration(seconds: 2),
-        ),
-      );
+      // 购买成功 → 通过气泡显示
+      widget.onShowBubble?.call('${item.icon} 成功购买了${item.name}！鹅宝好开心~ 🦢');
       // 通知父组件关闭商店并播放动画
       widget.onItemBought?.call(item);
     } else {
-      // 金币不足
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('🪙 金币不够啦~ 还差 ${item.price - engine.coins} 个金币'),
-          backgroundColor: const Color(0xFFEF5350),
-          duration: const Duration(seconds: 2),
-        ),
-      );
+      // 金币不足 → 通过气泡显示
+      widget.onShowBubble?.call('🪙 金币不够啦~ 还差 ${item.price - engine.coins} 个金币');
     }
   }
 }
