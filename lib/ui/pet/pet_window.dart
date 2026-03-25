@@ -93,10 +93,10 @@ class _PetWindowState extends State<PetWindow> with TickerProviderStateMixin, Wi
     final w = screenW * 0.45 - _petWindowWidth + 600;
     return w.clamp(500.0, 750.0);
   }
-  /// 宠物区域原始窗口宽度（缩小以减少空余空间）
-  static const double _petWindowWidth = 200;
-  /// 宠物区域原始窗口高度
-  static const double _petWindowHeight = 340;
+  /// 宠物区域原始窗口宽度（与视频尺寸匹配）
+  static const double _petWindowWidth = 180;
+  /// 宠物区域原始窗口高度（与视频高度匹配）
+  static const double _petWindowHeight = 300;
   /// 面板窗口高度（屏幕高度 * 0.618，最小 550，最大 900）
   double get _panelWindowHeight {
     final screenH = _screenSize.height;
@@ -676,13 +676,13 @@ class _PetWindowState extends State<PetWindow> with TickerProviderStateMixin, Wi
                           children: [
                           // 鹅宝画布 + 说话气泡
                           SizedBox(
-                            width: 200,
-                            height: 300,
+                            width: 180,
+                            height: 280,
                             child: Stack(
                               clipBehavior: Clip.none,
                               children: [
-                                // 鹅宝画布
-                                Positioned.fill(
+                                // 鹅宝画布（居中）
+                                Center(
                                   child: PetCanvas(
                                     key: _petCanvasKey,
                                     engine: engine,
@@ -691,12 +691,12 @@ class _PetWindowState extends State<PetWindow> with TickerProviderStateMixin, Wi
                                     onDragStart: _onDragStart,
                                   ),
                                 ),
-                                // 说话气泡（顶部居中，指向右下方宠物）
+                                // 说话气泡（顶部居中）
                                 if (_bubbleText != null)
                                   Positioned(
-                                    top: -50, // 上移到画布外部
-                                    left: 0,
-                                    right: 0,
+                                    top: -55,
+                                    left: -50, // 向左扩展，让气泡在视频正上方居中
+                                    right: -50,
                                     child: Center(
                                       child: AnimatedBuilder(
                                         animation: _bubbleAnimController,
