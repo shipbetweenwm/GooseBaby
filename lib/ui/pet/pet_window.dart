@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:window_manager/window_manager.dart';
 import '../../core/pet_engine.dart';
@@ -41,6 +42,9 @@ class _PetWindowState extends State<PetWindow> with TickerProviderStateMixin, Wi
   bool _showPetStats = false;
   bool _showAchievements = false;
   bool _showDiary = false;
+
+  /// 原生层鼠标穿透通道
+  static const _hitTestChannel = MethodChannel('goose_baby/hit_test');
 
   /// 烟花庆祝动画状态
   bool _showFirework = false;
@@ -93,10 +97,11 @@ class _PetWindowState extends State<PetWindow> with TickerProviderStateMixin, Wi
     final w = screenW * 0.45 - _petWindowWidth + 600;
     return w.clamp(500.0, 750.0);
   }
-  /// 宠物区域原始窗口宽度（视频宽度 + 右侧功能栏）
-  static const double _petWindowWidth = 200;
-  /// 宠物区域原始窗口高度（气泡 + 视频）
-  static const double _petWindowHeight = 460;
+  /// 宠物区域原始窗口宽度（仅视频宽度，功能栏在下方横排）
+  static const double _petWindowWidth = 157;
+  /// 宠物区域原始窗口高度（气泡 + 视频 + 底部功能栏）
+  // ignore: unused_field
+  static const double _petWindowHeight = 400;
   /// 面板窗口高度（屏幕高度 * 0.618，最小 550，最大 900）
   double get _panelWindowHeight {
     final screenH = _screenSize.height;
@@ -132,6 +137,51 @@ class _PetWindowState extends State<PetWindow> with TickerProviderStateMixin, Wi
 
   /// PetCanvas 的 GlobalKey（确保动画不因 widget 树变化而重建）
   final GlobalKey _petCanvasKey = GlobalKey();
+
+  /// 通知原生层当前"活跃内容区域"的矩形列表
+  /// 鼠标在这些区域内可点击，在区域外穿透到桌面
+  Future<void> _updateHitRects() async {
+    try {
+      final size = await windowManager.getSize();
+      final rects = <Map<String, double>>[];
+      final anyPanel = _showChat || _showShop || _showSettings ||
+          _showPetStats || _showAchievements || _showDiary;
+
+      if (anyPanel) {
+        // 面板打开时，整个窗口都响应点击
+        rects.add({
+          'left': 0, 'top': 0,
+          'right': size.width, 'bottom': size.height,
+        });
+      } else {
+        // 宠物视频区域（right:0, bottom:50, width:157, height:280）
+        // 即：left = windowWidth - 157, top = windowHeight - 50 - 280
+        //     right = windowWidth, bottom = windowHeight - 50
+        final petLeft = size.width - 157;
+        final petTop = size.height - 330;  // 50 + 280 = 330
+        rects.add({
+          'left': petLeft,
+          'top': petTop,
+          'right': size.width,
+          'bottom': size.height - 50,
+        });
+        // 功能栏（底部横排，约 180x50）
+        if (_showMenu) {
+          rects.add({
+            'left': size.width - 180,
+            'top': size.height - 50,
+            'right': size.width,
+            'bottom': size.height,
+          });
+        }
+      }
+
+      debugPrint('🦢 HitRects: window=${size.width}x${size.height}, rects=$rects');
+      await _hitTestChannel.invokeMethod('setHitRects', rects);
+    } catch (e) {
+      debugPrint('🦢 更新 hit rects 失败: $e');
+    }
+  }
 
   @override
   void initState() {
@@ -647,89 +697,79 @@ class _PetWindowState extends State<PetWindow> with TickerProviderStateMixin, Wi
   Widget build(BuildContext context) {
     final engine = context.watch<PetEngine>();
 
+    // 每次 rebuild 后更新原生层的鼠标穿透区域
+    WidgetsBinding.instance.addPostFrameCallback((_) => _updateHitRects());
+
     return Material(
       type: MaterialType.transparency,
       child: Stack(
         children: [
-          // 鹅宝主体（固定在右侧底部，始终存在，不受面板开关影响）
+          // ══════ 气泡（穿透点击，仅展示） ══════
+          if (_bubbleText != null)
+            Positioned(
+              right: 0,
+              bottom: 300 + 50, // 视频bottom(50) + 视频高度(280) + 间距 - 10
+              child: IgnorePointer(
+                child: SizedBox(
+                  width: _petWindowWidth + 100, // 气泡可以往左溢出
+                  child: Align(
+                    alignment: Alignment.centerRight,
+                    child: Padding(
+                      padding: const EdgeInsets.only(right: 0),
+                      child: AnimatedBuilder(
+                        animation: _bubbleAnimController,
+                        builder: (context, child) {
+                          return Transform.translate(
+                            offset: Offset(
+                              _bubbleSlideAnimation.value,
+                              _bubbleSlideAnimation.value * 0.5,
+                            ),
+                            child: Opacity(
+                              opacity: _bubbleFadeAnimation.value,
+                              child: child,
+                            ),
+                          );
+                        },
+                        child: _SpeechBubble(text: _bubbleText!),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+
+          // ══════ 宠物视频（仅视频区域响应点击，其余穿透） ══════
           Positioned(
             right: 0,
-            top: 0,
-            bottom: 0,
-            child: SizedBox(
-              width: _petWindowWidth,
-              child: Align(
-                alignment: Alignment.bottomCenter, // 对齐到底部
-                child: SizedBox(
-                  height: _petWindowHeight, // 限制宠物区域高度
-                  child: Stack(
-                    clipBehavior: Clip.none,
-                    children: [
-                      // 说话气泡（在视频上方，居中）
-                      if (_bubbleText != null)
-                        Positioned(
-                          bottom: 285, // 视频高度 280 + 间距 5
-                          left: -60,
-                          right: -17, // 右侧考虑功能栏空间
-                          child: Center(
-                            child: AnimatedBuilder(
-                              animation: _bubbleAnimController,
-                              builder: (context, child) {
-                                return Transform.translate(
-                                  offset: Offset(
-                                    _bubbleSlideAnimation.value,
-                                    _bubbleSlideAnimation.value * 0.5,
-                                  ),
-                                  child: Opacity(
-                                    opacity: _bubbleFadeAnimation.value,
-                                    child: child,
-                                  ),
-                                );
-                              },
-                              child: _SpeechBubble(text: _bubbleText!),
-                            ),
-                          ),
-                        ),
-                      // 视频容器（居中，底部对齐）
-                      Positioned(
-                        bottom: 0,
-                        left: 0,
-                        right: 43, // 右侧留出功能栏空间
-                        child: MouseRegion(
-                          cursor: SystemMouseCursors.click,
-                          onEnter: (_) => _onHoverEnter(),
-                          onExit: (_) => _onHoverExit(),
-                          child: Opacity(
-                            opacity: engine.opacity,
-                            child: Transform.scale(
-                              scale: engine.scale,
-                              child: SizedBox(
-                                width: 157,
-                                height: 280,
-                                child: PetCanvas(
-                                  key: _petCanvasKey,
-                                  engine: engine,
-                                  onTap: _onPetTap,
-                                  onDoubleTap: _onPetDoubleTap,
-                                  onDragStart: _onDragStart,
-                                ),
-                              ),
-                            ),
-                          ),
-                        ),
-                      ),
-                    ],
+            bottom: 50, // 底部留出功能栏空间
+            child: MouseRegion(
+              cursor: SystemMouseCursors.click,
+              onEnter: (_) => _onHoverEnter(),
+              onExit: (_) => _onHoverExit(),
+              child: Opacity(
+                opacity: engine.opacity,
+                child: Transform.scale(
+                  scale: engine.scale,
+                  child: SizedBox(
+                    width: 157,
+                    height: 280,
+                    child: PetCanvas(
+                      key: _petCanvasKey,
+                      engine: engine,
+                      onTap: _onPetTap,
+                      onDoubleTap: _onPetDoubleTap,
+                      onDragStart: _onDragStart,
+                    ),
                   ),
-                ),  // SizedBox (height: _petWindowHeight)
-            ),  // Align
-          ),  // SizedBox (width: _petWindowWidth)
-        ),  // Positioned
+                ),
+              ),
+            ),
+          ),
 
-          // 功能栏（竖向排列，在宠物右侧）
+          // ══════ 功能栏（仅按钮区域响应点击） ══════
           if (_showMenu)
             Positioned(
               right: 0,
-              top: 60, // 留出气泡空间
               bottom: 0,
               child: MouseRegion(
                 onEnter: (_) => _onMenuHoverEnter(),
@@ -747,18 +787,16 @@ class _PetWindowState extends State<PetWindow> with TickerProviderStateMixin, Wi
               ),
             ),
 
-          // 聊天面板（始终存活，关闭时隐藏但不销毁 state）
-          // 这样 AI 在思考/工作时关闭面板，不会中断执行
+          // ══════ 聊天面板（始终存活，关闭时隐藏但不销毁 state） ══════
           Positioned(
             left: 0,
             top: 0,
             bottom: 0,
-            right: _petWindowWidth, // 面板占据左侧剩余空间
+            right: _petWindowWidth,
             child: Offstage(
               offstage: !_showChat,
               child: Row(
                 children: [
-                  // 面板内容
                   Expanded(
                     child: ChatPanel(
                       key: _chatPanelKey,
@@ -767,7 +805,6 @@ class _PetWindowState extends State<PetWindow> with TickerProviderStateMixin, Wi
                       onToggleMode: _toggleChatMode,
                       isVisible: _showChat,
                       onBackgroundComplete: (message) {
-                        // AI 在面板关闭时完成工作，显示气泡提示
                         if (mounted) _showBubble(message);
                       },
                     ),
@@ -777,7 +814,7 @@ class _PetWindowState extends State<PetWindow> with TickerProviderStateMixin, Wi
             ),
           ),
 
-          // 商店面板（在左侧展开，不覆盖宠物）
+          // ══════ 商店面板 ══════
           if (_showShop)
             Positioned(
               left: 0,
@@ -793,7 +830,7 @@ class _PetWindowState extends State<PetWindow> with TickerProviderStateMixin, Wi
               ),
             ),
 
-          // 设置面板（在左侧展开，不覆盖宠物）
+          // ══════ 设置面板 ══════
           if (_showSettings)
             Positioned(
               left: 0,
@@ -805,7 +842,7 @@ class _PetWindowState extends State<PetWindow> with TickerProviderStateMixin, Wi
               ),
             ),
 
-          // 宠物属性面板（在左侧展开，不覆盖宠物）
+          // ══════ 属性面板 ══════
           if (_showPetStats)
             Positioned(
               left: 0,
@@ -817,7 +854,7 @@ class _PetWindowState extends State<PetWindow> with TickerProviderStateMixin, Wi
               ),
             ),
 
-          // 成就面板（在左侧展开，不覆盖宠物）
+          // ══════ 成就面板 ══════
           if (_showAchievements)
             Positioned(
               left: 0,
@@ -829,7 +866,7 @@ class _PetWindowState extends State<PetWindow> with TickerProviderStateMixin, Wi
               ),
             ),
 
-          // 日记面板（在左侧展开，不覆盖宠物）
+          // ══════ 日记面板 ══════
           if (_showDiary)
             Positioned(
               left: 0,
@@ -969,21 +1006,15 @@ class _PetWindowState extends State<PetWindow> with TickerProviderStateMixin, Wi
     if (!_isHovering) {
       _isHovering = true;
       _hoverAnimController.forward();
-      // 注意：不在这里调用 engine.onMouseHover()
-      // 被撸动画由 PetCanvas 中的 3 秒定时器控制，避免鼠标刚凑过去就打断当前动画
     }
   }
 
   void _onHoverExit() {
     if (_isHovering) {
       _isHovering = false;
-      // 注意：不在这里调用 engine.onMouseLeave()
-      // 动画恢复由 PetCanvas 的 _onMouseExit 和控制器状态机自动处理
-      // 如果菜单没打开，才隐藏状态条
       if (!_showMenu) {
         _hoverAnimController.reverse();
       }
-      // 如果菜单打开了但鼠标移出，延迟 2 秒隐藏菜单
       if (_showMenu && !_isMenuHovering) {
         _scheduleMenuHide();
       }
@@ -1015,7 +1046,6 @@ class _PetWindowState extends State<PetWindow> with TickerProviderStateMixin, Wi
   /// 鼠标离开菜单区域
   void _onMenuHoverExit() {
     _isMenuHovering = false;
-    // 如果鼠标也不在宠物上，延迟隐藏菜单
     if (!_isHovering && _showMenu) {
       _scheduleMenuHide();
     }
@@ -1184,7 +1214,7 @@ class _PetWindowState extends State<PetWindow> with TickerProviderStateMixin, Wi
             await _shrinkWindow();
           }
         }
-        // 打开新面板：先显示面板UI，再扩展窗口，让面板内容准备好
+        // 打开新面板
         if (mounted) {
           setState(() {
             if (panel == 'chat') _showChat = true;
@@ -1323,7 +1353,7 @@ class _PetWindowState extends State<PetWindow> with TickerProviderStateMixin, Wi
         );
       },
       child: Container(
-        padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 4),
+        padding: const EdgeInsets.symmetric(vertical: 4, horizontal: 8),
         decoration: BoxDecoration(
           color: Colors.white,
           borderRadius: BorderRadius.circular(16),
@@ -1340,7 +1370,7 @@ class _PetWindowState extends State<PetWindow> with TickerProviderStateMixin, Wi
             ),
           ],
         ),
-        child: Column(
+        child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
             _MenuButton(
@@ -1402,10 +1432,10 @@ class _SpeechBubble extends StatelessWidget {
       painter: _SpeechBubblePainter(),
       child: Container(
         constraints: const BoxConstraints(
-          maxWidth: 280,
-          minHeight: 48,
+          maxWidth: 220,
+          minHeight: 44,
         ),
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
         child: Text(
           text,
           style: const TextStyle(

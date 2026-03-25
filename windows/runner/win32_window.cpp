@@ -2,6 +2,7 @@
 
 #include <dwmapi.h>
 #include <flutter_windows.h>
+#include <fstream>
 
 #include "resource.h"
 
@@ -170,6 +171,22 @@ LRESULT CALLBACK Win32Window::WndProc(HWND const window,
                                       UINT const message,
                                       WPARAM const wparam,
                                       LPARAM const lparam) noexcept {
+  // Debug: log WM_NCHITTEST at the very first entry point
+  if (message == WM_NCHITTEST) {
+    static DWORD lastLogTime = 0;
+    DWORD now = GetTickCount();
+    if (now - lastLogTime > 1000) {
+      char tempPath[MAX_PATH];
+      GetTempPathA(MAX_PATH, tempPath);
+      std::string logPath = std::string(tempPath) + "goosebaby_debug.log";
+      std::ofstream f(logPath, std::ios::app);
+      if (f.is_open()) {
+        f << "WndProc: WM_NCHITTEST received" << std::endl;
+      }
+      lastLogTime = now;
+    }
+  }
+
   if (message == WM_NCCREATE) {
     auto window_struct = reinterpret_cast<CREATESTRUCT*>(lparam);
     SetWindowLongPtr(window, GWLP_USERDATA,
@@ -190,6 +207,22 @@ Win32Window::MessageHandler(HWND hwnd,
                             UINT const message,
                             WPARAM const wparam,
                             LPARAM const lparam) noexcept {
+  // Debug: log WM_NCHITTEST
+  if (message == WM_NCHITTEST) {
+    static DWORD lastLogTime = 0;
+    DWORD now = GetTickCount();
+    if (now - lastLogTime > 500) {
+      char tempPath[MAX_PATH];
+      GetTempPathA(MAX_PATH, tempPath);
+      std::string logPath = std::string(tempPath) + "goosebaby_debug.log";
+      std::ofstream f(logPath, std::ios::app);
+      if (f.is_open()) {
+        f << "Win32Window::WM_NCHITTEST received" << std::endl;
+      }
+      lastLogTime = now;
+    }
+  }
+
   switch (message) {
     case WM_DESTROY:
       window_handle_ = nullptr;
