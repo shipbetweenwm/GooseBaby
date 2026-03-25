@@ -1517,6 +1517,7 @@ class _PetStatsPanel extends StatelessWidget {
           // 标题栏（可拖动窗口）
           GestureDetector(
             onPanStart: (_) => windowManager.startDragging(),
+            behavior: HitTestBehavior.opaque,
             child: Container(
               padding: const EdgeInsets.fromLTRB(20, 16, 12, 8),
               child: Row(

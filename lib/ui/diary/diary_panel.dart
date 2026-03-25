@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+import 'package:window_manager/window_manager.dart';
 import '../../models/models.dart';
 import '../../services/diary_service.dart';
 import '../../ai/llm_manager.dart';
@@ -90,66 +91,69 @@ class _DiaryPanelState extends State<DiaryPanel> {
   }
 
   Widget _buildHeader() {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
-      decoration: const BoxDecoration(
-        border: Border(
-          bottom: BorderSide(color: Color(0xFFE0D5C5), width: 1),
+    return GestureDetector(
+      onPanStart: (_) => windowManager.startDragging(),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
+        decoration: const BoxDecoration(
+          border: Border(
+            bottom: BorderSide(color: Color(0xFFE0D5C5), width: 1),
+          ),
         ),
-      ),
-      child: Row(
-        children: [
-          Container(
-            padding: const EdgeInsets.all(8),
-            decoration: BoxDecoration(
-              color: const Color(0xFFFFE4B5),
-              borderRadius: BorderRadius.circular(8),
+        child: Row(
+          children: [
+            Container(
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                color: const Color(0xFFFFE4B5),
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: const Text('📔', style: TextStyle(fontSize: 20)),
             ),
-            child: const Text('📔', style: TextStyle(fontSize: 20)),
-          ),
-          const SizedBox(width: 12),
-          const Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                '鹅宝的日记',
-                style: TextStyle(
-                  fontSize: 18,
-                  fontWeight: FontWeight.bold,
-                  color: Color(0xFF5D4037),
+            const SizedBox(width: 12),
+            const Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  '鹅宝的日记',
+                  style: TextStyle(
+                    fontSize: 18,
+                    fontWeight: FontWeight.bold,
+                    color: Color(0xFF5D4037),
+                  ),
                 ),
-              ),
-              Text(
-                '记录我和主人的点点滴滴',
-                style: TextStyle(fontSize: 12, color: Colors.grey),
-              ),
-            ],
-          ),
-          const Spacer(),
-          // 手动生成按钮（调试用）
-          IconButton(
-            icon: const Icon(Icons.edit_note, size: 20, color: Color(0xFF8D6E63)),
-            onPressed: () async {
-              // 获取今日会话内容并生成日记
-              final conversations = await ConversationManager.getTodayConversationsSummary();
-              await DiaryService.instance.generateNow(
-                todayConversationsCallback: () => conversations,
-              );
-              if (mounted) {
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(content: Text('日记已生成~'), duration: Duration(seconds: 2)),
-                );
-              }
-            },
-            tooltip: '生成今日日记',
-          ),
-          if (widget.onClose != null)
-            IconButton(
-              icon: const Icon(Icons.close, size: 20),
-              onPressed: widget.onClose,
-              color: Colors.grey,
+                Text(
+                  '记录我和主人的点点滴滴',
+                  style: TextStyle(fontSize: 12, color: Colors.grey),
+                ),
+              ],
             ),
-        ],
+            const Spacer(),
+            // 手动生成按钮（调试用）
+            IconButton(
+              icon: const Icon(Icons.edit_note, size: 20, color: Color(0xFF8D6E63)),
+              onPressed: () async {
+                // 获取今日会话内容并生成日记
+                final conversations = await ConversationManager.getTodayConversationsSummary();
+                await DiaryService.instance.generateNow(
+                  todayConversationsCallback: () => conversations,
+                );
+                if (mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text('日记已生成~'), duration: Duration(seconds: 2)),
+                  );
+                }
+              },
+              tooltip: '生成今日日记',
+            ),
+            if (widget.onClose != null)
+              IconButton(
+                icon: const Icon(Icons.close, size: 20),
+                onPressed: widget.onClose,
+                color: Colors.grey,
+              ),
+          ],
+        ),
       ),
     );
   }
