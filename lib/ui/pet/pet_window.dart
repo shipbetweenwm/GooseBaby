@@ -99,7 +99,7 @@ class _PetWindowState extends State<PetWindow> with TickerProviderStateMixin, Wi
   }
   /// 宠物区域原始窗口宽度（菜单栏宽度，功能栏在下方横排）
   static const double _petWindowWidth = 220;
-  /// 宠物区域原始窗口高度（气泡 + 视频 + 底部功能栏）
+  /// 宠物区域原始窗口高度（气泡 + 视频 + 底部空间）
   // ignore: unused_field
   static const double _petWindowHeight = 400;
   /// 面板窗口高度（屏幕高度 * 0.618，最小 550，最大 900）
