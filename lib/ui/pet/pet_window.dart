@@ -158,7 +158,7 @@ class _PetWindowState extends State<PetWindow> with TickerProviderStateMixin, Wi
         final petWidth = 157.0;
         rects.add({
           'left': size.width - petWidth - 25,
-          'top': size.height - 230,  // 50 + 280 - 30 = 300（上方 30px 可点击穿透）
+          'top': size.height - 220,  // 50 + 280 - 30 = 300（上方 30px 可点击穿透）
           'right': size.width - 60,
           'bottom': size.height - 30,
         });
@@ -706,7 +706,7 @@ class _PetWindowState extends State<PetWindow> with TickerProviderStateMixin, Wi
           if (_bubbleText != null)
             Positioned(
               right: 0,
-              bottom: 300 + 50, // 视频bottom(50) + 视频高度(280) + 间距 - 10
+              bottom: 270, // 往下移动80px
               child: IgnorePointer(
                 child: SizedBox(
                   width: _petWindowWidth + 100, // 气泡可以往左溢出
