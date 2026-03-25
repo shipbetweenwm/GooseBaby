@@ -1407,14 +1407,15 @@ class _SpeechBubble extends StatelessWidget {
           maxWidth: 280,
           minHeight: 48,
         ),
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
         child: Text(
           text,
           style: const TextStyle(
-            fontSize: 16,
-            height: 1.5,
-            color: Color(0xFF424242),
-            fontWeight: FontWeight.w500,
+            fontSize: 14,
+            height: 1.4,
+            color: Color(0xFF5D4037),
+            fontWeight: FontWeight.w400,
+            letterSpacing: 0.5, // 字间距增加，更可爱
           ),
         ),
       ),
