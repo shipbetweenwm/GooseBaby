@@ -690,9 +690,9 @@ class _PetWindowState extends State<PetWindow> with TickerProviderStateMixin, Wi
                             ),
                           ),
                         ),
-                      // 视频容器（靠底部）
+                      // 视频容器（底部留出功能栏空间）
                       Positioned(
-                        bottom: 0,
+                        bottom: 55, // 功能栏高度
                         left: 0,
                         right: 0,
                         child: MouseRegion(
@@ -725,10 +725,10 @@ class _PetWindowState extends State<PetWindow> with TickerProviderStateMixin, Wi
           ),  // SizedBox (width: _petWindowWidth)
         ),  // Positioned
 
-          // 功能栏（悬浮在视频上方，不影响下方空间）
+          // 功能栏（在视频正下方）
           if (_showMenu)
             Positioned(
-              bottom: 285, // 视频高度 280 + 间距 5
+              bottom: 0,
               right: 0,
               child: SizedBox(
                 width: 420, // 固定宽度，确保功能按钮完整显示
