@@ -1,4 +1,6 @@
 import 'dart:io';
+import 'dart:convert';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
@@ -6,6 +8,8 @@ import 'package:window_manager/window_manager.dart';
 import '../../ai/llm_manager.dart';
 import '../../ai/agent/agent_types.dart';
 import '../../ai/agent/agent_loop.dart';
+import '../../ai/agent/agent_mode.dart';
+import '../../ai/agent/sub_agent_types.dart';
 import '../../ai/memory/memory_manager.dart';
 import '../../ai/self_improvement.dart';
 import '../../ai/prompts.dart';
@@ -51,6 +55,9 @@ class _ChatPanelState extends State<ChatPanel> with SingleTickerProviderStateMix
 
   final List<_ChatMessage> _messages = [];
   bool _isLoading = false;
+  
+  /// 当前 Agent 模式
+  AgentMode _agentMode = AgentMode.craft;
   /// 流式输出的当前内容
   String _streamingContent = '';
   /// 工具调用中间步骤（实时显示在页面上）
@@ -68,6 +75,25 @@ class _ChatPanelState extends State<ChatPanel> with SingleTickerProviderStateMix
   String? _processingConversationId;
   /// 是否显示会话列表（两种模式都可控制）
   bool _showConversationList = true;
+  
+  /// 是否显示 Agent Team 面板
+  bool _showAgentTeamPanel = false;
+  /// Agent Team 配置
+  final List<TeamAgent> _teamAgents = [];
+  /// 团队消息板
+  final TeamMessageBoard _teamMessageBoard = TeamMessageBoard();
+  /// 当前团队任务（由主管动态创建）
+  final List<TeamTask> _dynamicTasks = [];
+  /// 角色状态（thinking=思考中, idle=空闲）
+  final Map<String, String> _agentStatus = {};
+  /// 任务输出文件路径（taskId -> 文件路径）
+  final Map<String, String> _taskOutputFiles = {};
+  /// 当前输出目录
+  String? _currentOutputDir;
+  /// Team 模式的取消令牌
+  CancellationToken? _teamCancellationToken;
+  /// Team 模式是否正在执行
+  bool _isTeamExecuting = false;
 
   double get _chatFontSize => StorageManager.getSetting<double>('chat_font_size', defaultValue: 14.0) ?? 14.0;
 
@@ -144,8 +170,20 @@ class _ChatPanelState extends State<ChatPanel> with SingleTickerProviderStateMix
 
     // 立即开始动画，不延迟
     _slideController.forward();
+    
+    // 加载保存的 Agent 模式
+    _loadAgentMode();
 
     _initializeMode();
+  }
+  
+  void _loadAgentMode() {
+    final savedMode = StorageManager.getSetting<String>('agent_mode', defaultValue: 'craft');
+    _agentMode = AgentModeExtension.fromString(savedMode ?? 'craft') ?? AgentMode.craft;
+  }
+  
+  void _saveAgentMode(AgentMode mode) {
+    StorageManager.setSetting('agent_mode', mode.name);
   }
 
   @override
@@ -181,6 +219,22 @@ class _ChatPanelState extends State<ChatPanel> with SingleTickerProviderStateMix
         // 统一加载当前会话消息
         _loadConversationMessages();
       }
+    });
+    
+    // 配置 Agent Teams 消息回调
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      try {
+        final skillManager = context.read<SkillManager>();
+        skillManager.configureAgentTeamsSkill(
+          onMessage: (message) {
+            if (mounted) {
+              setState(() {
+                _teamMessageBoard.add(message);
+              });
+            }
+          },
+        );
+      } catch (_) {}
     });
   }
 
@@ -404,9 +458,34 @@ class _ChatPanelState extends State<ChatPanel> with SingleTickerProviderStateMix
 
   /// 停止当前会话（用户点击停止按钮）
   void _stopCurrentSession() {
-    if (!_isLoading || _cancellationToken == null) return;
-    _cancellationToken!.cancel();
-    debugPrint('🛑 用户取消了当前会话');
+    // 停止普通模式
+    if (_isLoading && _cancellationToken != null) {
+      _cancellationToken!.cancel();
+      debugPrint('🛑 用户取消了当前会话');
+    }
+    
+    // 停止 Team 模式
+    if (_isTeamExecuting && _teamCancellationToken != null) {
+      _teamCancellationToken!.cancel();
+      debugPrint('🛑 用户取消了 Team 模式任务');
+      
+      // 重置所有角色状态
+      setState(() {
+        _isTeamExecuting = false;
+        _isLoading = false;
+        for (final agentId in _agentStatus.keys) {
+          _agentStatus[agentId] = 'idle';
+        }
+      });
+      
+      // 发送取消通知
+      _sendTeamMessage(
+        fromAgentId: 'system',
+        fromAgentName: '系统',
+        type: TeamMessageType.broadcast,
+        content: '⚠️ 任务已被用户取消',
+      );
+    }
   }
 
   Future<void> _sendMessage() async {
@@ -414,6 +493,35 @@ class _ChatPanelState extends State<ChatPanel> with SingleTickerProviderStateMix
     final attachments = List<MessageAttachment>.from(_pendingAttachments);
     if (text.isEmpty && attachments.isEmpty) return;
     if (_isLoading) return;
+
+    // Team 模式：检查 @ 提及
+    if (_agentMode == AgentMode.team && text.isNotEmpty) {
+      _inputController.clear();
+      _pendingAttachments.clear();
+      
+      // 添加用户消息到对话框
+      setState(() {
+        _messages.add(_ChatMessage(
+          content: text,
+          isUser: true,
+          timestamp: DateTime.now(),
+          attachments: attachments,
+        ));
+      });
+      _saveChatHistory();
+      _scrollToBottom();
+      
+      // 检测 @ 提及
+      final mentions = _parseMentions(text);
+      if (mentions.isNotEmpty) {
+        // 有 @ 提及，让指定角色回答
+        await _handleMentionedReply(text, mentions);
+      } else {
+        // 没有 @，走主管分解任务流程
+        await _startTeamExecution(text);
+      }
+      return;
+    }
 
     // 记住当前会话ID，防止切换会话后保存到错误会话
     _processingConversationId = _currentConversationId;
@@ -575,8 +683,12 @@ class _ChatPanelState extends State<ChatPanel> with SingleTickerProviderStateMix
       final sessionId = _currentConversationId ?? DateTime.now().millisecondsSinceEpoch.toString();
       await SkillFileUtils.setSessionWorkingDir(sessionId);
       final workDir = SkillFileUtils.effectiveWorkingDir;
+      
+      // Web 端不支持 Platform，使用条件判断
+      final osName = kIsWeb ? 'web' : Platform.operatingSystem;
+      
       final envPrompt = '\n\n## 运行环境'
-          '\n- 操作系统: ${Platform.operatingSystem}'
+          '\n- 操作系统: $osName'
           '\n- 当前工作目录: $workDir（每次对话独立，所有文件写在此目录下）'
           '\n- write_file 写文件：直接用文件名（如 script.py），不需要 ./ 前缀'
           '\n- shell_exec 执行脚本：用 command 参数，只写文件名，如 `command: "python my_script.py"`。**不要写完整路径**，系统在工作目录下自动找到。'
@@ -1044,6 +1156,7 @@ class _ChatPanelState extends State<ChatPanel> with SingleTickerProviderStateMix
                     child: Column(
                       children: [
                         _buildHeader(),
+                        if (_showAgentTeamPanel) _buildAgentTeamPanel(),
                         Expanded(child: _buildMessageList()),
                         _buildInputBar(),
                       ],
@@ -1054,6 +1167,7 @@ class _ChatPanelState extends State<ChatPanel> with SingleTickerProviderStateMix
             : Column(
                 children: [
                   _buildHeader(),
+                  if (_showAgentTeamPanel) _buildAgentTeamPanel(),
                   Expanded(child: _buildMessageList()),
                   _buildInputBar(),
                 ],
@@ -1091,6 +1205,9 @@ class _ChatPanelState extends State<ChatPanel> with SingleTickerProviderStateMix
                 ],
               ),
             ),
+            // Agent 模式切换
+            _buildModeSelector(),
+            const SizedBox(width: 8),
             // 会话列表显示/隐藏按钮（两种模式都可用）
             _HeaderButton(
               icon: Icon(
@@ -1155,6 +1272,2091 @@ class _ChatPanelState extends State<ChatPanel> with SingleTickerProviderStateMix
     );
   }
 
+  /// 构建 Agent 模式选择器
+  Widget _buildModeSelector() {
+    // 只有工作模式才支持 Team 模式
+    final availableModes = widget.workMode 
+        ? AgentMode.values 
+        : AgentMode.values.where((m) => m != AgentMode.team).toList();
+    
+    // 如果当前模式是 team 但不是工作模式，自动切换到 craft
+    if (_agentMode == AgentMode.team && !widget.workMode) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        setState(() {
+          _agentMode = AgentMode.craft;
+          _showAgentTeamPanel = false;
+        });
+      });
+    }
+    
+    return PopupMenuButton<AgentMode>(
+      initialValue: _agentMode,
+      onSelected: (mode) {
+        setState(() {
+          _agentMode = mode;
+          // Team 模式时显示 Agent Team 面板
+          _showAgentTeamPanel = mode == AgentMode.team;
+        });
+        _saveAgentMode(mode);
+      },
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      itemBuilder: (context) => availableModes.map((mode) {
+        final isSelected = mode == _agentMode;
+        return PopupMenuItem(
+          value: mode,
+          child: Row(
+            children: [
+              Text(mode.icon, style: const TextStyle(fontSize: 16)),
+              const SizedBox(width: 8),
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    mode.displayName,
+                    style: TextStyle(
+                      fontSize: 13,
+                      fontWeight: isSelected ? FontWeight.w600 : FontWeight.normal,
+                    ),
+                  ),
+                  Text(
+                    mode.description,
+                    style: TextStyle(fontSize: 10, color: Colors.grey.shade500),
+                  ),
+                ],
+              ),
+              if (isSelected) ...[
+                const Spacer(),
+                const Icon(Icons.check, size: 16, color: Color(0xFF4FC3F7)),
+              ],
+            ],
+          ),
+        );
+      }).toList(),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+        decoration: BoxDecoration(
+          color: _getModeColor().withOpacity(0.1),
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(color: _getModeColor().withOpacity(0.3)),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(_agentMode.icon, style: const TextStyle(fontSize: 14)),
+            const SizedBox(width: 4),
+            Text(
+              _agentMode.displayName,
+              style: TextStyle(
+                fontSize: 12,
+                fontWeight: FontWeight.w600,
+                color: _getModeColor(),
+              ),
+            ),
+            const SizedBox(width: 2),
+            Icon(Icons.arrow_drop_down, size: 16, color: _getModeColor()),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// 获取模式颜色
+  Color _getModeColor() {
+    switch (_agentMode) {
+      case AgentMode.craft:
+        return const Color(0xFF4CAF50); // 绿色
+      case AgentMode.plan:
+        return const Color(0xFF2196F3); // 蓝色
+      case AgentMode.ask:
+        return const Color(0xFF9E9E9E); // 灰色
+      case AgentMode.team:
+        return const Color(0xFF9C27B0); // 紫色
+    }
+  }
+
+  /// 构建 Agent Team 配置面板
+  Widget _buildAgentTeamPanel() {
+    return Container(
+      constraints: const BoxConstraints(maxHeight: 200),
+      decoration: BoxDecoration(
+        color: Colors.purple.shade50,
+        border: Border(bottom: BorderSide(color: Colors.purple.shade200, width: 0.5)),
+      ),
+      child: Column(
+        children: [
+          // 标题栏
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+            decoration: BoxDecoration(
+              color: Colors.purple.shade100,
+              border: Border(bottom: BorderSide(color: Colors.purple.shade200)),
+            ),
+            child: Row(
+              children: [
+                const Icon(Icons.groups, size: 16, color: Color(0xFF9C27B0)),
+                const SizedBox(width: 6),
+                const Text(
+                  'Agent Team',
+                  style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: Color(0xFF9C27B0)),
+                ),
+                const Spacer(),
+                // 导入按钮
+                InkWell(
+                  onTap: _showSavedTeams,
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                    decoration: BoxDecoration(
+                      color: Colors.blue.shade200,
+                      borderRadius: BorderRadius.circular(4),
+                    ),
+                    child: const Text('导入', style: TextStyle(fontSize: 10, color: Colors.white)),
+                  ),
+                ),
+                const SizedBox(width: 4),
+                // 保存按钮
+                if (_teamAgents.isNotEmpty)
+                  InkWell(
+                    onTap: _saveCurrentTeam,
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                      decoration: BoxDecoration(
+                        color: Colors.green.shade200,
+                        borderRadius: BorderRadius.circular(4),
+                      ),
+                      child: const Text('保存', style: TextStyle(fontSize: 10, color: Colors.white)),
+                    ),
+                  ),
+              ],
+            ),
+          ),
+          // 左右两列布局
+          Expanded(
+            child: Row(
+              children: [
+                // 左侧：团队成员
+                Expanded(
+                  flex: 3,
+                  child: _buildAgentsSection(),
+                ),
+                // 分隔线
+                Container(
+                  width: 1,
+                  color: Colors.purple.shade100,
+                ),
+                // 右侧：任务面板
+                Expanded(
+                  flex: 4,
+                  child: _buildTasksPanel(),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// 团队成员区域（紧凑版）
+  Widget _buildAgentsSection() {
+    final hasSupervisor = _teamAgents.any((a) => a.id == 'supervisor');
+    final isReady = hasSupervisor && _teamAgents.length >= 2;
+    
+    return Container(
+      padding: const EdgeInsets.all(8),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // 标题行
+          Row(
+            children: [
+              const Text('👥 成员', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600)),
+              const SizedBox(width: 6),
+              // 状态指示
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+                decoration: BoxDecoration(
+                  color: isReady ? Colors.green.shade100 : Colors.orange.shade100,
+                  borderRadius: BorderRadius.circular(3),
+                ),
+                child: Text(
+                  isReady ? '就绪' : '未就绪',
+                  style: TextStyle(
+                    fontSize: 8,
+                    fontWeight: FontWeight.w600,
+                    color: isReady ? Colors.green.shade700 : Colors.orange.shade700,
+                  ),
+                ),
+              ),
+              const Spacer(),
+              // AI生成按钮
+              InkWell(
+                onTap: _showAIGenerateDialog,
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+                  decoration: BoxDecoration(
+                    gradient: LinearGradient(
+                      colors: [Colors.purple.shade300, Colors.blue.shade300],
+                    ),
+                    borderRadius: BorderRadius.circular(3),
+                  ),
+                  child: const Text('✨AI', style: TextStyle(fontSize: 9, color: Colors.white)),
+                ),
+              ),
+              const SizedBox(width: 3),
+              // 添加主管按钮
+              InkWell(
+                onTap: _addSupervisor,
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+                  decoration: BoxDecoration(
+                    color: Colors.orange.shade200,
+                    borderRadius: BorderRadius.circular(3),
+                  ),
+                  child: const Text('+主管', style: TextStyle(fontSize: 9, color: Colors.white)),
+                ),
+              ),
+              const SizedBox(width: 3),
+              InkWell(
+                onTap: _addAgent,
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+                  decoration: BoxDecoration(
+                    color: Colors.purple.shade200,
+                    borderRadius: BorderRadius.circular(3),
+                  ),
+                  child: const Text('+', style: TextStyle(fontSize: 9, color: Colors.white)),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 4),
+          // 成员列表
+          Expanded(
+            child: _teamAgents.isEmpty
+                ? Center(
+                    child: Text(
+                      '点击 ✨AI 一键生成团队',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(fontSize: 10, color: Colors.grey.shade500),
+                    ),
+                  )
+                : ListView.builder(
+                    itemCount: _teamAgents.length,
+                    itemBuilder: (ctx, idx) => _buildAgentItem(_teamAgents[idx], idx),
+                  ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// 成员项
+  Widget _buildAgentItem(TeamAgent agent, int index) {
+    final status = _agentStatus[agent.id] ?? 'idle';
+    final isThinking = status == 'thinking';
+    
+    return Container(
+      margin: const EdgeInsets.only(bottom: 4),
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(6),
+        border: Border.all(
+          color: isThinking ? Colors.blue.shade200 : Colors.purple.shade100,
+          width: isThinking ? 1.5 : 1,
+        ),
+      ),
+      child: Row(
+        children: [
+          // 头像 + 状态指示器
+          Stack(
+            children: [
+              Container(
+                width: 24,
+                height: 24,
+                decoration: BoxDecoration(
+                  color: isThinking ? Colors.blue.shade200 : Colors.purple.shade200,
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Center(
+                  child: isThinking
+                      ? const SizedBox(
+                          width: 12,
+                          height: 12,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 1.5,
+                            color: Colors.white,
+                          ),
+                        )
+                      : Text(
+                          agent.name.isNotEmpty ? agent.name[0] : 'A',
+                          style: const TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: Colors.white),
+                        ),
+                ),
+              ),
+              // 在线状态点
+              Positioned(
+                right: 0,
+                bottom: 0,
+                child: Container(
+                  width: 8,
+                  height: 8,
+                  decoration: BoxDecoration(
+                    color: isThinking ? Colors.blue : Colors.green,
+                    shape: BoxShape.circle,
+                    border: Border.all(color: Colors.white, width: 1.5),
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(width: 6),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Text(agent.name, style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w500)),
+                    const SizedBox(width: 4),
+                    if (isThinking)
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+                        decoration: BoxDecoration(
+                          color: Colors.blue.shade50,
+                          borderRadius: BorderRadius.circular(3),
+                        ),
+                        child: Text(
+                          '思考中',
+                          style: TextStyle(fontSize: 8, color: Colors.blue.shade700),
+                        ),
+                      ),
+                  ],
+                ),
+                Text(agent.role, style: TextStyle(fontSize: 9, color: Colors.grey.shade600)),
+              ],
+            ),
+          ),
+          // 编辑按钮
+          InkWell(
+            onTap: () => _editAgent(agent, index),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 4),
+              child: Icon(Icons.edit, size: 14, color: Colors.purple.shade300),
+            ),
+          ),
+          // 删除按钮
+          InkWell(
+            onTap: () => setState(() => _teamAgents.removeAt(index)),
+            child: Icon(Icons.close, size: 14, color: Colors.red.shade300),
+          ),
+        ],
+      ),
+    );
+  }
+  
+  /// 编辑角色
+  void _editAgent(TeamAgent agent, int index) {
+    final nameController = TextEditingController(text: agent.name);
+    final roleController = TextEditingController(text: agent.role);
+    final systemPromptController = TextEditingController(text: agent.systemPrompt);
+    
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('编辑角色'),
+        content: SizedBox(
+          width: 300,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(
+                controller: nameController,
+                decoration: const InputDecoration(
+                  labelText: '名字',
+                  hintText: '角色名字',
+                ),
+              ),
+              const SizedBox(height: 8),
+              TextField(
+                controller: roleController,
+                decoration: const InputDecoration(
+                  labelText: '角色描述',
+                  hintText: '如：前端开发、UI设计师',
+                ),
+              ),
+              const SizedBox(height: 8),
+              TextField(
+                controller: systemPromptController,
+                maxLines: 5,
+                decoration: const InputDecoration(
+                  labelText: '系统提示词',
+                  hintText: '描述角色的职责和专长...',
+                  alignLabelWithHint: true,
+                ),
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: const Text('取消'),
+          ),
+          ElevatedButton(
+            onPressed: () {
+              if (nameController.text.isNotEmpty) {
+                setState(() {
+                  _teamAgents[index] = TeamAgent(
+                    id: agent.id,
+                    name: nameController.text,
+                    role: roleController.text.isNotEmpty ? roleController.text : '助手',
+                    systemPrompt: systemPromptController.text.isNotEmpty 
+                        ? systemPromptController.text 
+                        : '你是一个${roleController.text.isNotEmpty ? roleController.text : "助手"}，请完成分配给你的任务。',
+                    allowedTools: agent.allowedTools,
+                    priority: agent.priority,
+                  );
+                });
+                Navigator.of(ctx).pop();
+              }
+            },
+            style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF9C27B0), foregroundColor: Colors.white),
+            child: const Text('保存'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// 任务面板（右侧）
+  Widget _buildTasksPanel() {
+    final totalTasks = _dynamicTasks.length;
+    final completedTasks = _dynamicTasks.where((t) => t.status == TaskStatus.completed).length;
+    final runningTasks = _dynamicTasks.where((t) => t.status == TaskStatus.running).length;
+    final pendingTasks = totalTasks - completedTasks - runningTasks;
+    
+    return Container(
+      padding: const EdgeInsets.all(8),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // 标题行 + 进度
+          Row(
+            children: [
+              const Text('📋 任务', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600)),
+              const SizedBox(width: 6),
+              if (totalTasks > 0)
+                Expanded(
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: ClipRRect(
+                          borderRadius: BorderRadius.circular(4),
+                          child: LinearProgressIndicator(
+                            value: totalTasks > 0 ? completedTasks / totalTasks : 0,
+                            backgroundColor: Colors.grey.shade200,
+                            valueColor: AlwaysStoppedAnimation<Color>(Colors.green.shade400),
+                            minHeight: 4,
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 6),
+                      Text(
+                        '$completedTasks/$totalTasks',
+                        style: TextStyle(fontSize: 9, color: Colors.grey.shade600),
+                      ),
+                    ],
+                  ),
+                ),
+            ],
+          ),
+          const SizedBox(height: 4),
+          // 任务统计
+          if (totalTasks > 0)
+            Row(
+              children: [
+                _buildTaskStat('待执行', pendingTasks, Colors.grey),
+                const SizedBox(width: 8),
+                _buildTaskStat('执行中', runningTasks, Colors.blue),
+                const SizedBox(width: 8),
+                _buildTaskStat('已完成', completedTasks, Colors.green),
+              ],
+            ),
+          const SizedBox(height: 4),
+          // 任务列表
+          Expanded(
+            child: totalTasks == 0
+                ? Center(
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Icon(Icons.assignment, size: 24, color: Colors.grey.shade400),
+                        const SizedBox(height: 4),
+                        Text(
+                          '在对话框发送任务\n主管将自动分解',
+                          textAlign: TextAlign.center,
+                          style: TextStyle(fontSize: 9, color: Colors.grey.shade500),
+                        ),
+                      ],
+                    ),
+                  )
+                : ListView.builder(
+                    itemCount: _dynamicTasks.length,
+                    itemBuilder: (ctx, idx) => _buildTaskItem(_dynamicTasks[idx], idx),
+                  ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildTaskStat(String label, int count, Color color) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Container(
+          width: 6,
+          height: 6,
+          decoration: BoxDecoration(
+            color: color,
+            shape: BoxShape.circle,
+          ),
+        ),
+        const SizedBox(width: 3),
+        Text('$label $count', style: TextStyle(fontSize: 9, color: Colors.grey.shade600)),
+      ],
+    );
+  }
+
+  Widget _buildTaskItem(TeamTask task, int index) {
+    final agent = _teamAgents.where((a) => a.id == task.assignedTo).firstOrNull;
+    final statusColor = _getTaskStatusColor(task.status);
+    final statusIcon = _getTaskStatusIcon(task.status);
+    
+    return Container(
+      margin: const EdgeInsets.only(bottom: 2),
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(4),
+        border: Border.all(color: Colors.grey.shade200),
+      ),
+      child: Row(
+        children: [
+          // 状态图标
+          Icon(statusIcon, size: 12, color: statusColor),
+          const SizedBox(width: 4),
+          // 任务序号
+          Container(
+            width: 14,
+            height: 14,
+            decoration: BoxDecoration(
+              color: Colors.purple.shade100,
+              borderRadius: BorderRadius.circular(2),
+            ),
+            child: Center(
+              child: Text(
+                '${index + 1}',
+                style: TextStyle(fontSize: 8, fontWeight: FontWeight.w600, color: Colors.purple.shade700),
+              ),
+            ),
+          ),
+          const SizedBox(width: 4),
+          // 任务描述
+          Expanded(
+            child: Text(
+              task.description,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                fontSize: 9,
+                color: task.status == TaskStatus.completed ? Colors.grey.shade500 : Colors.black87,
+                decoration: task.status == TaskStatus.completed ? TextDecoration.lineThrough : null,
+              ),
+            ),
+          ),
+          // 执行者
+          if (agent != null)
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+              decoration: BoxDecoration(
+                color: _getAgentColor(agent.id).withOpacity(0.1),
+                borderRadius: BorderRadius.circular(3),
+              ),
+              child: Text(
+                agent.name,
+                style: TextStyle(fontSize: 8, color: _getAgentColor(agent.id)),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  Color _getTaskStatusColor(TaskStatus status) {
+    switch (status) {
+      case TaskStatus.pending:
+      case TaskStatus.waiting:
+        return Colors.grey;
+      case TaskStatus.ready:
+        return Colors.orange;
+      case TaskStatus.running:
+        return Colors.blue;
+      case TaskStatus.completed:
+        return Colors.green;
+      case TaskStatus.failed:
+        return Colors.red;
+    }
+  }
+
+  IconData _getTaskStatusIcon(TaskStatus status) {
+    switch (status) {
+      case TaskStatus.pending:
+      case TaskStatus.waiting:
+        return Icons.circle_outlined;
+      case TaskStatus.ready:
+        return Icons.schedule;
+      case TaskStatus.running:
+        return Icons.sync;
+      case TaskStatus.completed:
+        return Icons.check_circle;
+      case TaskStatus.failed:
+        return Icons.error;
+    }
+  }
+
+  /// 获取 Agent 颜色
+  Color _getAgentColor(String agentId) {
+    final colors = [
+      const Color(0xFF9C27B0),
+      const Color(0xFF2196F3),
+      const Color(0xFF4CAF50),
+      const Color(0xFFFF9800),
+      const Color(0xFFE91E63),
+      const Color(0xFF00BCD4),
+    ];
+    final index = _teamAgents.indexWhere((a) => a.id == agentId);
+    return colors[index % colors.length];
+  }
+
+  /// 获取 Agent 名称
+  String _getAgentName(String agentId) {
+    final agent = _teamAgents.where((a) => a.id == agentId).firstOrNull;
+    return agent?.name ?? agentId;
+  }
+
+  /// 获取消息类型颜色
+  Color _getMessageTypeColor(TeamMessageType type) {
+    switch (type) {
+      case TeamMessageType.broadcast:
+        return Colors.orange;
+      case TeamMessageType.direct:
+        return Colors.blue;
+      case TeamMessageType.taskResult:
+        return Colors.green;
+      case TeamMessageType.statusUpdate:
+        return Colors.grey;
+    }
+  }
+
+  /// 获取消息类型标签
+  String _getMessageTypeLabel(TeamMessageType type) {
+    switch (type) {
+      case TeamMessageType.broadcast:
+        return '广播';
+      case TeamMessageType.direct:
+        return '私信';
+      case TeamMessageType.taskResult:
+        return '结果';
+      case TeamMessageType.statusUpdate:
+        return '状态';
+    }
+  }
+
+  /// 添加主管角色（默认的任务拆解和分配者）
+  void _addSupervisor() {
+    // 检查是否已有主管
+    if (_teamAgents.any((a) => a.id == 'supervisor')) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('团队已存在主管鹅'), duration: Duration(seconds: 1)),
+      );
+      return;
+    }
+    
+    setState(() {
+      _teamAgents.insert(0, TeamAgent(
+        id: 'supervisor',
+        name: '主管鹅',
+        role: '团队协调者',
+        systemPrompt: '你是团队主管，负责：\n'
+            '1. 分析用户需求，拆解为可执行的子任务\n'
+            '2. 根据团队成员能力，合理分配任务\n'
+            '3. 监控任务进度，协调成员协作\n'
+            '4. 汇总结果，给用户清晰反馈\n\n'
+            '输出格式：简洁、结构化，使用 @成员名 指定任务接收者。',
+        priority: 1, // 最高优先级
+      ));
+    });
+  }
+
+  /// 添加成员
+  void _addAgent() {
+    final nameController = TextEditingController();
+    final roleController = TextEditingController();
+    final systemPromptController = TextEditingController();
+    bool showSystemPrompt = false;
+    bool isGenerating = false;
+    String? generateError;
+    
+    // 获取 LLMManager
+    final llmManager = context.read<LLMManager>();
+    
+    // 预设角色模板
+    final presetTemplates = [
+      {'name': '代码审查员', 'role': '代码审查专家', 'prompt': '你是一个资深代码审查专家。专注于：安全漏洞、性能问题、代码规范、可维护性。输出格式：问题列表 + 修复建议，按严重程度排序。'},
+      {'name': '文档撰写者', 'role': '技术文档撰写专家', 'prompt': '你是技术文档撰写专家。风格：简洁、结构化、面向开发者。输出：Markdown 格式，包含代码示例和清晰的使用说明。'},
+      {'name': '测试工程师', 'role': '测试开发工程师', 'prompt': '你是测试开发工程师。专注于：边界条件、异常处理、集成测试。输出：测试用例列表，包含输入、预期输出、测试类型。'},
+      {'name': '架构分析师', 'role': '软件架构师', 'prompt': '你是软件架构师。分析：系统设计、模块划分、技术选型、扩展性。输出：架构图描述 + 关键决策说明 + 风险评估。'},
+    ];
+    
+    showDialog(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (dialogContext, setDialogState) => AlertDialog(
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+          title: Row(
+            children: [
+              const Text('添加团队成员', style: TextStyle(fontSize: 14)),
+              const Spacer(),
+              // 预设模板下拉
+              PopupMenuButton<String>(
+                tooltip: '选择预设模板',
+                icon: const Icon(Icons.auto_awesome, size: 18),
+                onSelected: (value) {
+                  final template = presetTemplates[int.parse(value)];
+                  nameController.text = template['name']!;
+                  roleController.text = template['role']!;
+                  systemPromptController.text = template['prompt']!;
+                  setDialogState(() => showSystemPrompt = true);
+                },
+                itemBuilder: (context) => presetTemplates.asMap().entries.map((e) =>
+                  PopupMenuItem(
+                    value: e.key.toString(),
+                    child: Text(e.value['name']!, style: const TextStyle(fontSize: 12)),
+                  ),
+                ).toList(),
+              ),
+            ],
+          ),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                TextField(
+                  controller: nameController,
+                  decoration: const InputDecoration(
+                    labelText: '名称',
+                    hintText: '如: 审查员',
+                    isDense: true,
+                  ),
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: roleController,
+                  decoration: const InputDecoration(
+                    labelText: '角色描述',
+                    hintText: '如: 代码审查专家',
+                    isDense: true,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                // 展开/折叠 systemPrompt
+                InkWell(
+                  onTap: () => setDialogState(() => showSystemPrompt = !showSystemPrompt),
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 4),
+                    child: Row(
+                      children: [
+                        Icon(
+                          showSystemPrompt ? Icons.expand_less : Icons.expand_more,
+                          size: 18,
+                          color: Colors.purple,
+                        ),
+                        const SizedBox(width: 4),
+                        Text(
+                          '系统提示词 (System Prompt)',
+                          style: TextStyle(fontSize: 11, color: Colors.purple.shade700),
+                        ),
+                        const Spacer(),
+                        // AI 生成按钮
+                        if (roleController.text.isNotEmpty)
+                          InkWell(
+                            onTap: isGenerating ? null : () async {
+                              setDialogState(() {
+                                isGenerating = true;
+                                generateError = null;
+                              });
+                              
+                              try {
+                                // 调用 LLMManager 生成系统提示词
+                                final role = roleController.text;
+                                final generatePrompt = '''请为以下角色生成一段专业的系统提示词(System Prompt)。
+
+角色: $role
+
+要求:
+1. 明确定义角色的职责范围和专业领域
+2. 说明该角色应该关注的重点事项
+3. 指定输出格式和风格要求
+4. 保持简洁但专业，不超过200字
+
+请直接输出系统提示词内容，不需要其他解释。''';
+
+                                final response = await llmManager.chatRaw([
+                                  {'role': 'user', 'content': generatePrompt}
+                                ]);
+                                
+                                systemPromptController.text = response.trim();
+                                setDialogState(() {
+                                  isGenerating = false;
+                                  showSystemPrompt = true;
+                                });
+                              } catch (e) {
+                                setDialogState(() {
+                                  isGenerating = false;
+                                  generateError = '生成失败: $e';
+                                });
+                              }
+                            },
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                              decoration: BoxDecoration(
+                                color: Colors.purple.shade100,
+                                borderRadius: BorderRadius.circular(4),
+                              ),
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  if (isGenerating)
+                                    const SizedBox(
+                                      width: 10,
+                                      height: 10,
+                                      child: CircularProgressIndicator(strokeWidth: 1.5),
+                                    )
+                                  else
+                                    const Icon(Icons.auto_awesome, size: 12, color: Colors.purple),
+                                  const SizedBox(width: 2),
+                                  Text(
+                                    isGenerating ? '生成中...' : 'AI生成',
+                                    style: const TextStyle(fontSize: 10, color: Colors.purple),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                      ],
+                    ),
+                  ),
+                ),
+                // 错误提示
+                if (generateError != null)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 4),
+                    child: Text(
+                      generateError!,
+                      style: const TextStyle(fontSize: 10, color: Colors.red),
+                    ),
+                  ),
+                // 折叠的 systemPrompt 输入区
+                if (showSystemPrompt)
+                  Container(
+                    margin: const EdgeInsets.only(top: 4),
+                    padding: const EdgeInsets.all(8),
+                    decoration: BoxDecoration(
+                      color: Colors.purple.shade50,
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(color: Colors.purple.shade200),
+                    ),
+                    child: TextField(
+                      controller: systemPromptController,
+                      maxLines: 4,
+                      decoration: const InputDecoration(
+                        hintText: '输入系统提示词，或使用 AI 生成...',
+                        border: InputBorder.none,
+                        isDense: true,
+                        contentPadding: EdgeInsets.zero,
+                      ),
+                      style: const TextStyle(fontSize: 11),
+                    ),
+                  ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop(),
+              child: const Text('取消'),
+            ),
+            ElevatedButton(
+              onPressed: () {
+                if (nameController.text.isNotEmpty) {
+                  final prompt = systemPromptController.text.isNotEmpty
+                      ? systemPromptController.text
+                      : '你是一个${roleController.text.isNotEmpty ? roleController.text : '助手'}，请完成分配给你的任务。';
+                  setState(() {
+                    _teamAgents.add(TeamAgent(
+                      id: 'agent_${DateTime.now().millisecondsSinceEpoch}',
+                      name: nameController.text,
+                      role: roleController.text.isNotEmpty ? roleController.text : '助手',
+                      systemPrompt: prompt,
+                    ));
+                  });
+                  Navigator.of(ctx).pop();
+                }
+              },
+              style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF9C27B0), foregroundColor: Colors.white),
+              child: const Text('添加'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// 保存当前团队配置
+  void _saveCurrentTeam() async {
+    final nameController = TextEditingController();
+    
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('保存团队配置'),
+        content: TextField(
+          controller: nameController,
+          decoration: const InputDecoration(
+            labelText: '团队名称',
+            hintText: '例如：游戏开发团队',
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('取消'),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('保存'),
+          ),
+        ],
+      ),
+    );
+    
+    if (confirmed != true || nameController.text.isEmpty) return;
+    
+    // 获取已保存的团队列表
+    final savedTeams = StorageManager.getSetting<List<dynamic>>('saved_teams', defaultValue: []) ?? [];
+    
+    // 创建团队配置
+    final teamConfig = {
+      'name': nameController.text,
+      'createdAt': DateTime.now().toIso8601String(),
+      'agents': _teamAgents.map((a) => a.toJson()).toList(),
+    };
+    
+    savedTeams.add(teamConfig);
+    await StorageManager.setSetting('saved_teams', savedTeams);
+    
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('团队"${nameController.text}"已保存'), duration: const Duration(seconds: 2)),
+      );
+    }
+  }
+
+  /// 显示已保存的团队列表
+  void _showSavedTeams() async {
+    final savedTeams = StorageManager.getSetting<List<dynamic>>('saved_teams', defaultValue: []) ?? [];
+    
+    if (savedTeams.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('暂无已保存的团队配置'), duration: Duration(seconds: 2)),
+      );
+      return;
+    }
+    
+    await showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('选择团队配置'),
+        content: SizedBox(
+          width: 300,
+          height: 300,
+          child: ListView.builder(
+            itemCount: savedTeams.length,
+            itemBuilder: (context, index) {
+              final team = savedTeams[index] as Map<String, dynamic>;
+              final name = team['name'] as String;
+              final createdAt = DateTime.tryParse(team['createdAt'] as String? ?? '');
+              final agentsCount = (team['agents'] as List?)?.length ?? 0;
+              
+              return ListTile(
+                leading: const Icon(Icons.group, color: Color(0xFF9C27B0)),
+                title: Text(name),
+                subtitle: Text(
+                  '${agentsCount} 名成员 · ${createdAt != null ? '${createdAt.month}/${createdAt.day}' : ''}',
+                  style: TextStyle(fontSize: 11, color: Colors.grey.shade600),
+                ),
+                trailing: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    // 删除按钮
+                    IconButton(
+                      icon: Icon(Icons.delete, size: 18, color: Colors.red.shade300),
+                      onPressed: () async {
+                        savedTeams.removeAt(index);
+                        await StorageManager.setSetting('saved_teams', savedTeams);
+                        if (mounted) {
+                          Navigator.of(ctx).pop();
+                          _showSavedTeams(); // 刷新列表
+                        }
+                      },
+                    ),
+                  ],
+                ),
+                onTap: () {
+                  _loadTeamFromConfig(team);
+                  Navigator.of(ctx).pop();
+                },
+              );
+            },
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: const Text('关闭'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// 从配置加载团队
+  void _loadTeamFromConfig(Map<String, dynamic> config) {
+    final agentsList = (config['agents'] as List?)?.cast<Map<String, dynamic>>() ?? [];
+    
+    setState(() {
+      _teamAgents.clear();
+      _teamAgents.addAll(agentsList.map((json) => TeamAgent.fromJson(json)));
+    });
+    
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('已加载团队: ${config['name']}'), duration: const Duration(seconds: 2)),
+    );
+  }
+
+  /// 显示 AI 生成团队对话框
+  void _showAIGenerateDialog() {
+    final projectController = TextEditingController();
+    bool isGenerating = false;
+    
+    showDialog(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          title: Row(
+            children: [
+              Container(
+                padding: const EdgeInsets.all(4),
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(
+                    colors: [Colors.purple.shade300, Colors.blue.shade300],
+                  ),
+                  borderRadius: BorderRadius.circular(4),
+                ),
+                child: const Text('✨', style: TextStyle(fontSize: 14)),
+              ),
+              const SizedBox(width: 8),
+              const Text('AI 生成团队'),
+            ],
+          ),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text(
+                '描述你的项目，AI 将自动生成合适的团队配置',
+                style: TextStyle(fontSize: 12, color: Colors.grey),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: projectController,
+                maxLines: 3,
+                autofocus: true,
+                decoration: const InputDecoration(
+                  hintText: '例如：开发一个AI宠物养成游戏，包含战斗、养成、社交功能',
+                  hintStyle: TextStyle(fontSize: 11),
+                  border: OutlineInputBorder(),
+                  contentPadding: EdgeInsets.all(10),
+                ),
+              ),
+              const SizedBox(height: 8),
+              Wrap(
+                spacing: 6,
+                runSpacing: 4,
+                children: [
+                  _buildQuickTag('AI宠物游戏', projectController),
+                  _buildQuickTag('电商平台', projectController),
+                  _buildQuickTag('数据分析系统', projectController),
+                  _buildQuickTag('社交应用', projectController),
+                  _buildQuickTag('内容管理系统', projectController),
+                ],
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: isGenerating ? null : () => Navigator.of(ctx).pop(),
+              child: const Text('取消'),
+            ),
+            ElevatedButton(
+              onPressed: isGenerating
+                  ? null
+                  : () async {
+                      if (projectController.text.trim().isEmpty) {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(content: Text('请输入项目描述'), duration: Duration(seconds: 1)),
+                        );
+                        return;
+                      }
+                      
+                      setDialogState(() => isGenerating = true);
+                      
+                      try {
+                        await _generateTeamWithAI(projectController.text.trim());
+                        if (mounted) Navigator.of(ctx).pop();
+                      } catch (e) {
+                        setDialogState(() => isGenerating = false);
+                        if (mounted) {
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            SnackBar(content: Text('生成失败: $e'), duration: const Duration(seconds: 2)),
+                          );
+                        }
+                      }
+                    },
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.purple.shade400,
+                foregroundColor: Colors.white,
+              ),
+              child: isGenerating
+                  ? const SizedBox(
+                      width: 14,
+                      height: 14,
+                      child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+                    )
+                  : const Text('生成团队'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildQuickTag(String text, TextEditingController controller) {
+    return InkWell(
+      onTap: () => controller.text = text,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+        decoration: BoxDecoration(
+          color: Colors.purple.shade50,
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: Colors.purple.shade200),
+        ),
+        child: Text(text, style: TextStyle(fontSize: 10, color: Colors.purple.shade700)),
+      ),
+    );
+  }
+
+  /// AI 生成团队配置
+  Future<void> _generateTeamWithAI(String projectDescription) async {
+    final prompt = '''你是一个团队配置专家。根据以下项目描述，生成一个合适的团队配置。
+
+项目描述：
+$projectDescription
+
+请以 JSON 数组格式输出团队成员配置，每个成员包含：
+- name: 成员名称（简洁，2-4个字）
+- role: 角色定位（如：架构师、前端开发、UI设计师、测试工程师等）
+- systemPrompt: 该成员的系统提示词（描述其职责和专长）
+
+要求：
+1. 第一个成员必须是"主管"（id: supervisor），负责协调团队和任务分配
+2. 根据项目需求选择合适的角色，通常 3-6 人
+3. 确保覆盖项目所需的核心能力
+4. systemPrompt 要具体、专业
+
+示例输出：
+[
+  {"name": "主管", "role": "团队协调者", "systemPrompt": "你是团队主管，负责分解任务、协调成员、汇总成果、把控质量。"},
+  {"name": "架构师", "role": "系统架构", "systemPrompt": "你是架构师，负责技术选型、架构设计、接口定义、技术难点攻关。"}
+]
+
+只输出 JSON 数组，不要其他内容。''';
+
+    final llmManager = context.read<LLMManager>();
+    final response = await llmManager.chatRaw([
+      {'role': 'user', 'content': prompt}
+    ]);
+    
+    // 解析 JSON
+    final content = response.trim();
+    final jsonMatch = RegExp(r'\[[\s\S]*\]').firstMatch(content);
+    if (jsonMatch == null) {
+      throw Exception('无法解析团队配置');
+    }
+    
+    final agentsJson = jsonDecode(jsonMatch.group(0)!) as List;
+    
+    setState(() {
+      _teamAgents.clear();
+      for (int i = 0; i < agentsJson.length; i++) {
+        final agentData = agentsJson[i] as Map<String, dynamic>;
+        // 名字鹅化：给每个名字后面加"鹅"
+        final originalName = agentData['name'] as String;
+        final gooseName = originalName.endsWith('鹅') ? originalName : '$originalName鹅';
+        
+        _teamAgents.add(TeamAgent(
+          id: i == 0 ? 'supervisor' : 'agent_${DateTime.now().millisecondsSinceEpoch}_$i',
+          name: gooseName,
+          role: agentData['role'] as String,
+          systemPrompt: agentData['systemPrompt'] as String,
+        ));
+      }
+    });
+    
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('已生成 ${_teamAgents.length} 人团队，可在对话框发送任务'),
+          duration: const Duration(seconds: 2),
+        ),
+      );
+    }
+  }
+
+  /// 解析文本中的 @ 提及
+  List<TeamAgent> _parseMentions(String text) {
+    final mentions = <TeamAgent>[];
+    final regex = RegExp(r'@(\S+)');
+    final matches = regex.allMatches(text);
+    
+    for (final match in matches) {
+      final mentionedName = match.group(1);
+      if (mentionedName != null) {
+        // 查找匹配的团队成员（支持部分匹配）
+        final agent = _teamAgents.where((a) => 
+          a.name == mentionedName || 
+          a.name.contains(mentionedName) ||
+          mentionedName.contains(a.name)
+        ).firstOrNull;
+        
+        if (agent != null && !mentions.any((a) => a.id == agent.id)) {
+          mentions.add(agent);
+        }
+      }
+    }
+    
+    return mentions;
+  }
+
+  /// 处理 @ 提及的回复
+  Future<void> _handleMentionedReply(String text, List<TeamAgent> mentionedAgents) async {
+    if (mentionedAgents.isEmpty) return;
+    
+    // 初始化取消令牌
+    _teamCancellationToken = CancellationToken();
+    
+    setState(() {
+      _isLoading = true;
+      _isTeamExecuting = true;
+    });
+    
+    try {
+      final llmManager = context.read<LLMManager>();
+      
+      // 构建上下文：最近的消息历史
+      final recentMessages = _messages.length > 10 
+          ? _messages.sublist(_messages.length - 10) 
+          : _messages;
+      
+      final contextBuffer = StringBuffer();
+      contextBuffer.writeln('【会话上下文】');
+      for (final msg in recentMessages) {
+        if (msg.isUser) {
+          contextBuffer.writeln('用户: ${msg.content}');
+        } else if (msg.teamMessage != null) {
+          contextBuffer.writeln('${msg.teamMessage!.fromAgentName}: ${msg.content}');
+        } else {
+          contextBuffer.writeln('助手: ${msg.content}');
+        }
+      }
+      contextBuffer.writeln();
+      
+      // 并行执行：所有被 @ 的角色同时思考
+      final results = await Future.wait(
+        mentionedAgents.map((agent) async {
+          // 检查是否被取消
+          if (_teamCancellationToken?.isCancelled ?? false) {
+            return (agent: agent, response: null, error: '已取消');
+          }
+          
+          final prompt = '''${agent.systemPrompt}
+
+$contextBuffer
+
+用户向你提问：$text
+
+请以"${agent.name}"的身份，基于你的专业领域（${agent.role}）和上述上下文，回答用户的问题。
+回答要专业、具体，体现你的角色特点。''';
+
+          // 设置角色状态为思考中
+          if (mounted) setState(() => _agentStatus[agent.id] = 'thinking');
+          
+          try {
+            final response = await llmManager.chatRaw([
+              {'role': 'system', 'content': agent.systemPrompt},
+              {'role': 'user', 'content': prompt},
+            ]);
+            return (agent: agent, response: response, error: null);
+          } catch (e) {
+            return (agent: agent, response: null, error: e.toString());
+          } finally {
+            // 设置角色状态为空闲
+            if (mounted) setState(() => _agentStatus[agent.id] = 'idle');
+          }
+        }),
+      );
+      
+      // 发送所有角色的回复（按原始顺序）
+      for (final result in results) {
+        if (result.response != null) {
+          _sendTeamMessage(
+            fromAgentId: result.agent.id,
+            fromAgentName: result.agent.name,
+            type: TeamMessageType.direct,
+            content: result.response!,
+          );
+        } else {
+          _sendTeamMessage(
+            fromAgentId: result.agent.id,
+            fromAgentName: result.agent.name,
+            type: TeamMessageType.direct,
+            content: '抱歉，思考过程中出现错误：${result.error}',
+          );
+        }
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('回复失败: $e'), duration: const Duration(seconds: 2)),
+        );
+      }
+    } finally {
+      if (mounted) setState(() {
+        _isLoading = false;
+        _isTeamExecuting = false;
+        _teamCancellationToken = null;
+      });
+    }
+  }
+
+  /// 启动团队执行（主管自动分解任务）
+  Future<void> _startTeamExecution(String userTask) async {
+    // 清空之前的消息和任务
+    _teamMessageBoard.clear();
+    _dynamicTasks.clear();
+    _taskOutputFiles.clear();
+    
+    // 初始化取消令牌
+    _teamCancellationToken = CancellationToken();
+    
+    // 初始化本次任务的输出目录
+    final timestamp = DateTime.now().toIso8601String().replaceAll(':', '-').replaceAll('.', '-').substring(0, 19);
+    final workDir = Directory.current;
+    _currentOutputDir = '${workDir.path}/goosebaby_outputs/$timestamp';
+    
+    // 设置执行状态
+    setState(() {
+      _isTeamExecuting = true;
+      _isLoading = true;
+    });
+    
+    // 检查是否有主管
+    final supervisor = _teamAgents.where((a) => a.id == 'supervisor').firstOrNull;
+    
+    if (supervisor == null) {
+      // 没有主管，提示用户
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('请先添加主管角色'), duration: Duration(seconds: 2)),
+      );
+      setState(() {
+        _isTeamExecuting = false;
+        _isLoading = false;
+      });
+      return;
+    }
+    
+    // 发送启动广播
+    _sendTeamMessage(
+      fromAgentId: 'system',
+      fromAgentName: '系统',
+      type: TeamMessageType.broadcast,
+      content: '收到任务：$userTask\n主管正在分析并分解任务...',
+    );
+    
+    try {
+      // 让主管分解任务
+      await _supervisorBreakdownTask(supervisor, userTask);
+    } finally {
+      // 确保状态被清理
+      if (mounted) setState(() {
+        _isTeamExecuting = false;
+        _isLoading = false;
+        _teamCancellationToken = null;
+      });
+    }
+  }
+  
+  /// 执行主管驱动的团队协作（分阶段执行，每个阶段主管介入）
+  Future<void> _executeSupervisorDrivenWorkflow(
+    TeamAgent supervisor, 
+    String userTask,
+  ) async {
+    // 按阶段分组任务
+    final stages = _groupTasksByStages(_dynamicTasks);
+    
+    _sendTeamMessage(
+      fromAgentId: 'system',
+      fromAgentName: '系统',
+      type: TeamMessageType.broadcast,
+      content: '任务分解完成，共 ${stages.length} 个阶段，${_dynamicTasks.length} 个子任务',
+    );
+    
+    // 用于存储每个任务的输出
+    final taskOutputs = <String, String>{};
+    
+    // 逐阶段执行
+    for (int stageIndex = 0; stageIndex < stages.length; stageIndex++) {
+      // 检查是否被取消
+      if (_teamCancellationToken?.isCancelled ?? false) {
+        return;
+      }
+      
+      final stageTasks = stages[stageIndex];
+      
+      // 主管广播当前阶段任务
+      final taskNames = stageTasks.map((t) {
+        final agent = _teamAgents.where((a) => a.id == t.assignedTo).firstOrNull;
+        return '${agent?.name ?? "待分配"}: ${t.description}';
+      }).join('\n  ');
+      
+      _sendTeamMessage(
+        fromAgentId: supervisor.id,
+        fromAgentName: supervisor.name,
+        type: TeamMessageType.broadcast,
+        content: '📋 **阶段 ${stageIndex + 1}/${stages.length}**\n当前阶段任务：\n  $taskNames',
+      );
+      
+      // 并行执行当前阶段的所有任务
+      final results = await _executeStageTasks(stageTasks, taskOutputs);
+      
+      // 收集结果
+      for (final entry in results.entries) {
+        taskOutputs[entry.key] = entry.value;
+      }
+      
+      // 主管汇总当前阶段结果（除了最后一个阶段）
+      if (stageIndex < stages.length - 1) {
+        await _supervisorSummarizeStage(supervisor, stageIndex, stageTasks, results);
+      }
+    }
+    
+    // 主管输出最终总结
+    await _supervisorFinalSummary(supervisor, userTask, taskOutputs);
+  }
+  
+  /// 按阶段分组任务（基于依赖关系）
+  List<List<TeamTask>> _groupTasksByStages(List<TeamTask> tasks) {
+    final stages = <List<TeamTask>>[];
+    final assigned = <String>{};
+    
+    while (assigned.length < tasks.length) {
+      // 找出当前可执行的任务（所有依赖都已完成）
+      final readyTasks = tasks.where((task) =>
+        !assigned.contains(task.id) &&
+        task.dependencies.every((dep) => assigned.contains(dep))
+      ).toList();
+      
+      if (readyTasks.isEmpty) {
+        // 存在循环依赖或无法解决的任务
+        break;
+      }
+      
+      stages.add(readyTasks);
+      for (final task in readyTasks) {
+        assigned.add(task.id);
+      }
+    }
+    
+    return stages;
+  }
+  
+  /// 执行一个阶段的所有任务（并行）
+  Future<Map<String, String>> _executeStageTasks(
+    List<TeamTask> tasks,
+    Map<String, String> previousOutputs,
+  ) async {
+    // 检查是否被取消
+    if (_teamCancellationToken?.isCancelled ?? false) {
+      return {};
+    }
+    
+    final llmManager = context.read<LLMManager>();
+    final results = <String, String>{};
+    
+    // 并行执行所有任务
+    final futures = tasks.map((task) async {
+      // 检查是否被取消
+      if (_teamCancellationToken?.isCancelled ?? false) {
+        return MapEntry(task.id, '任务已取消');
+      }
+      
+      final agent = _teamAgents.where((a) => a.id == task.assignedTo).firstOrNull;
+      if (agent == null) return MapEntry(task.id, '错误：未分配执行者');
+      
+      // 更新任务状态为运行中
+      setState(() {
+        task.status = TaskStatus.running;
+        task.startedAt = DateTime.now();
+        _agentStatus[agent.id] = 'thinking';
+      });
+      
+      try {
+        // 构建上游任务的上下文
+        final contextBuffer = StringBuffer();
+        if (task.dependencies.isNotEmpty) {
+          contextBuffer.writeln('【上游任务输出】');
+          for (final depId in task.dependencies) {
+            final output = previousOutputs[depId];
+            if (output != null) {
+              contextBuffer.writeln('任务 $depId 的结果:');
+              contextBuffer.writeln(output.length > 800 ? '${output.substring(0, 800)}...' : output);
+              contextBuffer.writeln();
+            }
+          }
+        }
+        
+        final prompt = '''${agent.systemPrompt}
+
+${contextBuffer}
+
+你的任务是：${task.description}
+
+请独立完成这个任务，输出你的工作结果。
+输出格式要求：
+【任务输出】
+- 完成的工作内容
+- 产出物/结论
+- 给后续任务的关键信息''';
+
+        final response = await llmManager.chatRaw([
+          {'role': 'system', 'content': agent.systemPrompt},
+          {'role': 'user', 'content': prompt},
+        ]);
+        
+        // 发送任务完成消息
+        _sendTeamMessage(
+          fromAgentId: agent.id,
+          fromAgentName: agent.name,
+          type: TeamMessageType.taskResult,
+          content: response,
+          taskId: task.id,
+        );
+        
+        // 更新任务状态为已完成
+        setState(() {
+          task.status = TaskStatus.completed;
+          task.completedAt = DateTime.now();
+          task.result = response;
+        });
+        
+        // 保存任务输出到子目录
+        await _saveTaskOutput(task, agent.name, response);
+        
+        return MapEntry(task.id, response);
+      } catch (e) {
+        // 更新任务状态为失败
+        setState(() {
+          task.status = TaskStatus.failed;
+          task.completedAt = DateTime.now();
+          task.error = e.toString();
+        });
+        return MapEntry(task.id, '任务执行失败: $e');
+      } finally {
+        // 设置状态为空闲
+        if (mounted) setState(() => _agentStatus[agent.id] = 'idle');
+      }
+    });
+    
+    // 等待所有任务完成
+    final entries = await Future.wait(futures);
+    for (final entry in entries) {
+      results[entry.key] = entry.value;
+    }
+    
+    return results;
+  }
+  
+  /// 保存单个任务输出到子目录
+  Future<void> _saveTaskOutput(TeamTask task, String agentName, String output) async {
+    try {
+      // 获取或创建输出目录
+      final workDir = Directory.current;
+      final timestamp = DateTime.now().toIso8601String().replaceAll(':', '-').replaceAll('.', '-').substring(0, 19);
+      final outputDir = _currentOutputDir ?? '${workDir.path}/goosebaby_outputs/$timestamp';
+      
+      // 创建任务子目录
+      final taskDir = Directory('$outputDir/tasks');
+      if (!await taskDir.exists()) {
+        await taskDir.create(recursive: true);
+      }
+      
+      // 生成安全的文件名（使用任务序号和简化描述）
+      final taskIndex = _dynamicTasks.indexOf(task) + 1;
+      final safeDesc = task.description
+          .replaceAll(RegExp(r'[\\/:*?"<>|]'), '_')
+          .replaceAll(RegExp(r'\s+'), '_')
+          .substring(0, task.description.length > 20 ? 20 : task.description.length);
+      final fileName = '任务${taskIndex}_$safeDesc.md';
+      final filePath = '${taskDir.path}/$fileName';
+      
+      // 构建输出内容
+      final content = StringBuffer();
+      content.writeln('# ${task.description}');
+      content.writeln();
+      content.writeln('**负责人**: $agentName');
+      content.writeln('**状态**: ${task.status.name}');
+      content.writeln('**开始时间**: ${task.startedAt}');
+      content.writeln('**完成时间**: ${task.completedAt}');
+      content.writeln();
+      content.writeln('---');
+      content.writeln();
+      content.writeln('## 产出内容');
+      content.writeln();
+      content.writeln(output);
+      
+      // 写入文件
+      final file = File(filePath);
+      await file.writeAsString(content.toString());
+      
+      // 记录文件路径
+      setState(() {
+        _taskOutputFiles[task.id] = filePath;
+      });
+      
+      debugPrint('📄 [GooseBaby] 任务输出已保存: $filePath');
+    } catch (e) {
+      debugPrint('❌ [GooseBaby] 保存任务输出失败: $e');
+    }
+  }
+  
+  /// 主管汇总当前阶段结果
+  Future<void> _supervisorSummarizeStage(
+    TeamAgent supervisor,
+    int stageIndex,
+    List<TeamTask> stageTasks,
+    Map<String, String> results,
+  ) async {
+    final llmManager = context.read<LLMManager>();
+    
+    // 设置主管状态为思考中
+    setState(() => _agentStatus[supervisor.id] = 'thinking');
+    
+    try {
+      // 构建阶段结果汇总
+      final resultsSummary = StringBuffer();
+      for (final task in stageTasks) {
+        final agent = _teamAgents.where((a) => a.id == task.assignedTo).firstOrNull;
+        final output = results[task.id] ?? '';
+        resultsSummary.writeln('**${agent?.name ?? "未知"}** 完成了: ${task.description}');
+        resultsSummary.writeln(output.length > 300 ? '${output.substring(0, 300)}...' : output);
+        resultsSummary.writeln();
+      }
+      
+      final prompt = '''作为主管，阶段 ${stageIndex + 1} 的任务已完成。请汇总当前进展。
+
+**已完成的工作**：
+$resultsSummary
+
+请简要总结：
+1. 当前阶段的关键产出
+2. 有无需要调整的后续计划
+3. 下一阶段的注意事项''';
+
+      final response = await llmManager.chatRaw([
+        {'role': 'system', 'content': supervisor.systemPrompt},
+        {'role': 'user', 'content': prompt},
+      ]);
+      
+      _sendTeamMessage(
+        fromAgentId: supervisor.id,
+        fromAgentName: supervisor.name,
+        type: TeamMessageType.broadcast,
+        content: '📊 **阶段 ${stageIndex + 1} 汇总**\n$response',
+      );
+    } finally {
+      if (mounted) setState(() => _agentStatus[supervisor.id] = 'idle');
+    }
+  }
+  
+  /// 主管输出最终总结
+  Future<void> _supervisorFinalSummary(
+    TeamAgent supervisor,
+    String userTask,
+    Map<String, String> allOutputs,
+  ) async {
+    final llmManager = context.read<LLMManager>();
+    
+    // 设置主管状态为思考中
+    setState(() => _agentStatus[supervisor.id] = 'thinking');
+    
+    try {
+      // 构建所有任务输出汇总
+      final allResults = StringBuffer();
+      for (final task in _dynamicTasks) {
+        final agent = _teamAgents.where((a) => a.id == task.assignedTo).firstOrNull;
+        final output = allOutputs[task.id] ?? '';
+        allResults.writeln('### ${agent?.name ?? "未知"}: ${task.description}');
+        allResults.writeln(output.length > 500 ? '${output.substring(0, 500)}...' : output);
+        allResults.writeln();
+      }
+      
+      final prompt = '''作为主管，所有任务已完成。请输出最终总结报告。
+
+**用户原始需求**：
+$userTask
+
+**团队工作成果**：
+$allResults
+
+请输出：
+1. 任务完成情况总结
+2. 关键产出物清单
+3. 后续建议或注意事项''';
+
+      final response = await llmManager.chatRaw([
+        {'role': 'system', 'content': supervisor.systemPrompt},
+        {'role': 'user', 'content': prompt},
+      ]);
+      
+      _sendTeamMessage(
+        fromAgentId: supervisor.id,
+        fromAgentName: supervisor.name,
+        type: TeamMessageType.broadcast,
+        content: '🎉 **任务完成 - 最终报告**\n\n$response',
+      );
+      
+      // 保存最终报告到工作目录
+      await _saveFinalReport(userTask, allResults.toString(), response);
+    } finally {
+      if (mounted) setState(() => _agentStatus[supervisor.id] = 'idle');
+    }
+  }
+  
+  /// 保存最终报告到工作目录
+  Future<void> _saveFinalReport(String userTask, String allResults, String finalSummary) async {
+    try {
+      // 获取工作目录
+      final workDir = Directory.current;
+      
+      // 使用已创建的输出目录（如果存在）
+      String outputDirPath;
+      if (_currentOutputDir != null) {
+        outputDirPath = _currentOutputDir!;
+      } else {
+        final timestamp = DateTime.now().toIso8601String().replaceAll(':', '-').replaceAll('.', '-').substring(0, 19);
+        outputDirPath = '${workDir.path}/goosebaby_outputs/$timestamp';
+      }
+      
+      final outputDir = Directory(outputDirPath);
+      
+      // 创建输出目录（如果不存在）
+      if (!await outputDir.exists()) {
+        await outputDir.create(recursive: true);
+      }
+      
+      // 生成文件名
+      final fileName = '团队工作成果报告.md';
+      final file = File('${outputDir.path}/$fileName');
+      
+      // 获取相对路径用于链接
+      String getRelativePath(String absolutePath) {
+        if (absolutePath.startsWith(outputDirPath)) {
+          return absolutePath.substring(outputDirPath.length + 1);
+        }
+        return absolutePath;
+      }
+      
+      // 构建报告内容
+      final reportContent = StringBuffer();
+      reportContent.writeln('# 团队工作成果报告');
+      reportContent.writeln();
+      reportContent.writeln('**生成时间**: ${DateTime.now().toString()}');
+      reportContent.writeln();
+      reportContent.writeln('---');
+      reportContent.writeln();
+      reportContent.writeln('## 用户需求');
+      reportContent.writeln();
+      reportContent.writeln(userTask);
+      reportContent.writeln();
+      reportContent.writeln('---');
+      reportContent.writeln();
+      reportContent.writeln('## 团队成员');
+      reportContent.writeln();
+      for (final agent in _teamAgents) {
+        reportContent.writeln('- **${agent.name}** (${agent.role})');
+      }
+      reportContent.writeln();
+      reportContent.writeln('---');
+      reportContent.writeln();
+      reportContent.writeln('## 任务执行情况');
+      reportContent.writeln();
+      for (final task in _dynamicTasks) {
+        final agent = _teamAgents.where((a) => a.id == task.assignedTo).firstOrNull;
+        final statusIcon = task.status == TaskStatus.completed ? '✅' : 
+                          task.status == TaskStatus.failed ? '❌' : '⏳';
+        reportContent.writeln('### $statusIcon ${task.description}');
+        reportContent.writeln('- **负责人**: ${agent?.name ?? "未分配"}');
+        reportContent.writeln('- **状态**: ${task.status.name}');
+        
+        // 添加产出文件链接
+        final outputPath = _taskOutputFiles[task.id];
+        if (outputPath != null) {
+          final relativePath = getRelativePath(outputPath);
+          reportContent.writeln('- **产出文件**: [$relativePath](./$relativePath)');
+        }
+        
+        if (task.result != null) {
+          reportContent.writeln('- **产出摘要**:');
+          reportContent.writeln('```');
+          reportContent.writeln(task.result!.length > 500 
+            ? '${task.result!.substring(0, 500)}...' 
+            : task.result!);
+          reportContent.writeln('```');
+        }
+        reportContent.writeln();
+      }
+      reportContent.writeln('---');
+      reportContent.writeln();
+      reportContent.writeln('## 最终总结');
+      reportContent.writeln();
+      reportContent.writeln(finalSummary);
+      reportContent.writeln();
+      reportContent.writeln('---');
+      reportContent.writeln();
+      reportContent.writeln('*本报告由 GooseBaby 自动生成*');
+      
+      // 写入文件
+      await file.writeAsString(reportContent.toString());
+      
+      // 通知用户（带可点击的目录链接）
+      if (mounted) {
+        _sendTeamMessage(
+          fromAgentId: 'supervisor',
+          fromAgentName: '主管鹅',
+          type: TeamMessageType.broadcast,
+          content: '''🎉 **任务完成 - 最终报告已保存**
+
+📁 **输出目录**: `$outputDirPath`
+
+📄 **产出物清单**:
+- [团队工作成果报告.md](file://$outputDirPath/$fileName)
+${_taskOutputFiles.entries.map((e) {
+  final task = _dynamicTasks.where((t) => t.id == e.key).firstOrNull;
+  return '- [${task?.description ?? "任务产出"}](file://${e.value})';
+}).join('\n')}
+
+💡 点击上方链接可直接打开对应文件。''',
+        );
+      }
+      
+      debugPrint('📄 [GooseBaby] 报告已保存: ${file.path}');
+    } catch (e) {
+      debugPrint('❌ [GooseBaby] 保存报告失败: $e');
+      if (mounted) {
+        _sendTeamMessage(
+          fromAgentId: 'system',
+          fromAgentName: '系统',
+          type: TeamMessageType.broadcast,
+          content: '⚠️ 保存报告失败: $e',
+        );
+      }
+    }
+  }
+
+  /// 主管分解任务并分配给团队成员
+  Future<void> _supervisorBreakdownTask(TeamAgent supervisor, String userTask) async {
+    // 设置主管状态为思考中
+    setState(() => _agentStatus[supervisor.id] = 'thinking');
+    
+    // 构建团队成员信息
+    final agentsInfo = _teamAgents.where((a) => a.id != 'supervisor').map((a) => 
+      '- ${a.name}（${a.role}）'
+    ).join('\n');
+    
+    final breakdownPrompt = '''作为团队主管，请分析以下用户需求，将其分解为可执行的子任务，并分配给合适的团队成员。
+
+用户需求：
+$userTask
+
+团队成员（不含主管）：
+${agentsInfo.isNotEmpty ? agentsInfo : '（暂无其他成员，主管将自行执行所有任务）'}
+
+请以 JSON 数组格式输出任务分解结果，每个元素包含：
+- task: 子任务描述（简洁明确）
+- assignTo: 分配给的成员名称（如果没有合适成员，填"主管"）
+- mode: 执行模式 - "sequential"（串行，需等待前序任务）或 "parallel"（可并行执行）
+- dependsOn: 依赖的任务序号数组（从1开始，无依赖则为空数组）
+
+分解原则：
+1. 任务粒度适中，每个任务可由单个成员独立完成
+2. 明确任务间的依赖关系（如：原画设计需要先有策划方案）
+3. 可并行的任务尽量标记为 parallel
+4. 按执行顺序排列任务
+
+示例输出：
+[
+  {"task": "设计 AI 宠物的核心玩法和交互方式", "assignTo": "游戏策划", "mode": "sequential", "dependsOn": []},
+  {"task": "设计角色外观和动作", "assignTo": "原画师", "mode": "sequential", "dependsOn": [1]},
+  {"task": "设计数值系统和成长曲线", "assignTo": "数值策划", "mode": "parallel", "dependsOn": [1]},
+  {"task": "设计技术架构方案", "assignTo": "架构师", "mode": "parallel", "dependsOn": [1]},
+  {"task": "汇总所有方案，输出完整设计文档", "assignTo": "主管", "mode": "sequential", "dependsOn": [2, 3, 4]}
+]
+
+只输出 JSON 数组，不要其他内容。''';
+
+    try {
+      final llmManager = context.read<LLMManager>();
+      final response = await llmManager.chatRaw([
+        {'role': 'user', 'content': breakdownPrompt}
+      ]);
+      
+      // 解析 JSON 结果
+      final jsonMatch = RegExp(r'\[[\s\S]*\]').firstMatch(response);
+      if (jsonMatch != null) {
+        final tasks = jsonDecode(jsonMatch.group(0)!) as List;
+        
+        // 创建任务列表
+        setState(() {
+          for (int i = 0; i < tasks.length; i++) {
+            final taskData = tasks[i] as Map<String, dynamic>;
+            final assignTo = taskData['assignTo'] as String?;
+            final agent = assignTo != null 
+                ? _teamAgents.where((a) => a.name == assignTo).firstOrNull 
+                : null;
+            
+            final modeStr = taskData['mode'] as String? ?? 'sequential';
+            final mode = modeStr == 'parallel' ? TaskExecutionMode.parallel : TaskExecutionMode.sequential;
+            
+            final dependsOn = (taskData['dependsOn'] as List?)?.cast<int>() ?? [];
+            
+            _dynamicTasks.add(TeamTask(
+              id: 'task_${i + 1}',
+              description: taskData['task'] as String,
+              assignedTo: agent?.id,
+              executionMode: mode,
+              dependencies: dependsOn.map((idx) => 'task_$idx').toList(),
+              priority: i + 1,
+            ));
+          }
+        });
+        
+        // 发送任务分解结果
+        final taskList = _dynamicTasks.asMap().entries.map((e) {
+          final task = e.value;
+          final agent = _teamAgents.where((a) => a.id == task.assignedTo).firstOrNull;
+          final modeLabel = task.executionMode == TaskExecutionMode.parallel ? '并行' : '串行';
+          return '${e.key + 1}. ${task.description} → ${agent?.name ?? '待分配'} ($modeLabel)';
+        }).join('\n');
+        
+        _sendTeamMessage(
+          fromAgentId: supervisor.id,
+          fromAgentName: supervisor.name,
+          type: TeamMessageType.broadcast,
+          content: '任务分解完成，共 ${_dynamicTasks.length} 个子任务：\n$taskList\n\n现在开始执行...',
+        );
+        
+        // 构建 spawn_agent_team 的 prompt
+        // 执行主管驱动的工作流
+        await _executeSupervisorDrivenWorkflow(supervisor, userTask);
+        
+        // 设置主管状态为空闲
+        if (mounted) setState(() => _agentStatus[supervisor.id] = 'idle');
+      }
+    } catch (e) {
+      // 设置主管状态为空闲
+      setState(() => _agentStatus[supervisor.id] = 'idle');
+      
+      _sendTeamMessage(
+        fromAgentId: supervisor.id,
+        fromAgentName: supervisor.name,
+        type: TeamMessageType.broadcast,
+        content: '任务分解失败: $e\n将由主管直接处理该任务。',
+      );
+      
+      // 主管直接处理
+      _inputController.text = userTask;
+      _sendMessage();
+    }
+  }
+  
+  /// 发送团队消息（直接显示在主对话框）
+  void _sendTeamMessage({
+    required String fromAgentId,
+    required String fromAgentName,
+    required TeamMessageType type,
+    required String content,
+    List<String> toAgentIds = const [],
+    String? taskId,
+  }) {
+    final message = TeamMessage(
+      id: 'msg_${DateTime.now().millisecondsSinceEpoch}',
+      fromAgentId: fromAgentId,
+      fromAgentName: fromAgentName,
+      type: type,
+      toAgentIds: toAgentIds,
+      content: content,
+      taskId: taskId,
+    );
+    
+    // 添加到消息板（供历史查询）
+    _teamMessageBoard.add(message);
+    
+    // 同时直接显示在主对话框
+    setState(() {
+      _messages.add(_ChatMessage(
+        content: content,
+        isUser: false,
+        timestamp: DateTime.now(),
+        teamMessage: message,
+      ));
+    });
+    
+    _scrollToBottom();
+  }
+
   Widget _buildMessageList() {
     final stepCount = _isLoading ? _toolCallSteps.length : 0;
     final hasLoadingIndicator = _isLoading && _toolCallSteps.isEmpty;
@@ -1214,23 +3416,14 @@ class _ChatPanelState extends State<ChatPanel> with SingleTickerProviderStateMix
 
   /// 构建带工具调用步骤的消息（步骤在消息上方）
   Widget _buildMessageWithSteps(_ChatMessage msg) {
-    if (msg.toolSteps.isEmpty) {
-      return RichMessageBubble(
-        content: msg.content,
-        isUser: msg.isUser,
-        timestamp: msg.timestamp,
-        isError: msg.isError,
-        skillResult: msg.skillResult,
-        attachments: msg.attachments,
-        fontSize: _chatFontSize,
-      );
-    }
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
+        // 团队消息：显示发送者头像和名称
+        if (msg.teamMessage != null) _buildTeamMessageHeader(msg.teamMessage!),
         // 工具调用步骤列表（折叠式）
-        _buildToolStepsSummary(msg.toolSteps),
-        const SizedBox(height: 4),
+        if (msg.toolSteps.isNotEmpty) _buildToolStepsSummary(msg.toolSteps),
+        if (msg.toolSteps.isNotEmpty) const SizedBox(height: 4),
         // 主消息气泡
         RichMessageBubble(
           content: msg.content,
@@ -1242,6 +3435,62 @@ class _ChatPanelState extends State<ChatPanel> with SingleTickerProviderStateMix
           fontSize: _chatFontSize,
         ),
       ],
+    );
+  }
+
+  /// 构建团队消息头部（显示发送者信息）
+  Widget _buildTeamMessageHeader(TeamMessage teamMsg) {
+    final senderColor = _getAgentColor(teamMsg.fromAgentId);
+    
+    return Container(
+      margin: const EdgeInsets.only(bottom: 4, top: 8),
+      child: Row(
+        children: [
+          // 发送者头像
+          Container(
+            width: 20,
+            height: 20,
+            decoration: BoxDecoration(
+              color: senderColor,
+              borderRadius: BorderRadius.circular(10),
+            ),
+            child: Center(
+              child: Text(
+                teamMsg.fromAgentName.isNotEmpty ? teamMsg.fromAgentName[0] : 'A',
+                style: const TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: Colors.white),
+              ),
+            ),
+          ),
+          const SizedBox(width: 6),
+          // 发送者名称
+          Text(
+            teamMsg.fromAgentName,
+            style: TextStyle(fontSize: 11, fontWeight: FontWeight.w500, color: senderColor),
+          ),
+          const SizedBox(width: 6),
+          // 消息类型标签
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+            decoration: BoxDecoration(
+              color: _getMessageTypeColor(teamMsg.type).withOpacity(0.2),
+              borderRadius: BorderRadius.circular(3),
+            ),
+            child: Text(
+              _getMessageTypeLabel(teamMsg.type),
+              style: TextStyle(fontSize: 9, color: _getMessageTypeColor(teamMsg.type)),
+            ),
+          ),
+          // @ 提及（只显示特定 @ 的角色，不显示广播）
+          if (!teamMsg.isBroadcast && teamMsg.toAgentIds.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.only(left: 6),
+              child: Text(
+                '@${teamMsg.toAgentIds.map((id) => _getAgentName(id)).join(' @')}',
+                style: TextStyle(fontSize: 10, color: Colors.purple.shade400, fontWeight: FontWeight.w500),
+              ),
+            ),
+        ],
+      ),
     );
   }
 
@@ -1334,6 +3583,26 @@ class _ChatPanelState extends State<ChatPanel> with SingleTickerProviderStateMix
   }
 
   Widget _buildTypingIndicator() {
+    // 获取当前正在思考的角色
+    String thinkingText = '鹅宝在思考...';
+    
+    if (_agentMode == AgentMode.team && _teamAgents.isNotEmpty) {
+      // 找出正在思考的角色
+      final thinkingAgents = _teamAgents
+          .where((a) => _agentStatus[a.id] == 'thinking')
+          .toList();
+      
+      if (thinkingAgents.isNotEmpty) {
+        if (thinkingAgents.length == 1) {
+          thinkingText = '${thinkingAgents[0].name}在思考...';
+        } else {
+          // 多个角色同时思考
+          final names = thinkingAgents.map((a) => a.name).take(3).join('、');
+          thinkingText = '$names在思考...';
+        }
+      }
+    }
+    
     return Align(
       alignment: Alignment.centerLeft,
       child: Container(
@@ -1353,7 +3622,7 @@ class _ChatPanelState extends State<ChatPanel> with SingleTickerProviderStateMix
             const _TypingDot(delay: 400),
             const SizedBox(width: 8),
             Text(
-              '鹅宝在思考...',
+              thinkingText,
               style: TextStyle(fontSize: 12, color: Colors.grey.shade500),
             ),
           ],
@@ -1630,6 +3899,9 @@ class _ChatMessage {
   /// 仅 assistant 消息在涉及 tool_calls 时才有值
   final List<Map<String, dynamic>>? apiMessages;
 
+  /// 团队消息（用于标识来自哪个 Agent）
+  final TeamMessage? teamMessage;
+
   _ChatMessage({
     required this.content,
     required this.isUser,
@@ -1639,6 +3911,7 @@ class _ChatMessage {
     this.attachments = const [],
     this.toolSteps = const [],
     this.apiMessages,
+    this.teamMessage,
   });
 }
 

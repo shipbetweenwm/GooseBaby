@@ -2,6 +2,7 @@
 /// 参考 Claude Code 的设计：结构化响应 + 工具调用 + 停止原因
 
 import 'dart:convert';
+import 'agent_mode.dart';
 
 /// 取消令牌 — 用于从外部中断 AgentLoop
 class CancellationToken {
@@ -127,6 +128,9 @@ class AgentLoopResult {
 
   /// 工具调用步骤（用于 UI 显示）
   final List<ToolStep> steps;
+  
+  /// 待确认的执行计划（Plan 模式下生成）
+  final PendingPlan? pendingPlan;
 
   AgentLoopResult({
     required this.text,
@@ -134,7 +138,11 @@ class AgentLoopResult {
     required this.skillNames,
     required this.outputFiles,
     required this.steps,
+    this.pendingPlan,
   });
+  
+  /// 是否有待确认的计划
+  bool get hasPendingPlan => pendingPlan != null;
 }
 
 /// 工具调用步骤（UI 展示用）

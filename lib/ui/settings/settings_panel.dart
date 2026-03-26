@@ -7,6 +7,7 @@ import 'package:hive/hive.dart';
 import 'package:path/path.dart' as p;
 import '../../ai/llm_manager.dart';
 import '../../ai/memory/memory_manager.dart';
+import '../../ai/mcp/mcp.dart';
 import '../../core/pet_engine.dart';
 import '../../models/models.dart';
 import '../../skills/skill_manager.dart';
@@ -31,7 +32,7 @@ class _SettingsPanelState extends State<SettingsPanel> {
   int _selectedTab = 0;
   String _workingDir = '';
 
-  final _tabs = const ['🧠 AI模型', '🎮 技能', '⏰ 定时任务', '🦢 宠物', '📋 关于'];
+  final _tabs = const ['🧠 AI模型', '🎮 技能', '🔌 MCP', '⏰ 定时任务', '🦢 宠物', '📋 关于'];
 
   @override
   void initState() {
@@ -213,10 +214,12 @@ class _SettingsPanelState extends State<SettingsPanel> {
       case 1:
         return _SkillSettings();
       case 2:
-        return _ScheduledTaskSettings();
+        return _McpSettings();
       case 3:
-        return _PetSettings();
+        return _ScheduledTaskSettings();
       case 4:
+        return _PetSettings();
+      case 5:
         return _AboutPanel();
       default:
         return const SizedBox();
@@ -1132,6 +1135,499 @@ class _SkillSettingsState extends State<_SkillSettings> {
   }
 }
 
+/// MCP 服务器设置
+class _McpSettings extends StatefulWidget {
+  @override
+  State<_McpSettings> createState() => _McpSettingsState();
+}
+
+class _McpSettingsState extends State<_McpSettings> {
+  final Map<String, McpServerConfig> _serverConfigs = {};
+  final _nameController = TextEditingController();
+  final _commandController = TextEditingController();
+  final _argsController = TextEditingController();
+  final _envController = TextEditingController();
+  bool _isLoading = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadConfigs();
+  }
+
+  void _loadConfigs() {
+    final saved = StorageManager.getSetting<Map<dynamic, dynamic>>('mcp_servers', defaultValue: {});
+    if (saved != null) {
+      setState(() {
+        saved.forEach((key, value) {
+          if (value is Map) {
+            _serverConfigs[key.toString()] = McpServerConfig.fromJson(
+              Map<String, dynamic>.from(value),
+            );
+          }
+        });
+      });
+    }
+  }
+
+  void _saveConfigs() {
+    final data = <String, dynamic>{};
+    _serverConfigs.forEach((key, config) {
+      data[key] = config.toJson();
+    });
+    StorageManager.setSetting('mcp_servers', data);
+  }
+
+  @override
+  void dispose() {
+    _nameController.dispose();
+    _commandController.dispose();
+    _argsController.dispose();
+    _envController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      children: [
+        // 操作栏
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+          decoration: BoxDecoration(
+            color: Colors.grey.shade50,
+            border: const Border(bottom: BorderSide(color: Color(0xFFEEEEEE))),
+          ),
+          child: Row(
+            children: [
+              const Text(
+                'MCP 服务器',
+                style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
+              ),
+              const Spacer(),
+              _ActionChip(
+                icon: Icons.add,
+                label: '添加服务器',
+                onTap: _showAddServerDialog,
+              ),
+            ],
+          ),
+        ),
+        // 服务器列表
+        Expanded(
+          child: _serverConfigs.isEmpty
+              ? Center(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(Icons.extension_outlined, size: 48, color: Colors.grey.shade300),
+                      const SizedBox(height: 12),
+                      Text(
+                        '暂无 MCP 服务器',
+                        style: TextStyle(fontSize: 14, color: Colors.grey.shade500),
+                      ),
+                      const SizedBox(height: 8),
+                      Text(
+                        'MCP 让鹅宝可以使用更多外部工具',
+                        style: TextStyle(fontSize: 12, color: Colors.grey.shade400),
+                      ),
+                    ],
+                  ),
+                )
+              : ListView.builder(
+                  padding: const EdgeInsets.all(16),
+                  itemCount: _serverConfigs.length,
+                  itemBuilder: (context, index) {
+                    final entry = _serverConfigs.entries.elementAt(index);
+                    return _McpServerCard(
+                      name: entry.key,
+                      config: entry.value,
+                      onEdit: () => _editServer(entry.key, entry.value),
+                      onDelete: () => _deleteServer(entry.key),
+                      onToggle: (enabled) => _toggleServer(entry.key, enabled),
+                    );
+                  },
+                ),
+        ),
+        // 帮助说明
+        Container(
+          padding: const EdgeInsets.all(12),
+          margin: const EdgeInsets.all(16),
+          decoration: BoxDecoration(
+            color: Colors.blue.shade50,
+            borderRadius: BorderRadius.circular(8),
+          ),
+          child: Row(
+            children: [
+              Icon(Icons.info_outline, size: 16, color: Colors.blue.shade400),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  'MCP (Model Context Protocol) 让鹅宝可以使用外部工具，如文件系统、数据库、API 等。',
+                  style: TextStyle(fontSize: 11, color: Colors.blue.shade700),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  void _showAddServerDialog() {
+    _nameController.clear();
+    _commandController.clear();
+    _argsController.clear();
+    _envController.clear();
+
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: const Text('添加 MCP 服务器'),
+        content: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              _SettingField(
+                label: '服务器名称',
+                hint: '如: filesystem',
+                controller: _nameController,
+              ),
+              const SizedBox(height: 12),
+              _SettingField(
+                label: '启动命令',
+                hint: '如: npx',
+                controller: _commandController,
+              ),
+              const SizedBox(height: 12),
+              _SettingField(
+                label: '参数 (空格分隔)',
+                hint: '如: -y @modelcontextprotocol/server-filesystem /path',
+                controller: _argsController,
+              ),
+              const SizedBox(height: 12),
+              _SettingField(
+                label: '环境变量 (JSON)',
+                hint: '{"API_KEY": "xxx"}',
+                controller: _envController,
+                maxLines: 3,
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: const Text('取消'),
+          ),
+          ElevatedButton(
+            onPressed: () => _addServer(ctx),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: const Color(0xFF4FC3F7),
+              foregroundColor: Colors.white,
+            ),
+            child: const Text('添加'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _addServer(BuildContext ctx) {
+    final name = _nameController.text.trim();
+    if (name.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('请输入服务器名称')),
+      );
+      return;
+    }
+
+    final args = _argsController.text.trim().split(' ').where((s) => s.isNotEmpty).toList();
+    
+    Map<String, String>? env;
+    if (_envController.text.trim().isNotEmpty) {
+      try {
+        final envMap = <String, String>{};
+        final decoded = _envController.text.trim();
+        // 简单解析 KEY=value 格式
+        if (!decoded.startsWith('{')) {
+          for (final line in decoded.split('\n')) {
+            final parts = line.split('=');
+            if (parts.length == 2) {
+              envMap[parts[0].trim()] = parts[1].trim();
+            }
+          }
+        }
+        env = envMap.isNotEmpty ? envMap : null;
+      } catch (_) {}
+    }
+
+    setState(() {
+      _serverConfigs[name] = McpServerConfig(
+        command: _commandController.text.trim(),
+        args: args,
+        env: env,
+        enabled: true,
+      );
+    });
+    _saveConfigs();
+    Navigator.of(ctx).pop();
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('✅ 已添加 MCP 服务器: $name')),
+    );
+  }
+
+  void _editServer(String name, McpServerConfig config) {
+    _nameController.text = name;
+    _commandController.text = config.command;
+    _argsController.text = config.args.join(' ');
+    _envController.text = config.env?.entries.map((e) => '${e.key}=${e.value}').join('\n') ?? '';
+
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: Text('编辑 $name'),
+        content: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              _SettingField(
+                label: '启动命令',
+                hint: '如: npx',
+                controller: _commandController,
+              ),
+              const SizedBox(height: 12),
+              _SettingField(
+                label: '参数 (空格分隔)',
+                hint: '如: -y @modelcontextprotocol/server-filesystem /path',
+                controller: _argsController,
+              ),
+              const SizedBox(height: 12),
+              _SettingField(
+                label: '环境变量 (KEY=value)',
+                hint: 'API_KEY=xxx',
+                controller: _envController,
+                maxLines: 3,
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: const Text('取消'),
+          ),
+          ElevatedButton(
+            onPressed: () {
+              final args = _argsController.text.trim().split(' ').where((s) => s.isNotEmpty).toList();
+              
+              Map<String, String>? env;
+              if (_envController.text.trim().isNotEmpty) {
+                final envMap = <String, String>{};
+                for (final line in _envController.text.trim().split('\n')) {
+                  final parts = line.split('=');
+                  if (parts.length == 2) {
+                    envMap[parts[0].trim()] = parts[1].trim();
+                  }
+                }
+                env = envMap.isNotEmpty ? envMap : null;
+              }
+
+              setState(() {
+                _serverConfigs[name] = McpServerConfig(
+                  command: _commandController.text.trim(),
+                  args: args,
+                  env: env,
+                  enabled: config.enabled,
+                );
+              });
+              _saveConfigs();
+              Navigator.of(ctx).pop();
+            },
+            style: ElevatedButton.styleFrom(
+              backgroundColor: const Color(0xFF4FC3F7),
+              foregroundColor: Colors.white,
+            ),
+            child: const Text('保存'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _deleteServer(String name) {
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: Text('删除服务器 "$name"？'),
+        content: const Text('此操作无法撤销。'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: const Text('取消'),
+          ),
+          TextButton(
+            onPressed: () {
+              setState(() => _serverConfigs.remove(name));
+              _saveConfigs();
+              Navigator.of(ctx).pop();
+            },
+            style: TextButton.styleFrom(foregroundColor: Colors.red),
+            child: const Text('删除'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _toggleServer(String name, bool enabled) {
+    final config = _serverConfigs[name];
+    if (config != null) {
+      setState(() {
+        _serverConfigs[name] = McpServerConfig(
+          command: config.command,
+          args: config.args,
+          env: config.env,
+          enabled: enabled,
+        );
+      });
+      _saveConfigs();
+    }
+  }
+}
+
+/// MCP 服务器卡片
+class _McpServerCard extends StatelessWidget {
+  final String name;
+  final McpServerConfig config;
+  final VoidCallback onEdit;
+  final VoidCallback onDelete;
+  final ValueChanged<bool> onToggle;
+
+  const _McpServerCard({
+    required this.name,
+    required this.config,
+    required this.onEdit,
+    required this.onDelete,
+    required this.onToggle,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      margin: const EdgeInsets.only(bottom: 10),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: Colors.grey.shade200),
+      ),
+      child: Row(
+        children: [
+          Container(
+            width: 40,
+            height: 40,
+            decoration: BoxDecoration(
+              color: (config.enabled ? const Color(0xFF4FC3F7) : Colors.grey)
+                  .withOpacity(0.1),
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: Icon(
+              Icons.extension,
+              color: config.enabled ? const Color(0xFF4FC3F7) : Colors.grey,
+              size: 20,
+            ),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  name,
+                  style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  '${config.command} ${config.args.take(2).join(' ')}${config.args.length > 2 ? '...' : ''}',
+                  style: TextStyle(fontSize: 11, color: Colors.grey.shade500),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ],
+            ),
+          ),
+          // 编辑按钮
+          InkWell(
+            onTap: onEdit,
+            borderRadius: BorderRadius.circular(8),
+            child: Padding(
+              padding: const EdgeInsets.all(6),
+              child: Icon(Icons.edit_outlined, size: 18, color: Colors.grey.shade600),
+            ),
+          ),
+          // 删除按钮
+          InkWell(
+            onTap: onDelete,
+            borderRadius: BorderRadius.circular(8),
+            child: Padding(
+              padding: const EdgeInsets.all(6),
+              child: Icon(Icons.delete_outline, size: 18, color: Colors.red.shade400),
+            ),
+          ),
+          // 启用开关
+          Switch(
+            value: config.enabled,
+            onChanged: onToggle,
+            activeColor: const Color(0xFF4FC3F7),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// MCP 服务器配置
+class McpServerConfig {
+  final String command;
+  final List<String> args;
+  final Map<String, String>? env;
+  final bool enabled;
+
+  McpServerConfig({
+    required this.command,
+    this.args = const [],
+    this.env,
+    this.enabled = true,
+  });
+
+  factory McpServerConfig.fromJson(Map<String, dynamic> json) {
+    return McpServerConfig(
+      command: json['command'] as String? ?? '',
+      args: (json['args'] as List?)?.map((e) => e.toString()).toList() ?? [],
+      env: json['env'] != null
+          ? Map<String, String>.from(json['env'] as Map)
+          : null,
+      enabled: json['enabled'] as bool? ?? true,
+    );
+  }
+
+  Map<String, dynamic> toJson() {
+    return {
+      'command': command,
+      'args': args,
+      if (env != null) 'env': env,
+      'enabled': enabled,
+    };
+  }
+}
+
 /// 定时任务设置
 class _ScheduledTaskSettings extends StatelessWidget {
   @override
@@ -1529,12 +2025,14 @@ class _SettingField extends StatelessWidget {
   final String hint;
   final TextEditingController controller;
   final bool isPassword;
+  final int maxLines;
 
   const _SettingField({
     required this.label,
     required this.hint,
     required this.controller,
     this.isPassword = false,
+    this.maxLines = 1,
   });
 
   @override
@@ -1547,6 +2045,7 @@ class _SettingField extends StatelessWidget {
         TextField(
           controller: controller,
           obscureText: isPassword,
+          maxLines: maxLines,
           decoration: InputDecoration(
             hintText: hint,
             hintStyle: TextStyle(fontSize: 13, color: Colors.grey.shade400),

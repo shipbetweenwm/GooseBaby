@@ -2,6 +2,9 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import '../../models/models.dart';
 import 'agent_types.dart';
+import 'agent_hooks.dart';
+import 'agent_mode.dart';
+import 'sub_agent_types.dart';
 import '../providers/llm_provider.dart';
 
 /// Claude Code 风格的 Agent 循环
@@ -11,6 +14,8 @@ import '../providers/llm_provider.dart';
 /// 2. 直到 LLM 返回纯文本（stop）或达到最大轮数
 /// 3. 无可变状态，纯函数式循环
 /// 4. 通过回调报告进度（UI 更新由调用方处理）
+/// 5. 支持 Hook 系统，在生命周期的各个阶段注入自定义逻辑
+/// 6. 支持三种执行模式：Craft（立即执行）、Plan（先计划后执行）、Ask（只回答不操作）
 class AgentLoop {
   /// 运行 Agent 循环
   ///
@@ -23,6 +28,11 @@ class AgentLoop {
   /// [onStepUpdate] 步骤更新回调（UI 实时显示）
   /// [onToolFailure] 工具失败+修复回调（失败后成功修复时触发，包含解决方案）
   /// [cancellationToken] 取消令牌，外部可通过 token.cancel() 中断循环
+  /// [hooks] Hook 列表，在生命周期的各个阶段执行
+  /// [subAgentContext] 子 Agent 上下文（如果是子 Agent 执行）
+  /// [userRequest] 用户原始请求（用于 Hook 上下文）
+  /// [mode] 执行模式：craft（立即执行）、plan（先计划后执行）、ask（只回答不操作）
+  /// [onPlanGenerated] 计划生成回调（Plan 模式下触发）
   static Future<AgentLoopResult> run({
     required LLMProvider provider,
     required LLMConfig config,
@@ -33,7 +43,29 @@ class AgentLoop {
     void Function(ToolStep step)? onStepUpdate,
     void Function(String failedTool, String summary, String error, String solution)? onToolFailure,
     CancellationToken? cancellationToken,
+    List<AgentHook>? hooks,
+    SubAgentContext? subAgentContext,
+    String? userRequest,
+    AgentMode mode = AgentMode.craft,
+    void Function(PendingPlan plan)? onPlanGenerated,
   }) async {
+    // 创建 Hook 管理器
+    final hookManager = HookManager();
+    if (hooks != null) {
+      for (final hook in hooks) {
+        hookManager.register(hook);
+      }
+    }
+    
+    // 创建 Agent 循环上下文
+    final context = AgentLoopContext(
+      maxTurns: maxTurns,
+      subAgentContext: subAgentContext,
+      userRequest: userRequest ?? _extractUserRequest(messages),
+    );
+    
+    // 触发循环开始 Hooks
+    await hookManager.triggerLoopStart(context);
     final allApiMessages = <Map<String, dynamic>>[];
     final skillNames = <String>[];
     final outputFiles = <Map<String, dynamic>>[];
@@ -83,14 +115,62 @@ class AgentLoop {
         if (response.stopReason == AgentStopReason.length) {
           debugPrint('⚠️ [Agent] 输出被截断（max_tokens 用尽）');
         }
+        
+        // ── 触发 LLM 响应后 Hook ──
+        await hookManager.triggerAfterLLMResponse(response);
 
-        return AgentLoopResult(
+        final result = AgentLoopResult(
           text: text,
           apiMessages: allApiMessages,
           skillNames: skillNames,
           outputFiles: outputFiles,
           steps: steps,
         );
+        
+        // ── 触发循环结束 Hooks ──
+        await hookManager.triggerLoopEnd(result);
+        
+        return result;
+      }
+      
+      // ── 触发 LLM 响应后 Hook ──
+      await hookManager.triggerAfterLLMResponse(response);
+      
+      // ── 检查执行模式 ──
+      if (mode == AgentMode.ask) {
+        // Ask 模式：不执行工具，直接返回响应
+        debugPrint('💬 [Agent] Ask 模式，跳过工具执行');
+        final toolNames = response.toolCalls.map((tc) => tc.name).join(', ');
+        final result = AgentLoopResult(
+          text: '【Ask 模式】我只提供信息和建议，不执行实际操作。\n\n'
+              '你想执行的操作涉及以下工具: $toolNames\n\n'
+              '如需执行操作，请切换到 **Craft 模式**（立即执行）或 **Plan 模式**（先规划后执行）。',
+          apiMessages: allApiMessages,
+          skillNames: [],
+          outputFiles: [],
+          steps: steps,
+        );
+        await hookManager.triggerLoopEnd(result);
+        return result;
+      }
+      
+      if (mode == AgentMode.plan) {
+        // Plan 模式：生成计划，不立即执行
+        debugPrint('📋 [Agent] Plan 模式，生成执行计划');
+        final plan = _generatePlan(response.toolCalls, userRequest ?? '');
+        onPlanGenerated?.call(plan);
+        
+        final planText = _formatPlanAsText(plan);
+        final result = AgentLoopResult(
+          text: planText,
+          apiMessages: allApiMessages,
+          skillNames: [],
+          outputFiles: [],
+          steps: steps,
+          pendingPlan: plan,
+        );
+        await hookManager.triggerLoopEnd(result);
+        return result;
       }
 
       // ── 循环防护：重复调用检测 ──
@@ -107,21 +187,25 @@ class AgentLoop {
         });
         try {
           final stopResp = await provider.chat(workingMessages, config: config);
-          return AgentLoopResult(
+          final result = AgentLoopResult(
             text: stopResp.text,
             apiMessages: allApiMessages,
             skillNames: skillNames,
             outputFiles: outputFiles,
             steps: steps,
           );
+          await hookManager.triggerLoopEnd(result);
+          return result;
         } catch (_) {
-          return AgentLoopResult(
+          final result = AgentLoopResult(
             text: '嘎...鹅宝陷入了重复调用的死循环，已自动终止~ 🦢',
             apiMessages: allApiMessages,
             skillNames: skillNames,
             outputFiles: outputFiles,
             steps: steps,
           );
+          await hookManager.triggerLoopEnd(result);
+          return result;
         }
       }
 
@@ -146,8 +230,35 @@ class AgentLoop {
       for (final toolCall in response.toolCalls) {
         // ── 取消检查（每个工具执行前） ──
         cancellationToken?.throwIfCancelled();
+        
+        // ── 更新上下文 ──
+        context.currentTurn = turn + 1;
+        context.recordToolCall(toolCall);
 
         debugPrint('🔧 [Agent] 执行工具: ${toolCall.name}(${toolCall.arguments})');
+        
+        // ── 触发 beforeToolCall Hooks ──
+        final hookResult = await hookManager.triggerBeforeToolCall(toolCall, context);
+        if (hookResult != null) {
+          if (hookResult.shouldBlock) {
+            // 阻止执行
+            debugPrint('🪝 [Hook] 阻止工具调用: ${toolCall.name}');
+            _addStep(steps, '⚠️ Hook 阻止', hookResult.userMessage ?? '工具调用被阻止', onStepUpdate);
+            continue;
+          }
+          if (hookResult.shouldInject && hookResult.injectedMessage != null) {
+            // 注入消息
+            workingMessages.add({
+              'role': 'user',
+              'content': hookResult.injectedMessage!,
+            });
+          }
+          if (hookResult.shouldSkip) {
+            // 跳过当前工具
+            debugPrint('🪝 [Hook] 跳过工具: ${toolCall.name}');
+            continue;
+          }
+        }
 
         // 根据工具类型构建步骤标题
         String stepTitle;
@@ -231,6 +342,14 @@ class AgentLoop {
         step.isLoading = false;
         step.isFailed = result.isError;
         onStepUpdate?.call(step);
+        
+        // ── 触发 afterToolCall Hooks ──
+        await hookManager.triggerAfterToolCall(toolCall, result, context);
+        
+        // ── 如果工具执行出错，触发 onToolError Hooks ──
+        if (result.isError) {
+          await hookManager.triggerToolError(toolCall, result.content, context);
+        }
 
         // ── 记录失败 → 缓存，等成功后关联保存 ──
         if (result.isError && toolCall.name != 'think' && toolCall.name != 'save_memory') {
@@ -293,21 +412,25 @@ class AgentLoop {
           });
           try {
             final stopResp = await provider.chat(workingMessages, config: config);
-            return AgentLoopResult(
+            final result = AgentLoopResult(
               text: stopResp.text,
               apiMessages: allApiMessages,
               skillNames: skillNames,
               outputFiles: outputFiles,
               steps: steps,
             );
+            await hookManager.triggerLoopEnd(result);
+            return result;
           } catch (_) {
-            return AgentLoopResult(
+            final result = AgentLoopResult(
               text: '嘎...鹅宝的某个技能连续失败了 $maxFailedCalls 次，已自动终止~ 🦢',
               apiMessages: allApiMessages,
               skillNames: skillNames,
               outputFiles: outputFiles,
               steps: steps,
             );
+            await hookManager.triggerLoopEnd(result);
+            return result;
           }
         }
       }
@@ -327,21 +450,25 @@ class AgentLoop {
           });
           try {
             final stopResp = await provider.chat(workingMessages, config: config);
-            return AgentLoopResult(
+            final result = AgentLoopResult(
               text: stopResp.text,
               apiMessages: allApiMessages,
               skillNames: skillNames,
               outputFiles: outputFiles,
               steps: steps,
             );
+            await hookManager.triggerLoopEnd(result);
+            return result;
           } catch (_) {
-            return AgentLoopResult(
+            final result = AgentLoopResult(
               text: '嘎...鹅宝的工具调用陷入停滞，已自动终止~ 🦢',
               apiMessages: allApiMessages,
               skillNames: skillNames,
               outputFiles: outputFiles,
               steps: steps,
             );
+            await hookManager.triggerLoopEnd(result);
+            return result;
           }
         }
       }
@@ -359,22 +486,48 @@ class AgentLoop {
 
     try {
       final finalResp = await provider.chat(workingMessages, config: config);
-      return AgentLoopResult(
+      final result = AgentLoopResult(
         text: finalResp.text,
         apiMessages: allApiMessages,
         skillNames: skillNames,
         outputFiles: outputFiles,
         steps: steps,
       );
+      
+      // ── 触发循环结束 Hooks ──
+      await hookManager.triggerLoopEnd(result);
+      
+      return result;
     } catch (_) {
-      return AgentLoopResult(
+      final result = AgentLoopResult(
         text: '嘎...鹅宝调用了太多次技能，脑子转晕了~ 🦢',
         apiMessages: allApiMessages,
         skillNames: skillNames,
         outputFiles: outputFiles,
         steps: steps,
       );
+      
+      // ── 触发循环结束 Hooks ──
+      await hookManager.triggerLoopEnd(result);
+      
+      return result;
     }
+  }
+  
+  /// 从消息列表中提取用户原始请求
+  static String _extractUserRequest(List<Map<String, dynamic>> messages) {
+    // 找到最后一条用户消息
+    for (int i = messages.length - 1; i >= 0; i--) {
+      if (messages[i]['role'] == 'user') {
+        final content = messages[i]['content'];
+        if (content is String && content.isNotEmpty) {
+          return content.length > 200 
+              ? '${content.substring(0, 200)}...'
+              : content;
+        }
+      }
+    }
+    return '';
   }
 
   static void _addStep(List<ToolStep> steps, String title, String content, void Function(ToolStep)? onStepUpdate) {
@@ -414,5 +567,86 @@ class AgentLoop {
       sb.write(desc);
     }
     return sb.toString();
+  }
+  
+  /// 从工具调用列表生成执行计划
+  static PendingPlan _generatePlan(List<ToolCall> toolCalls, String userRequest) {
+    final planId = DateTime.now().millisecondsSinceEpoch.toString();
+    final steps = <PlanStep>[];
+    
+    for (int i = 0; i < toolCalls.length; i++) {
+      final call = toolCalls[i];
+      steps.add(PlanStep(
+        id: '${planId}_$i',
+        order: i + 1,
+        description: _describeToolCall(call),
+        toolName: call.name,
+        toolArgs: call.arguments,
+      ));
+    }
+    
+    return PendingPlan(
+      id: planId,
+      userRequest: userRequest,
+      title: '执行计划',
+      steps: steps,
+    );
+  }
+  
+  /// 描述工具调用（用于计划展示）
+  static String _describeToolCall(ToolCall call) {
+    final args = call.arguments;
+    
+    switch (call.name) {
+      case 'write_file':
+        final path = args['path'] as String? ?? '';
+        return '写入文件: $path';
+      case 'read_file':
+        final path = args['path'] as String? ?? '';
+        return '读取文件: $path';
+      case 'shell_exec':
+        final cmd = args['command'] as String? ?? '';
+        return '执行命令: ${cmd.length > 50 ? '${cmd.substring(0, 50)}...' : cmd}';
+      case 'batch_file':
+        final action = args['action'] as String? ?? '';
+        return '批量文件操作: $action';
+      case 'web_search':
+        final query = args['query'] as String? ?? '';
+        return '网络搜索: $query';
+      case 'web_interact':
+        final action = args['action'] as String? ?? '';
+        return 'Web 操作: $action';
+      case 'save_memory':
+        return '保存记忆';
+      case 'think':
+        return '思考规划';
+      default:
+        return '执行 ${call.name}';
+    }
+  }
+  
+  /// 将计划格式化为文本
+  static String _formatPlanAsText(PendingPlan plan) {
+    final buffer = StringBuffer();
+    buffer.writeln('📋 **执行计划**');
+    buffer.writeln();
+    buffer.writeln('**目标**: ${plan.userRequest}');
+    buffer.writeln();
+    buffer.writeln('**步骤**:');
+    
+    for (final step in plan.steps) {
+      final status = step.isExecuted 
+          ? '✅' 
+          : step.isSkipped 
+              ? '⏭️' 
+              : '⬜';
+      buffer.writeln('$status ${step.order}. ${step.description}');
+    }
+    
+    buffer.writeln();
+    buffer.writeln('---');
+    buffer.writeln('💡 **确认执行请回复「确认」或「执行」，取消请回复「取消」**');
+    
+    return buffer.toString();
   }
 }

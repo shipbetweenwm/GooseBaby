@@ -7,7 +7,7 @@ import 'llm_provider.dart';
 
 /// 腾讯混元大模型适配器
 /// 使用 OpenAI 兼容接口（更简单、更稳定）
-class HunyuanProvider implements LLMProvider {
+class HunyuanProvider extends LLMProvider {
   static const _defaultBaseUrl = 'https://api.hunyuan.cloud.tencent.com/v1';
   final Dio _dio = Dio();
 

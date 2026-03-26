@@ -6,7 +6,7 @@ import '../agent/agent_types.dart';
 import 'llm_provider.dart';
 
 /// Claude (Anthropic) 大模型适配器
-class ClaudeProvider implements LLMProvider {
+class ClaudeProvider extends LLMProvider {
   static const _defaultBaseUrl = 'https://api.anthropic.com';
   final Dio _dio = Dio();
 

@@ -7,7 +7,7 @@ import 'llm_provider.dart';
 
 /// 智谱 ChatGLM 大模型适配器
 /// 使用 OpenAI 兼容接口，直接用 API Key 认证
-class ChatGLMProvider implements LLMProvider {
+class ChatGLMProvider extends LLMProvider {
   static const _defaultBaseUrl = 'https://open.bigmodel.cn/api/paas/v4';
   final Dio _dio = Dio();
 

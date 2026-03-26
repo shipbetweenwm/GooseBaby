@@ -8,7 +8,7 @@ import 'llm_provider.dart';
 
 /// 通义千问（Qwen）大模型适配器
 /// 使用 OpenAI 兼容接口 (DashScope)
-class QwenProvider implements LLMProvider {
+class QwenProvider extends LLMProvider {
   static const _defaultBaseUrl = 'https://dashscope.aliyuncs.com/compatible-mode/v1';
   final Dio _dio = Dio();
 

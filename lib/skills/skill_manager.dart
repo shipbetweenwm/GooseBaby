@@ -10,15 +10,32 @@ import 'think_skill.dart';
 import 'memory_skill.dart';
 import 'schedule_task_skill.dart';
 import 'scheduled_task.dart';
+import 'web_skill.dart';
+import 'batch_file_skill.dart';
+import 'web_search_skill.dart';
+import '../ai/agent/sub_agent_skill.dart';
+import '../ai/agent/sub_agent_types.dart';
+import '../ai/agent/agent_types.dart';
+import '../ai/agent/agent_hooks.dart';
+import '../ai/providers/llm_provider.dart';
 
 /// 技能管理器
 /// 负责管理和调度所有技能，内置技能从 skills/ 目录加载（OpenClaw 标准格式）
 /// 支持从 ZIP 文件、文件夹动态导入技能
 class SkillManager extends ChangeNotifier {
-  final   Map<String, GooseSkill> _skills = {};
+  final Map<String, GooseSkill> _skills = {};
   final Set<String> _disabledSkills = {};
   final Set<String> _externalSkillIds = {}; // 用户手动导入的外部技能 ID
   final Set<String> _builtinSkillIds = {};  // 内置技能 ID（从 skills/ 目录自动加载的）
+  
+  /// Sub-Agent 技能实例（需要运行时注入回调）
+  SubAgentSkill? _subAgentSkill;
+  
+  /// Agent Teams 技能实例（需要运行时注入回调）
+  AgentTeamsSkill? _agentTeamsSkill;
+  
+  /// Web 搜索技能实例（需要运行时注入 API Key）
+  WebSearchSkill? _webSearchSkill;
 
   /// 内置技能目录路径（exe 同级的 skills/ 目录）
   String? _skillDir;
@@ -57,7 +74,47 @@ class SkillManager extends ChangeNotifier {
     register(WriteFileSkill());
     register(ReadFileSkill());
     register(ScheduleTaskSkill());
-    debugPrint('🦢 已注册内置技能: think, save_memory, shell_exec, write_file, read_file, schedule_task');
+    register(WebInteractSkill()); // Web 浏览器交互技能
+    register(BatchFileSkill());   // 批量文件操作技能
+    
+    // 注册 Web 搜索技能（需要运行时注入 API Key）
+    _webSearchSkill = WebSearchSkill();
+    register(_webSearchSkill!);
+    
+    // 注册 Sub-Agent 技能（需要在运行时注入回调）
+    _subAgentSkill = SubAgentSkill();
+    register(_subAgentSkill!);
+    
+    // 注册 Agent Teams 技能（需要在运行时注入回调）
+    _agentTeamsSkill = AgentTeamsSkill(_subAgentSkill!);
+    register(_agentTeamsSkill!);
+    
+    debugPrint('🦢 已注册内置技能: think, save_memory, shell_exec, write_file, read_file, schedule_task, web_interact, batch_file, web_search, spawn_sub_agent, spawn_agent_team');
+  }
+  
+  /// 配置 Sub-Agent 技能的回调
+  void configureSubAgentSkill({
+    LLMProvider Function()? providerFactory,
+    Future<ToolResult> Function(ToolCall)? executeToolCallback,
+    List<Map<String, dynamic>> Function()? getToolsCallback,
+    HookManager? hookManager,
+  }) {
+    _subAgentSkill?.providerFactory = providerFactory;
+    _subAgentSkill?.executeToolCallback = executeToolCallback;
+    _subAgentSkill?.getToolsCallback = getToolsCallback;
+    _subAgentSkill?.hookManager = hookManager;
+  }
+  
+  /// 配置 Agent Teams 技能的消息回调
+  void configureAgentTeamsSkill({
+    void Function(TeamMessage message)? onMessage,
+  }) {
+    _agentTeamsSkill?.onMessage = onMessage;
+  }
+  
+  /// 配置 Web 搜索技能的 API Key
+  void configureWebSearchSkill(String apiKey) {
+    _webSearchSkill?.apiKey = apiKey;
   }
 
   /// 获取 SaveMemorySkill 实例（用于外部注入 MemoryManager）

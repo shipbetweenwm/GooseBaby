@@ -7,7 +7,7 @@ import 'llm_provider.dart';
 
 /// Ollama 本地大模型适配器
 /// 支持运行本地千问、Llama 等开源模型
-class OllamaProvider implements LLMProvider {
+class OllamaProvider extends LLMProvider {
   static const _defaultBaseUrl = 'http://localhost:11434';
   final Dio _dio = Dio();
 
