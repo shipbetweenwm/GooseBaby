@@ -119,6 +119,15 @@ class AgentTeamConfig {
   });
 }
 
+/// 团队模式（任务模式 vs 圆桌讨论模式）
+enum TeamMode {
+  /// 任务模式：主管分解任务，成员执行
+  task,
+  
+  /// 圆桌模式：主持人引导讨论，专家发言
+  discussion,
+}
+
 /// 团队协作模式
 enum TeamCollaborationMode {
   /// 顺序执行：按顺序依次执行
@@ -132,6 +141,96 @@ enum TeamCollaborationMode {
   
   /// 投票决策：多个 Agent 提出方案，投票决定
   voting,
+}
+
+/// 讨论配置
+class DiscussionConfig {
+  /// 讨论主题
+  final String topic;
+  
+  /// 最大讨论轮次
+  final int maxRounds;
+  
+  /// 是否允许角色互相回应
+  final bool allowReplies;
+  
+  /// 结束条件：rounds(固定轮次) / consensus(AI判断共识) / manual(用户手动)
+  final String endCondition;
+  
+  const DiscussionConfig({
+    required this.topic,
+    this.maxRounds = 2,
+    this.allowReplies = true,
+    this.endCondition = 'rounds',
+  });
+  
+  Map<String, dynamic> toJson() => {
+    'topic': topic,
+    'maxRounds': maxRounds,
+    'allowReplies': allowReplies,
+    'endCondition': endCondition,
+  };
+  
+  factory DiscussionConfig.fromJson(Map<String, dynamic> json) => DiscussionConfig(
+    topic: json['topic'] as String,
+    maxRounds: json['maxRounds'] as int? ?? 2,
+    allowReplies: json['allowReplies'] as bool? ?? true,
+    endCondition: json['endCondition'] as String? ?? 'rounds',
+  );
+}
+
+/// 讨论发言记录
+class DiscussionTurn {
+  /// 轮次
+  final int round;
+  
+  /// 发言者 ID
+  final String agentId;
+  
+  /// 发言者名称
+  final String agentName;
+  
+  /// 发言内容
+  final String content;
+  
+  /// 回应的目标发言者 ID（可选）
+  final String? replyToAgentId;
+  
+  /// 回应的目标发言者名称
+  final String? replyToAgentName;
+  
+  /// 时间戳
+  final DateTime timestamp;
+  
+  const DiscussionTurn({
+    required this.round,
+    required this.agentId,
+    required this.agentName,
+    required this.content,
+    this.replyToAgentId,
+    this.replyToAgentName,
+    required this.timestamp,
+  });
+  
+  Map<String, dynamic> toJson() => {
+    'round': round,
+    'agentId': agentId,
+    'agentName': agentName,
+    'content': content,
+    'replyToAgentId': replyToAgentId,
+    'replyToAgentName': replyToAgentName,
+    'timestamp': timestamp.toIso8601String(),
+  };
+  
+  factory DiscussionTurn.fromJson(Map<String, dynamic> json) => DiscussionTurn(
+    round: json['round'] as int,
+    agentId: json['agentId'] as String,
+    agentName: json['agentName'] as String,
+    content: json['content'] as String,
+    replyToAgentId: json['replyToAgentId'] as String?,
+    replyToAgentName: json['replyToAgentName'] as String?,
+    timestamp: DateTime.parse(json['timestamp'] as String),
+  );
 }
 
 /// 团队成员 Agent 定义
@@ -151,6 +250,9 @@ class TeamAgent {
   /// 允许使用的工具列表
   final List<String> allowedTools;
   
+  /// 绑定的技能 ID 列表
+  final List<String> skillIds;
+  
   /// 优先级（数值越小越先执行）
   final int priority;
   
@@ -160,6 +262,7 @@ class TeamAgent {
     required this.role,
     required this.systemPrompt,
     this.allowedTools = const [],
+    this.skillIds = const [],
     this.priority = 100,
   });
   
@@ -169,6 +272,7 @@ class TeamAgent {
     'role': role,
     'systemPrompt': systemPrompt,
     'allowedTools': allowedTools,
+    'skillIds': skillIds,
     'priority': priority,
   };
   
@@ -178,6 +282,7 @@ class TeamAgent {
     role: json['role'] as String,
     systemPrompt: json['systemPrompt'] as String,
     allowedTools: (json['allowedTools'] as List<dynamic>?)?.cast<String>() ?? [],
+    skillIds: (json['skillIds'] as List<dynamic>?)?.cast<String>() ?? [],
     priority: json['priority'] as int? ?? 100,
   );
 }
@@ -494,6 +599,12 @@ enum TeamMessageType {
   
   /// 状态更新 - Agent 状态变化通知
   statusUpdate,
+  
+  /// 讨论发言 - 圆桌模式下的发言
+  discussion,
+  
+  /// 讨论总结 - 主持人总结结论
+  discussionSummary,
 }
 
 /// 团队消息
