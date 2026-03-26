@@ -530,6 +530,10 @@ class _ChatPanelState extends State<ChatPanel> with SingleTickerProviderStateMix
 
     // Team 模式：检查 @ 提及
     if (_agentMode == AgentMode.team && text.isNotEmpty) {
+      debugPrint('🦆 Team 模式发送消息: $text');
+      debugPrint('🦆 团队成员数量: ${_teamAgents.length}');
+      debugPrint('🦆 是否有主管: ${_teamAgents.any((a) => a.id == 'supervisor')}');
+      
       _inputController.clear();
       _pendingAttachments.clear();
       
@@ -547,14 +551,19 @@ class _ChatPanelState extends State<ChatPanel> with SingleTickerProviderStateMix
       
       // 检测 @ 提及
       final mentions = _parseMentions(text);
+      debugPrint('🦆 解析到的提及: ${mentions.map((a) => a.name).join(", ")}');
+
       if (mentions.isNotEmpty) {
         // 有 @ 提及，让指定角色回答
+        debugPrint('🦆 走 _handleMentionedReply 路线');
         await _handleMentionedReply(text, mentions);
       } else if (_teamMode == TeamMode.discussion) {
         // 圆桌模式：主持人引导讨论
+        debugPrint('🦆 走 _startDiscussion 路线');
         await _startDiscussion(text);
       } else {
-        // 任务模式：主管分解任务流程
+        // 任务模式：没有 @ 提及时，默认让主管编排分配任务
+        debugPrint('🦆 走 _startTeamExecution 路线');
         await _startTeamExecution(text);
       }
       return;
@@ -3148,9 +3157,12 @@ $skillBuffer
     final supervisor = _teamAgents.where((a) => a.id == 'supervisor').firstOrNull;
     
     if (supervisor == null) {
-      // 没有主管，提示用户
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('请先添加主管角色'), duration: Duration(seconds: 2)),
+      // 没有主管，提示用户（发送消息到对话框更明显）
+      _sendTeamMessage(
+        fromAgentId: 'system',
+        fromAgentName: '系统',
+        type: TeamMessageType.broadcast,
+        content: '⚠️ 请先添加主管角色！点击左侧面板的"+主管"按钮添加主管，或点击"✨AI"一键生成团队。',
       );
       setState(() {
         _isTeamExecuting = false;
