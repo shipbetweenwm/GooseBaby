@@ -191,6 +191,29 @@ class _ChatPanelState extends State<ChatPanel> with SingleTickerProviderStateMix
   void _loadAgentMode() {
     final savedMode = StorageManager.getSetting<String>('agent_mode', defaultValue: 'craft');
     _agentMode = AgentModeExtension.fromString(savedMode ?? 'craft') ?? AgentMode.craft;
+    // 同步设置 Team 面板显示状态
+    _showAgentTeamPanel = _agentMode == AgentMode.team;
+    // 自动加载上次的团队成员
+    _loadCurrentTeam();
+  }
+  
+  /// 自动加载上次的团队成员
+  void _loadCurrentTeam() {
+    final teamAgents = StorageManager.getSetting<List<dynamic>>('current_team_agents', defaultValue: []);
+    if (teamAgents != null && teamAgents.isNotEmpty) {
+      setState(() {
+        _teamAgents.clear();
+        _teamAgents.addAll(teamAgents.map((json) => TeamAgent.fromJson(json as Map<String, dynamic>)));
+      });
+    }
+  }
+  
+  /// 自动保存当前团队成员
+  Future<void> _saveCurrentTeamAgents() async {
+    await StorageManager.setSetting(
+      'current_team_agents', 
+      _teamAgents.map((a) => a.toJson()).toList(),
+    );
   }
   
   void _saveAgentMode(AgentMode mode) {
@@ -1714,7 +1737,10 @@ class _ChatPanelState extends State<ChatPanel> with SingleTickerProviderStateMix
           ),
           // 删除按钮
           InkWell(
-            onTap: () => setState(() => _teamAgents.removeAt(index)),
+            onTap: () {
+              setState(() => _teamAgents.removeAt(index));
+              _saveCurrentTeamAgents();
+            },
             child: Icon(Icons.close, size: 14, color: Colors.red.shade300),
           ),
         ],
@@ -2295,6 +2321,7 @@ class _ChatPanelState extends State<ChatPanel> with SingleTickerProviderStateMix
         priority: 1, // 最高优先级
       ));
     });
+    _saveCurrentTeamAgents();
   }
 
   /// 添加成员
@@ -2549,6 +2576,7 @@ class _ChatPanelState extends State<ChatPanel> with SingleTickerProviderStateMix
                       skillIds: selectedSkillIds.toList(),
                     ));
                   });
+                  _saveCurrentTeamAgents();
                   Navigator.of(ctx).pop();
                 }
               },
@@ -2687,6 +2715,7 @@ class _ChatPanelState extends State<ChatPanel> with SingleTickerProviderStateMix
       _teamAgents.clear();
       _teamAgents.addAll(agentsList.map((json) => TeamAgent.fromJson(json)));
     });
+    _saveCurrentTeamAgents();
     
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(content: Text('已加载团队: ${config['name']}'), duration: const Duration(seconds: 2)),
@@ -2941,6 +2970,7 @@ $skillsDesc
         ));
       }
     });
+    _saveCurrentTeamAgents();
     
     final modeText = _teamMode == TeamMode.discussion ? '专家团，可开始圆桌讨论' : '团队，可在对话框发送任务';
     if (mounted) {
