@@ -413,15 +413,27 @@ class SkillManager extends ChangeNotifier {
 
     bool filesDeleted = false;
 
-    // 尝试删除技能源文件目录
+    // 尝试删除技能源文件（目录或文件）及关联的 ZIP 和父目录
     try {
-      String? sourceDir = _findSkillSourceDir(skill);
-      if (sourceDir != null) {
-        final dir = Directory(sourceDir);
+      String? sourcePath = _findSkillSourceDir(skill);
+      if (sourcePath != null) {
+        // 1. 删除 sourcePath 本身（可能是目录或文件）
+        final dir = Directory(sourcePath);
+        final file = File(sourcePath);
+
         if (await dir.exists()) {
           await dir.delete(recursive: true);
-          debugPrint('🦢 已删除技能目录: $sourceDir');
+          debugPrint('🦢 已删除技能目录: $sourcePath');
           filesDeleted = true;
+        } else if (await file.exists()) {
+          await file.delete();
+          debugPrint('🦢 已删除技能文件: $sourcePath');
+          filesDeleted = true;
+        }
+
+        // 2. 清理关联的 ZIP 和父目录（从 sourcePath 向上追溯到 skills/ 目录）
+        if (_skillDir != null) {
+          await _cleanupSkillFiles(sourcePath);
         }
       }
     } catch (e, st) {
@@ -432,6 +444,42 @@ class SkillManager extends ChangeNotifier {
     unregister(skillId);
 
     return filesDeleted;
+  }
+
+  /// 清理技能删除后的残留文件：同名/关联 ZIP + 空父目录链
+  /// 从 sourcePath 向上逐层检查，直到 skills/ 目录
+  Future<void> _cleanupSkillFiles(String sourcePath) async {
+    // 从 sourcePath 向上遍历到 skills/ 目录，逐层清理
+    String currentPath = sourcePath;
+    final skillDir = _skillDir!;
+
+    while (currentPath != skillDir && currentPath.startsWith(skillDir)) {
+      final currentDir = Directory(currentPath);
+
+      if (!await currentDir.exists()) break;
+
+      // 检查同级目录下是否有同名 ZIP
+      final zipPath = '$currentPath.zip';
+      final zipFile = File(zipPath);
+      if (await zipFile.exists()) {
+        await zipFile.delete();
+        debugPrint('🦢 已删除技能 ZIP: $zipPath');
+      }
+
+      // 如果目录为空，删除并继续向上；否则停止
+      try {
+        final items = await currentDir.list().toList();
+        if (items.isEmpty) {
+          await currentDir.delete();
+          debugPrint('🦢 已清理空目录: $currentPath');
+          currentPath = currentDir.parent.path;
+        } else {
+          break;
+        }
+      } catch (_) {
+        break;
+      }
+    }
   }
 
   /// 根据技能对象查找其源文件目录
