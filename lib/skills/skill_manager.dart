@@ -161,9 +161,15 @@ class SkillManager extends ChangeNotifier {
     }
   }
 
+  /// 是否正在加载（防止 loadSkillsFromDir 重入）
+  bool _isLoadingSkills = false;
+
   /// 从技能目录加载所有技能（ZIP + 目录）
   Future<int> loadSkillsFromDir() async {
     if (_skillDir == null) return 0;
+    // 防止重入：如果正在加载，直接返回当前数量
+    if (_isLoadingSkills) return _skills.length;
+    _isLoadingSkills = true;
 
     try {
       final dir = Directory(_skillDir!);
@@ -200,6 +206,8 @@ class SkillManager extends ChangeNotifier {
     } catch (e, st) {
       debugPrint('🦢 加载技能目录失败: $e\n$st');
       return 0;
+    } finally {
+      _isLoadingSkills = false;
     }
   }
 
@@ -227,6 +235,13 @@ class SkillManager extends ChangeNotifier {
 
         if (skills.isNotEmpty) {
           debugPrint('🦢 从 ZIP 导入 ${skills.length} 个技能');
+          // 删除已解压的 ZIP 文件，避免下次启动时重复加载
+          try {
+            await File(destPath).delete();
+            debugPrint('🦢 已删除已解压的 ZIP: ${p.basename(zipPath)}');
+          } catch (e) {
+            debugPrint('🦢 删除 ZIP 文件失败: $e');
+          }
           notifyListeners();
           return skills.length;
         }
@@ -245,21 +260,44 @@ class SkillManager extends ChangeNotifier {
   /// 将文件夹复制到 skills/ 目录，然后加载
   Future<int> importFromFolder(String folderPath) async {
     try {
-      if (_skillDir == null) return 0;
+      if (_skillDir == null) {
+        debugPrint('🦢 导入失败: 技能目录未初始化');
+        return 0;
+      }
 
       final srcDir = Directory(folderPath);
-      if (!await srcDir.exists()) return 0;
+      if (!await srcDir.exists()) {
+        debugPrint('🦢 导入失败: 源目录不存在: $folderPath');
+        return 0;
+      }
+
+      // 快速检查：源目录中是否有 SKILL.md 或 manifest.json
+      final skillMd = File('$folderPath/SKILL.md');
+      final manifest = File('$folderPath/manifest.json');
+      final hasSkillMd = await skillMd.exists();
+      final hasManifest = await manifest.exists();
+      if (!hasSkillMd && !hasManifest) {
+        // 没有标识文件，可能是用户选错了目录，快速退出
+        debugPrint('🦢 导入失败: 文件夹中未找到 SKILL.md 或 manifest.json');
+        return 0;
+      }
+
+      // 重置复制计数器
+      _copyFileCount = 0;
+      _copyTotalSize = 0;
 
       final folderName = p.basename(folderPath);
       final destPath = p.join(_skillDir!, folderName);
       final destDir = Directory(destPath);
 
       if (await destDir.exists()) {
-        debugPrint('🦢 技能目录已存在: $folderName');
-      } else {
-        await _copyDirectory(srcDir, destDir);
-        debugPrint('🦢 已复制技能目录: $folderName');
+        // 目标已存在，删除后重新复制（确保内容是最新的）
+        debugPrint('🦢 技能目录已存在，删除后重新导入: $folderName');
+        await destDir.delete(recursive: true);
       }
+      debugPrint('🦢 开始复制目录: $folderPath → $destPath');
+      await _copyDirectory(srcDir, destDir);
+      debugPrint('🦢 已复制技能目录: $folderName (${_copyFileCount} 文件 / ${(_copyTotalSize / 1024).toStringAsFixed(0)} KB)');
 
       // 从目标目录加载（追加到现有技能列表）
       try {
@@ -274,30 +312,64 @@ class SkillManager extends ChangeNotifier {
           notifyListeners();
           return skills.length;
         }
-      } catch (e) {
-        debugPrint('🦢 加载导入的目录技能失败: $e');
+      } catch (e, st) {
+        debugPrint('🦢 加载导入的目录技能失败: $e\n$st');
       }
 
       return 0;
-    } catch (e) {
-      debugPrint('🦢 从文件夹导入技能失败: $e');
+    } catch (e, st) {
+      debugPrint('🦢 从文件夹导入技能失败: $e\n$st');
       return 0;
     }
   }
 
-  /// 递归复制目录
-  Future<void> _copyDirectory(Directory source, Directory destination) async {
+  /// 递归复制目录（跳过 symlink，防止循环引用导致 Stack Overflow 闪退）
+  /// [maxFiles] 最大文件数量限制，防止 OOM
+  /// [maxTotalSize] 最大总字节数限制
+  Future<void> _copyDirectory(Directory source, Directory destination, {
+    int depth = 0,
+    int maxFiles = 2000,
+    int maxTotalSize = 100 * 1024 * 1024,
+  }) async {
+    // 防御：限制递归深度，防止意外的深层目录或 junction 循环
+    if (depth > 20) {
+      debugPrint('🦢 跳过过深层目录: ${source.path} (depth=$depth)');
+      return;
+    }
+    if (_copyFileCount >= maxFiles || _copyTotalSize >= maxTotalSize) {
+      debugPrint('🦢 复制限制已达 (${_copyFileCount} 文件 / ${(_copyTotalSize / 1024 / 1024).toStringAsFixed(1)} MB)，跳过: ${source.path}');
+      return;
+    }
+
     await destination.create(recursive: true);
-    await for (final entity in source.list(recursive: false)) {
-      if (entity is File) {
-        final destFile = File(p.join(destination.path, p.basename(entity.path)));
-        await entity.copy(destFile.path);
-      } else if (entity is Directory) {
-        final destSubDir = Directory(p.join(destination.path, p.basename(entity.path)));
-        await _copyDirectory(entity, destSubDir);
+    // followLinks: false 防止 Windows junction/symlink 循环引用
+    await for (final entity in source.list(recursive: false, followLinks: false)) {
+      try {
+        if (_copyFileCount >= maxFiles || _copyTotalSize >= maxTotalSize) break;
+
+        if (entity is File) {
+          final destFile = File(p.join(destination.path, p.basename(entity.path)));
+          final fileSize = await entity.length();
+          if (_copyTotalSize + fileSize > maxTotalSize) {
+            debugPrint('🦢 跳过大文件: ${entity.path} (${(fileSize / 1024 / 1024).toStringAsFixed(1)} MB)');
+            continue;
+          }
+          await entity.copy(destFile.path);
+          _copyFileCount++;
+          _copyTotalSize += fileSize;
+        } else if (entity is Directory) {
+          final destSubDir = Directory(p.join(destination.path, p.basename(entity.path)));
+          await _copyDirectory(entity, destSubDir, depth: depth + 1, maxFiles: maxFiles, maxTotalSize: maxTotalSize);
+        }
+      } catch (e) {
+        debugPrint('🦢 复制文件失败: ${entity.path} - $e');
       }
     }
   }
+
+  /// 复制过程中的文件计数器和大小累加器（importFromFolder 入口重置）
+  int _copyFileCount = 0;
+  int _copyTotalSize = 0;
 
   /// 热重载所有技能
   Future<int> reloadSkills() async {
@@ -323,13 +395,55 @@ class SkillManager extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// 注销一个技能
+  /// 注销一个技能（仅从内存中移除，重启后会重新加载）
   void unregister(String skillId) {
     _skills.remove(skillId);
     _disabledSkills.remove(skillId);
     _externalSkillIds.remove(skillId);
     _builtinSkillIds.remove(skillId);
     notifyListeners();
+  }
+
+  /// 永久删除一个技能（删除源文件 + 从内存中移除）
+  /// [skillId] 技能 ID
+  /// 返回是否成功删除（源文件是否被删除）
+  Future<bool> deleteSkill(String skillId) async {
+    final skill = _skills[skillId];
+    if (skill == null) return false;
+
+    bool filesDeleted = false;
+
+    // 尝试删除技能源文件目录
+    try {
+      String? sourceDir = _findSkillSourceDir(skill);
+      if (sourceDir != null) {
+        final dir = Directory(sourceDir);
+        if (await dir.exists()) {
+          await dir.delete(recursive: true);
+          debugPrint('🦢 已删除技能目录: $sourceDir');
+          filesDeleted = true;
+        }
+      }
+    } catch (e, st) {
+      debugPrint('🦢 删除技能文件失败: $skillId - $e\n$st');
+    }
+
+    // 从内存中移除
+    unregister(skillId);
+
+    return filesDeleted;
+  }
+
+  /// 根据技能对象查找其源文件目录
+  /// AgentSkill 有 sourcePath 字段；ScriptSkill 有 sourcePath 和 packName
+  String? _findSkillSourceDir(GooseSkill skill) {
+    if (skill is AgentSkill && skill.sourcePath != null) {
+      return skill.sourcePath;
+    }
+    if (skill is ScriptSkill && skill.sourcePath != null) {
+      return skill.sourcePath;
+    }
+    return null;
   }
 
   /// 判断是否为外部导入技能
@@ -375,7 +489,8 @@ class SkillManager extends ChangeNotifier {
   GooseSkill? getSkill(String skillId) => _skills[skillId];
 
   /// 执行技能
-  Future<SkillResult> execute(String skillId, Map<String, dynamic> args) async {
+  /// [onOutput] 可选的流式输出回调，用于实时推送命令执行过程中的输出
+  Future<SkillResult> execute(String skillId, Map<String, dynamic> args, {void Function(String line)? onOutput}) async {
     final skill = _skills[skillId];
     if (skill == null) {
       return SkillResult.fail('未找到技能: $skillId');
@@ -386,7 +501,7 @@ class SkillManager extends ChangeNotifier {
 
     try {
       debugPrint('🦢 执行技能: ${skill.name} ($skillId) 参数: $args');
-      final result = await skill.execute(args);
+      final result = await skill.execute(args, onOutput: onOutput);
       debugPrint('🦢 技能执行完成: ${result.success ? "✅" : "❌"} ${result.message}');
       return result;
     } catch (e) {
@@ -479,10 +594,12 @@ class SkillManager extends ChangeNotifier {
   /// 判断 skillId 是否为 activate_skill（特殊工具，不走 execute 流程）
   bool isActivateSkillTool(String skillId) => skillId == 'activate_skill';
 
-  /// 根据分类获取技能
+  /// 根据分类获取技能（返回快照，防止并发修改）
   Map<String, List<GooseSkill>> getSkillsByCategory() {
     final map = <String, List<GooseSkill>>{};
-    for (final skill in _skills.values) {
+    // 使用 List.from 创建快照，防止遍历期间 _skills 被修改
+    final snapshot = _skills.values.toList();
+    for (final skill in snapshot) {
       map.putIfAbsent(skill.category, () => []).add(skill);
     }
     return map;

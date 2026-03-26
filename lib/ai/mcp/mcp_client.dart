@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/foundation.dart';
+import '../../utils/type_utils.dart';
 import 'mcp_types.dart';
 
 /// MCP 客户端
@@ -107,12 +108,12 @@ class McpClient {
       throw Exception('Initialize failed: ${response.error?.message}');
     }
     
-    final result = response.result as Map<String, dynamic>;
+    final result = safeMap(response.result);
     _serverCapabilities = ServerCapabilities.fromJson(
-      result['capabilities'] as Map<String, dynamic>? ?? {},
+      safeMap(result['capabilities'] ?? {}),
     );
     _serverInfo = result['serverInfo'] != null
-        ? Implementation.fromJson(result['serverInfo'] as Map<String, dynamic>)
+        ? Implementation.fromJson(safeMap(result['serverInfo']))
         : null;
     
     // 发送 initialized 通知
@@ -142,7 +143,7 @@ class McpClient {
       if (tools != null) {
         _tools.clear();
         for (final t in tools) {
-          _tools.add(McpTool.fromJson(t as Map<String, dynamic>));
+          _tools.add(McpTool.fromJson(safeMap(t)));
         }
       }
     }
@@ -157,7 +158,7 @@ class McpClient {
       if (resources != null) {
         _resources.clear();
         for (final r in resources) {
-          _resources.add(Resource.fromJson(r as Map<String, dynamic>));
+          _resources.add(Resource.fromJson(safeMap(r)));
         }
       }
     }
@@ -172,7 +173,7 @@ class McpClient {
       if (prompts != null) {
         _prompts.clear();
         for (final p in prompts) {
-          _prompts.add(Prompt.fromJson(p as Map<String, dynamic>));
+          _prompts.add(Prompt.fromJson(safeMap(p)));
         }
       }
     }
@@ -232,7 +233,7 @@ class McpClient {
     // 解析 JSON
     if (line.startsWith('{')) {
       try {
-        final json = jsonDecode(line) as Map<String, dynamic>;
+        final json = safeMap(jsonDecode(line));
         final response = JsonRpcResponse.fromJson(json);
         
         debugPrint('🔌 MCP ← ${response.isSuccess ? 'response' : 'error'}');
@@ -264,7 +265,7 @@ class McpClient {
       );
     }
     
-    return ToolCallResult.fromJson(response.result as Map<String, dynamic>);
+    return ToolCallResult.fromJson(safeMap(response.result));
   }
   
   /// 读取资源
@@ -280,7 +281,7 @@ class McpClient {
       throw Exception('Resource not found: $uri');
     }
     
-    final content = contents.first as Map<String, dynamic>;
+    final content = safeMap(contents.first);
     if (content.containsKey('text')) {
       return TextResourceContents(
         uri: uri,
@@ -311,7 +312,7 @@ class McpClient {
     if (messages == null) return [];
     
     return messages
-        .map((m) => PromptMessage.fromJson(m as Map<String, dynamic>))
+        .map((m) => PromptMessage.fromJson(safeMap(m)))
         .toList();
   }
   

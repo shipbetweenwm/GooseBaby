@@ -8,14 +8,19 @@ class SkillResult {
   final String message;
   final Map<String, dynamic>? data;
 
+  /// 流式输出回调（可选，用于实时推送命令执行过程中的输出行）
+  /// 参数为最新一行的文本内容（不含换行符）
+  final void Function(String line)? onOutput;
+
   const SkillResult({
     required this.success,
     required this.message,
     this.data,
+    this.onOutput,
   });
 
-  factory SkillResult.ok(String message, {Map<String, dynamic>? data}) {
-    return SkillResult(success: true, message: message, data: data);
+  factory SkillResult.ok(String message, {Map<String, dynamic>? data, void Function(String)? onOutput}) {
+    return SkillResult(success: true, message: message, data: data, onOutput: onOutput);
   }
 
   factory SkillResult.fail(String message) {
@@ -97,7 +102,8 @@ abstract class GooseSkill {
   bool get enabled => true;
 
   /// 执行技能
-  Future<SkillResult> execute(Map<String, dynamic> args);
+  /// [onOutput] 可选的流式输出回调，用于实时推送执行过程中的输出行
+  Future<SkillResult> execute(Map<String, dynamic> args, {void Function(String line)? onOutput});
 
   /// 生成 Function Calling 的 tool 定义
   Map<String, dynamic> toFunctionTool() {

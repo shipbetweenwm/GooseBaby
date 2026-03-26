@@ -218,6 +218,11 @@ class _PetWindowState extends State<PetWindow> with TickerProviderStateMixin, Wi
 
     // 设置引擎回调
     WidgetsBinding.instance.addPostFrameCallback((_) async {
+      // 恢复上次聊天模式
+      final savedMode = StorageManager.getSetting<bool>('chat_work_mode');
+      if (savedMode != null) {
+        _chatWorkMode = savedMode;
+      }
       // 获取屏幕尺寸用于面板自适应
       final mediaQuery = MediaQuery.of(context);
       _screenSize = mediaQuery.size;
@@ -837,6 +842,9 @@ class _PetWindowState extends State<PetWindow> with TickerProviderStateMixin, Wi
               right: _petWindowWidth,
               child: SettingsPanel(
                 onClose: () => _togglePanel('settings'),
+                onShowBubble: (message) {
+                  if (mounted) _showBubble(message);
+                },
               ),
             ),
 
@@ -1087,12 +1095,16 @@ class _PetWindowState extends State<PetWindow> with TickerProviderStateMixin, Wi
 
   /// 保存面板宽度到本地存储
   Future<void> _savePanelWidth(double width) async {
-    await StorageManager.setSetting('panel_width', width);
+    // 根据当前模式使用不同的存储 key，避免模式切换后宽度混乱
+    final key = _chatWorkMode ? 'panel_width_work' : 'panel_width_casual';
+    await StorageManager.setSetting(key, width);
   }
 
   /// 从本地存储读取面板宽度
   double _loadPanelWidth(double defaultWidth) {
-    return StorageManager.getSetting<double>('panel_width') ?? defaultWidth;
+    // 根据当前模式使用不同的存储 key
+    final key = _chatWorkMode ? 'panel_width_work' : 'panel_width_casual';
+    return StorageManager.getSetting<double>(key) ?? defaultWidth;
   }
 
   /// 保存面板高度到本地存储
@@ -1283,6 +1295,9 @@ class _PetWindowState extends State<PetWindow> with TickerProviderStateMixin, Wi
     setState(() {
       _chatWorkMode = toWorkMode;
     });
+
+    // 持久化聊天模式
+    await StorageManager.setSetting('chat_work_mode', toWorkMode);
 
     try {
       final pos = await windowManager.getPosition();

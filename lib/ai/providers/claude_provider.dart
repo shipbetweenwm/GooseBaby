@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'package:dio/dio.dart';
 import '../../models/models.dart';
+import '../../utils/type_utils.dart';
 import '../agent/agent_types.dart';
 import 'llm_provider.dart';
 
@@ -77,7 +78,7 @@ class ClaudeProvider extends LLMProvider {
             blocks.add({'type': 'text', 'text': textContent});
           }
           for (final tc in toolCalls) {
-            final func = tc['function'] as Map<String, dynamic>?;
+            final func = tc['function'] is Map ? safeMap(tc['function']) : null;
             if (func != null) {
               // 从 id 中提取 Claude 原始 id（如果有的话）
               String claudeId = tc['id'] as String? ?? '';
@@ -88,7 +89,7 @@ class ClaudeProvider extends LLMProvider {
                 'type': 'tool_use',
                 'id': claudeId.isNotEmpty ? claudeId : 'toolu_${DateTime.now().microsecondsSinceEpoch}',
                 'name': func['name'],
-                'input': jsonDecode(func['arguments'] as String? ?? '{}'),
+                'input': safeMap(jsonDecode(func['arguments'] as String? ?? '{}')),
               });
             }
           }
@@ -115,7 +116,7 @@ class ClaudeProvider extends LLMProvider {
 
     if (tools != null && tools.isNotEmpty) {
       body['tools'] = tools.map((t) {
-        final func = t['function'] as Map<String, dynamic>;
+        final func = safeMap(t['function']);
         return {
           'name': func['name'],
           'description': func['description'],
@@ -147,7 +148,7 @@ class ClaudeProvider extends LLMProvider {
         return ToolCall(
           id: 'claude_${block['id'] ?? DateTime.now().microsecondsSinceEpoch}',
           name: block['name'] as String? ?? '',
-          arguments: (block['input'] as Map<String, dynamic>?) ?? {},
+          arguments: block['input'] is Map ? safeMap(block['input']) : {},
         );
       }).toList();
       return AgentResponse.tools(toolCalls);
@@ -200,7 +201,7 @@ class ClaudeProvider extends LLMProvider {
             blocks.add({'type': 'text', 'text': textContent});
           }
           for (final tc in toolCalls) {
-            final func = tc['function'] as Map<String, dynamic>?;
+            final func = tc['function'] is Map ? safeMap(tc['function']) : null;
             if (func != null) {
               String claudeId = tc['id'] as String? ?? '';
               if (claudeId.startsWith('claude_')) {
@@ -210,7 +211,7 @@ class ClaudeProvider extends LLMProvider {
                 'type': 'tool_use',
                 'id': claudeId.isNotEmpty ? claudeId : 'toolu_${DateTime.now().microsecondsSinceEpoch}',
                 'name': func['name'],
-                'input': jsonDecode(func['arguments'] as String? ?? '{}'),
+                'input': safeMap(jsonDecode(func['arguments'] as String? ?? '{}')),
               });
             }
           }
@@ -253,7 +254,7 @@ class ClaudeProvider extends LLMProvider {
     }
     if (tools != null && tools.isNotEmpty) {
       for (final t in tools) {
-        final func = t['function'] as Map<String, dynamic>;
+        final func = safeMap(t['function']);
         allTools.add({
           'name': func['name'],
           'description': func['description'],

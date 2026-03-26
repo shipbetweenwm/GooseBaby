@@ -38,7 +38,7 @@ class AgentLoop {
     required LLMConfig config,
     required List<Map<String, dynamic>> messages,
     required List<Map<String, dynamic>> tools,
-    required Future<ToolResult> Function(ToolCall call) executeTool,
+    required Future<ToolResult> Function(ToolCall call, {void Function(String line)? onOutput}) executeTool,
     int maxTurns = 30,
     void Function(ToolStep step)? onStepUpdate,
     void Function(String failedTool, String summary, String error, String solution)? onToolFailure,
@@ -291,8 +291,20 @@ class AgentLoop {
         steps.add(step);
         onStepUpdate?.call(step);
 
+        // 构造实时输出回调：每收到一行输出就追加到 step.content 并通知 UI
+        final outputBuffer = StringBuffer();
+        void Function(String)? onOutput;
+        if (onStepUpdate != null) {
+          onOutput = (String line) {
+            if (outputBuffer.isNotEmpty) outputBuffer.write('\n');
+            outputBuffer.write(line);
+            step.content = '$stepDesc\n${outputBuffer.toString()}';
+            onStepUpdate(step);
+          };
+        }
+
         // 执行工具（由调用方决定具体实现）
-        final result = await executeTool(toolCall);
+        final result = await executeTool(toolCall, onOutput: onOutput);
         roundResultLength += result.content.length;
 
         // 收集输出文件（从 ToolResult.data 提取）

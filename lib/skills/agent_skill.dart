@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/foundation.dart';
+import '../utils/type_utils.dart';
 import 'skill_base.dart';
 import 'skill_file_utils.dart';
 
@@ -145,7 +146,7 @@ class AgentSkill extends GooseSkill {
 
   /// 执行 Agent 技能 = 执行 shell 命令或本地脚本
   @override
-  Future<SkillResult> execute(Map<String, dynamic> args) async {
+  Future<SkillResult> execute(Map<String, dynamic> args, {void Function(String line)? onOutput}) async {
     final rawCommand = args['command'] as String? ?? '';
     if (rawCommand.isEmpty) {
       return SkillResult.fail('未提供要执行的命令');
@@ -561,7 +562,9 @@ class AgentSkill extends GooseSkill {
       final skillMdFile = File('$dirPath/SKILL.md');
       if (!await skillMdFile.exists()) return null;
 
-      final mdContent = await skillMdFile.readAsString(encoding: utf8);
+      // 使用 allowMalformed 防止非 UTF-8 文件导致 FormatException
+      final mdBytes = await skillMdFile.readAsBytes();
+      final mdContent = const Utf8Decoder(allowMalformed: true).convert(mdBytes);
 
       // 解析 YAML frontmatter
       final frontmatter = _parseFrontmatter(mdContent);
@@ -573,7 +576,7 @@ class AgentSkill extends GooseSkill {
       if (await metaFile.exists()) {
         try {
           final metaContent = await metaFile.readAsString(encoding: utf8);
-          final metaJson = jsonDecode(metaContent) as Map<String, dynamic>;
+          final metaJson = safeMap(jsonDecode(metaContent));
           meta = AgentSkillMeta.fromJson(metaJson);
         } catch (e) {
           debugPrint('🤖 _meta.json 解析失败: $e');
@@ -602,7 +605,7 @@ class AgentSkill extends GooseSkill {
       final metadataRaw = frontmatter['metadata'];
       if (metadataRaw is String) {
         try {
-          fmMetadata = jsonDecode(metadataRaw) as Map<String, dynamic>;
+          fmMetadata = safeMap(jsonDecode(metadataRaw));
         } catch (_) {}
       } else if (metadataRaw is Map) {
         fmMetadata = Map<String, dynamic>.from(metadataRaw);
@@ -610,9 +613,9 @@ class AgentSkill extends GooseSkill {
 
       // 提取 emoji
       if (fmMetadata.containsKey('clawdbot')) {
-        final cb = fmMetadata['clawdbot'] as Map<String, dynamic>? ?? {};
+        final cb = fmMetadata['clawdbot'] is Map ? safeMap(fmMetadata['clawdbot']) : {};
         icon = cb['emoji'] as String? ?? '🤖';
-        final requires = cb['requires'] as Map<String, dynamic>? ?? {};
+        final requires = cb['requires'] is Map ? safeMap(cb['requires']) : {};
         requiredBins = _parseStringList(requires['bins']);
       }
 
@@ -657,6 +660,21 @@ class AgentSkill extends GooseSkill {
     }
   }
 
+  /// 从实体路径中安全提取相对于基础目录的相对路径
+  /// Windows 兼容：处理路径分隔符不一致的问题
+  static String _safeRelPath(String entityPath, String basePath) {
+    // 统一分隔符为 /
+    final normalized = entityPath.replaceAll('\\', '/');
+    final baseNormalized = basePath.replaceAll('\\', '/');
+    String rel = normalized;
+    if (rel.startsWith(baseNormalized)) {
+      rel = rel.substring(baseNormalized.length);
+      // 去掉开头的 /
+      if (rel.startsWith('/')) rel = rel.substring(1);
+    }
+    return rel;
+  }
+
   /// 扫描 scripts/ 目录，返回脚本文件列表
   static Future<List<SkillScript>> _scanScriptsDir(String dirPath) async {
     final scripts = <SkillScript>[];
@@ -673,9 +691,7 @@ class AgentSkill extends GooseSkill {
     try {
       await for (final entity in targetDir.list(recursive: true)) {
         if (entity is File) {
-          final relPath = entity.path
-              .substring(dirPath.length + 1)
-              .replaceAll('\\', '/');
+          final relPath = _safeRelPath(entity.path, dirPath);
           // 统一使用 "scripts/" 前缀（即使实际目录是 s/）
           final normalizedPath = relPath.startsWith('s/')
               ? 'scripts/${relPath.substring(2)}'
@@ -707,9 +723,7 @@ class AgentSkill extends GooseSkill {
     try {
       await for (final entity in subDir.list(recursive: true)) {
         if (entity is File) {
-          final relPath = entity.path
-              .substring(dirPath.length + 1)
-              .replaceAll('\\', '/');
+          final relPath = _safeRelPath(entity.path, dirPath);
           files.add(relPath);
         }
       }

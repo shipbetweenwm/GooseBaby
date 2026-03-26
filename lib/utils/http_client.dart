@@ -1,5 +1,6 @@
 import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
+import 'type_utils.dart';
 
 /// HTTP 客户端封装
 class HttpClient {
@@ -83,8 +84,8 @@ class HttpClient {
       ),
     );
 
-    if (response.data is Map<String, dynamic>) {
-      return response.data as Map<String, dynamic>;
+    if (response.data is Map) {
+      return safeMap(response.data);
     }
     return {'data': response.data};
   }

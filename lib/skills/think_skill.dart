@@ -35,7 +35,7 @@ class ThinkSkill extends GooseSkill {
       ];
 
   @override
-  Future<SkillResult> execute(Map<String, dynamic> args) async {
+  Future<SkillResult> execute(Map<String, dynamic> args, {void Function(String line)? onOutput}) async {
     final thought = args['thought'] as String? ?? '';
     if (thought.trim().isEmpty) {
       return SkillResult.fail('思考内容为空');

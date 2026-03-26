@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as p;
 import 'package:archive/archive.dart';
+import '../utils/type_utils.dart';
 import 'skill_base.dart';
 import 'agent_skill.dart';
 
@@ -123,7 +124,7 @@ class ScriptSkill extends GooseSkill {
   List<SkillParam> get params => _params;
 
   @override
-  Future<SkillResult> execute(Map<String, dynamic> args) async {
+  Future<SkillResult> execute(Map<String, dynamic> args, {void Function(String line)? onOutput}) async {
     try {
       for (final rule in _rules) {
         final condition = rule['condition'] as String? ?? 'default';
@@ -223,14 +224,14 @@ class ScriptSkill extends GooseSkill {
 
   /// 从 OpenAI Function Calling 标准格式解析
   factory ScriptSkill.fromOpenAIFormat(Map<String, dynamic> json, {String? sourcePath, String? packName}) {
-    final funcDef = json['function'] as Map<String, dynamic>? ?? {};
-    final params = funcDef['parameters'] as Map<String, dynamic>? ?? {};
-    final properties = params['properties'] as Map<String, dynamic>? ?? {};
+    final funcDef = json['function'] is Map ? safeMap(json['function']) : {};
+    final params = funcDef['parameters'] is Map ? safeMap(funcDef['parameters']) : {};
+    final properties = params['properties'] is Map ? safeMap(params['properties']) : {};
     final required = (params['required'] as List?)?.cast<String>() ?? [];
 
     final paramsList = <SkillParam>[];
     for (final entry in properties.entries) {
-      final propDef = entry.value as Map<String, dynamic>? ?? {};
+      final propDef = entry.value is Map ? safeMap(entry.value) : {};
       paramsList.add(SkillParam(
         name: entry.key,
         description: propDef['description'] as String? ?? '',
@@ -337,6 +338,9 @@ class SkillPackManifest {
 /// 技能加载器 - 支持文件、目录、ZIP、技能包（文件夹）、Agent Skill（SKILL.md）加载
 class SkillLoader {
 
+  /// ZIP 文件最大大小限制（50MB）
+  static const int _maxZipSize = 50 * 1024 * 1024;
+
   /// 从 ZIP 文件加载技能（OpenClaw 标准格式）
   /// 将 ZIP 解压到固定目录（去掉 .zip 后缀），确保脚本路径持久有效
   static Future<List<GooseSkill>> loadFromZip(String zipPath) async {
@@ -346,6 +350,13 @@ class SkillLoader {
       final zipFile = File(zipPath);
       if (!await zipFile.exists()) {
         debugPrint('🦢 ZIP 文件不存在: $zipPath');
+        return skills;
+      }
+
+      // 检查 ZIP 文件大小，防止 OOM
+      final fileSize = await zipFile.length();
+      if (fileSize > _maxZipSize) {
+        debugPrint('🦢 ZIP 文件过大 (${(fileSize / 1024 / 1024).toStringAsFixed(1)} MB)，跳过: $zipPath');
         return skills;
       }
 
@@ -382,13 +393,25 @@ class SkillLoader {
 
         for (final file in archive) {
           try {
+            // 安全检查：跳过绝对路径和路径遍历攻击
+            if (file.name.startsWith('/') || file.name.contains('..')) {
+              debugPrint('🦢 跳过不安全路径: ${file.name}');
+              continue;
+            }
             final filePath = p.join(extractDir, file.name);
             if (file.isFile) {
+              // 安全获取文件内容（archive v4 的 content 可能抛异常）
+              final List<int> content;
+              try {
+                content = file.content;
+              } catch (e) {
+                debugPrint('🦢 读取 ZIP 条目失败: ${file.name} - $e');
+                continue;
+              }
               final outFile = File(filePath);
               await outFile.parent.create(recursive: true);
-              // content 是 List<int> 类型
-              final bytes = Uint8List.fromList(file.content);
-              await outFile.writeAsBytes(bytes);
+              final outBytes = Uint8List.fromList(content);
+              await outFile.writeAsBytes(outBytes);
             } else {
               await Directory(filePath).create(recursive: true);
             }
@@ -475,7 +498,7 @@ class SkillLoader {
     try {
       final file = File(filePath);
       final content = await file.readAsString(encoding: utf8);
-      final json = jsonDecode(content) as Map<String, dynamic>;
+      final json = safeMap(jsonDecode(content));
       final skill = ScriptSkill.fromAnyFormat(json, sourcePath: filePath, packName: packName);
       debugPrint('🦢 加载技能: ${skill.name} (${skill.id}) from $filePath');
       return skill;
@@ -504,7 +527,7 @@ class SkillLoader {
       // 有 manifest.json → 按清单加载
       try {
         final content = await manifestFile.readAsString(encoding: utf8);
-        final json = jsonDecode(content) as Map<String, dynamic>;
+        final json = safeMap(jsonDecode(content));
         final manifest = SkillPackManifest.fromJson(json);
         debugPrint('🦢 加载技能包: ${manifest.name} v${manifest.version} by ${manifest.author}');
 
@@ -537,7 +560,7 @@ class SkillLoader {
   /// 从 JSON 字符串加载单个技能（自动检测格式）
   static ScriptSkill? loadFromString(String jsonString) {
     try {
-      final json = jsonDecode(jsonString) as Map<String, dynamic>;
+      final json = safeMap(jsonDecode(jsonString));
       return ScriptSkill.fromAnyFormat(json);
     } catch (e) {
       debugPrint('🦢 解析技能 JSON 失败: $e');

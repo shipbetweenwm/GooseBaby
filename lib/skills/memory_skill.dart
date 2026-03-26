@@ -40,7 +40,7 @@ class SaveMemorySkill extends GooseSkill {
       ];
 
   @override
-  Future<SkillResult> execute(Map<String, dynamic> args) async {
+  Future<SkillResult> execute(Map<String, dynamic> args, {void Function(String line)? onOutput}) async {
     final content = args['content'] as String? ?? '';
     if (content.trim().isEmpty) {
       return SkillResult.fail('记忆内容为空');

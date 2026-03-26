@@ -90,7 +90,7 @@ class SubAgentSkill extends GooseSkill {
   ];
   
   @override
-  Future<SkillResult> execute(Map<String, dynamic> args) async {
+  Future<SkillResult> execute(Map<String, dynamic> args, {void Function(String line)? onOutput}) async {
     final task = args['task'] as String? ?? '';
     if (task.isEmpty) {
       return SkillResult.fail('任务描述不能为空');
@@ -183,7 +183,7 @@ class SubAgentSkill extends GooseSkill {
         ),
         messages: subMessages,
         tools: subTools,
-        executeTool: executeToolCallback!,
+        executeTool: (call, {onOutput}) => executeToolCallback!(call),
         maxTurns: config.maxTurns,
         hooks: hookManager?.hooks,
         subAgentContext: subContext,
@@ -357,7 +357,7 @@ class AgentTeamsSkill extends GooseSkill {
   ];
   
   @override
-  Future<SkillResult> execute(Map<String, dynamic> args) async {
+  Future<SkillResult> execute(Map<String, dynamic> args, {void Function(String line)? onOutput}) async {
     // 解析团队配置
     final teamName = args['team_name'] as String? ?? '未命名团队';
     final modeStr = args['mode'] as String? ?? 'sequential';

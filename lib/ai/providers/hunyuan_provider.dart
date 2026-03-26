@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'package:dio/dio.dart';
 import '../../models/models.dart';
+import '../../utils/type_utils.dart';
 import '../agent/agent_types.dart';
 import 'llm_provider.dart';
 
@@ -103,7 +104,7 @@ class HunyuanProvider extends LLMProvider {
       final finishReason = parseStopReason(choices[0]['finish_reason'] as String?);
       if (message['tool_calls'] != null) {
         final toolCalls = (message['tool_calls'] as List)
-            .map((tc) => ToolCall.fromJson(tc as Map<String, dynamic>))
+            .map((tc) => ToolCall.fromJson(safeMap(tc)))
             .toList();
         return AgentResponse.tools(toolCalls);
       }

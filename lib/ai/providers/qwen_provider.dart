@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
 import '../../models/models.dart';
+import '../../utils/type_utils.dart';
 import '../agent/agent_types.dart';
 import 'llm_provider.dart';
 
@@ -120,7 +121,7 @@ class QwenProvider extends LLMProvider {
       // 检查是否有 tool_calls
       if (message['tool_calls'] != null) {
         final toolCalls = (message['tool_calls'] as List)
-            .map((tc) => ToolCall.fromJson(tc as Map<String, dynamic>))
+            .map((tc) => ToolCall.fromJson(safeMap(tc)))
             .toList();
         return AgentResponse.tools(toolCalls);
       }
@@ -250,7 +251,7 @@ class QwenProvider extends LLMProvider {
         // 收集这个 assistant 消息中所有的 tool_call_id
         final expectedIds = <String>{};
         for (final tc in toolCalls) {
-          final id = (tc as Map<String, dynamic>)['id'] as String?;
+          final id = (safeMap(tc))['id'] as String?;
           if (id != null) expectedIds.add(id);
         }
 
@@ -281,7 +282,7 @@ class QwenProvider extends LLMProvider {
             // 部分缺失 → 只保留有响应的 tool_calls
             debugPrint('⚠️ → 移除缺少响应的 tool_calls');
             final fixedToolCalls = toolCalls.where((tc) {
-              final id = (tc as Map<String, dynamic>)['id'] as String?;
+              final id = safeMap(tc)['id'] as String?;
               return id != null && foundIds.contains(id);
             }).toList();
             msg['tool_calls'] = fixedToolCalls;

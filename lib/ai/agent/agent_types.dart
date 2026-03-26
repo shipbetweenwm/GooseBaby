@@ -2,6 +2,7 @@
 /// 参考 Claude Code 的设计：结构化响应 + 工具调用 + 停止原因
 
 import 'dart:convert';
+import '../../utils/type_utils.dart';
 import 'agent_mode.dart';
 
 /// 取消令牌 — 用于从外部中断 AgentLoop
@@ -68,13 +69,13 @@ class ToolCall {
 
   /// 从 OpenAI 格式的 tool_call 解析
   factory ToolCall.fromJson(Map<String, dynamic> json) {
-    final function = json['function'] as Map<String, dynamic>? ?? {};
+    final function = json['function'] is Map ? safeMap(json['function']) : {};
     return ToolCall(
       id: json['id'] as String? ?? '',
       name: function['name'] as String? ?? '',
       arguments: (function['arguments'] is String)
-          ? (jsonDecode(function['arguments'] as String) as Map<String, dynamic>)
-          : (function['arguments'] as Map<String, dynamic>? ?? {}),
+          ? safeMap(jsonDecode(function['arguments'] as String))
+          : (function['arguments'] is Map ? safeMap(function['arguments']) : {}),
     );
   }
 

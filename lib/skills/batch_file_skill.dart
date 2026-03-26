@@ -1,5 +1,6 @@
 import 'dart:io';
 import 'package:path/path.dart' as p;
+import '../utils/type_utils.dart';
 import 'skill_base.dart';
 import 'skill_file_utils.dart';
 
@@ -102,7 +103,7 @@ class BatchFileSkill extends GooseSkill {
   ];
 
   @override
-  Future<SkillResult> execute(Map<String, dynamic> args) async {
+  Future<SkillResult> execute(Map<String, dynamic> args, {void Function(String line)? onOutput}) async {
     final action = args['action'] as String?;
     if (action == null || action.isEmpty) {
       return SkillResult.fail('请指定 action 参数');
@@ -525,7 +526,7 @@ class BatchFileSkill extends GooseSkill {
     for (final result in results.take(20)) {
       buffer.writeln('📄 ${result['path']} (${result['total_matches']} 处匹配)');
       for (final match in (result['matches'] as List).take(5)) {
-        final m = match as Map<String, dynamic>;
+        final m = safeMap(match);
         buffer.writeln('   L${m['line']}: ${m['context']}');
       }
       if ((result['matches'] as List).length > 5) {

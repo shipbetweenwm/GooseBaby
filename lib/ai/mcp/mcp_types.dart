@@ -1,7 +1,8 @@
-/// MCP (Model Context Protocol) 类型定义
-/// 参考: https://spec.modelcontextprotocol.io/
+// MCP (Model Context Protocol) 类型定义
+// 参考: https://spec.modelcontextprotocol.io/
 
 import 'dart:convert';
+import '../../utils/type_utils.dart' as type_utils;
 
 /// MCP 版本
 const String mcpVersion = '2024-11-05';
@@ -51,7 +52,7 @@ class JsonRpcResponse {
       id: json['id']?.toString(),
       result: json['result'],
       error: json['error'] != null 
-          ? JsonRpcError.fromJson(json['error'] as Map<String, dynamic>)
+          ? JsonRpcError.fromJson(type_utils.safeMap(json['error']))
           : null,
     );
   }
@@ -109,13 +110,13 @@ class ServerCapabilities {
     return ServerCapabilities(
       experimental: json['experimental'] as bool?,
       tools: json['tools'] != null 
-          ? ToolCapabilities.fromJson(json['tools'] as Map<String, dynamic>)
+          ? ToolCapabilities.fromJson(type_utils.safeMap(json['tools']))
           : null,
       resources: json['resources'] != null 
-          ? ResourceCapabilities.fromJson(json['resources'] as Map<String, dynamic>)
+          ? ResourceCapabilities.fromJson(type_utils.safeMap(json['resources']))
           : null,
       prompts: json['prompts'] != null 
-          ? PromptCapabilities.fromJson(json['prompts'] as Map<String, dynamic>)
+          ? PromptCapabilities.fromJson(type_utils.safeMap(json['prompts']))
           : null,
     );
   }
@@ -224,7 +225,7 @@ class McpTool {
     return McpTool(
       name: json['name'] as String,
       description: json['description'] as String?,
-      inputSchema: json['inputSchema'] as Map<String, dynamic>?,
+      inputSchema: json['inputSchema'] != null ? type_utils.safeMap(json['inputSchema']) : null,
     );
   }
   
@@ -258,7 +259,7 @@ class ToolCallRequest {
   factory ToolCallRequest.fromJson(Map<String, dynamic> json) {
     return ToolCallRequest(
       name: json['name'] as String,
-      arguments: json['arguments'] as Map<String, dynamic>? ?? {},
+      arguments: json['arguments'] != null ? type_utils.safeMap(json['arguments']) : {},
     );
   }
   
@@ -282,7 +283,7 @@ class ToolCallResult {
     final contentList = json['content'] as List? ?? [];
     return ToolCallResult(
       content: contentList
-          .map((c) => ContentBlock.fromJson(c as Map<String, dynamic>))
+          .map((c) => ContentBlock.fromJson(type_utils.safeMap(c)))
           .toList(),
       isError: json['isError'] as bool?,
     );
@@ -390,7 +391,7 @@ class ResourceContentBlock extends ContentBlock {
   
   factory ResourceContentBlock.fromJson(Map<String, dynamic> json) {
     return ResourceContentBlock(
-      resource: Resource.fromJson(json['resource'] as Map<String, dynamic>),
+      resource: Resource.fromJson(type_utils.safeMap(json['resource'])),
     );
   }
   
@@ -508,7 +509,7 @@ class Prompt {
       name: json['name'] as String,
       description: json['description'] as String?,
       arguments: argsList
-          ?.map((a) => PromptArgument.fromJson(a as Map<String, dynamic>))
+          ?.map((a) => PromptArgument.fromJson(type_utils.safeMap(a)))
           .toList(),
     );
   }
@@ -560,7 +561,7 @@ class PromptMessage {
   factory PromptMessage.fromJson(Map<String, dynamic> json) {
     return PromptMessage(
       role: json['role'] as String,
-      content: ContentBlock.fromJson(json['content'] as Map<String, dynamic>),
+      content: ContentBlock.fromJson(type_utils.safeMap(json['content'])),
     );
   }
   

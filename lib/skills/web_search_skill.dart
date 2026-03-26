@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:dio/dio.dart';
+import '../utils/type_utils.dart';
 import 'skill_base.dart';
 
 /// 网络搜索技能
@@ -99,7 +100,7 @@ class WebSearchSkill extends GooseSkill {
   ];
 
   @override
-  Future<SkillResult> execute(Map<String, dynamic> args) async {
+  Future<SkillResult> execute(Map<String, dynamic> args, {void Function(String line)? onOutput}) async {
     final query = args['query'] as String?;
     if (query == null || query.isEmpty) {
       return SkillResult.fail('请输入搜索关键词');
@@ -159,7 +160,7 @@ class WebSearchSkill extends GooseSkill {
         return SkillResult.fail('搜索失败: HTTP ${response.statusCode}');
       }
       
-      final data = response.data as Map<String, dynamic>;
+      final data = safeMap(response.data);
       return _formatResults(data, query);
       
     } on DioException catch (e) {
@@ -228,7 +229,7 @@ class WebSearchSkill extends GooseSkill {
       buffer.writeln();
       
       for (int i = 0; i < results.length; i++) {
-        final result = results[i] as Map<String, dynamic>;
+        final result = safeMap(results[i]);
         final title = result['title'] as String? ?? '无标题';
         final url = result['url'] as String? ?? '';
         final content = result['content'] as String? ?? '';

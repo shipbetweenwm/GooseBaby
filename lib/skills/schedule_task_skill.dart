@@ -89,7 +89,7 @@ class ScheduleTaskSkill extends GooseSkill {
       ];
 
   @override
-  Future<SkillResult> execute(Map<String, dynamic> args) async {
+  Future<SkillResult> execute(Map<String, dynamic> args, {void Function(String line)? onOutput}) async {
     if (taskManager == null) {
       return SkillResult.fail('定时任务管理器未初始化');
     }

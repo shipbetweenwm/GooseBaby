@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:hive/hive.dart';
+import '../utils/type_utils.dart';
 import 'skill_base.dart';
 
 /// 定时任务
@@ -312,7 +313,7 @@ class ScheduledTaskManager extends ChangeNotifier {
       try {
         Map<String, dynamic> skillArgs = {};
         if (task.skillArgsJson != null && task.skillArgsJson!.isNotEmpty) {
-          skillArgs = jsonDecode(task.skillArgsJson!) as Map<String, dynamic>;
+          skillArgs = safeMap(jsonDecode(task.skillArgsJson!));
         }
         final result = await onExecuteSkill!(task.skillId!, skillArgs);
         debugPrint('🦢 定时任务技能执行: ${task.title} -> ${result.success ? "✅" : "❌"}');

@@ -90,7 +90,7 @@ class ShellExecSkill extends GooseSkill {
   }
 
   @override
-  Future<SkillResult> execute(Map<String, dynamic> args) async {
+  Future<SkillResult> execute(Map<String, dynamic> args, {void Function(String line)? onOutput}) async {
     // 兼容旧的 script 参数：如果传了 script 没传 command，自动转换
     String command = args['command'] as String? ?? '';
     final script = args['script'] as String? ?? '';
@@ -134,26 +134,70 @@ class ShellExecSkill extends GooseSkill {
       // 记录工作目录中的已有文件（用于 diff）
       final existingFiles = await SkillFileUtils.listFilePaths(effectiveWorkDir);
 
-      // 统一通过 cmd/bash 执行命令
+      // 使用 Process.start 实现流式输出
       final isWindows = Platform.isWindows;
-      final encoding = isWindows ? latin1 : utf8;
-      final result = await Process.run(
+      final process = await Process.start(
         isWindows ? 'cmd' : 'bash',
         [isWindows ? '/c' : '-c', actualCommand],
         workingDirectory: effectiveWorkDir,
-        stdoutEncoding: encoding,
-        stderrEncoding: encoding,
-      ).timeout(Duration(seconds: timeoutSec));
+      );
 
-      final stdout = (result.stdout as String).trim();
-      final stderr = (result.stderr as String).trim();
+      // 流式收集 stdout/stderr
+      final stdoutBuffer = StringBuffer();
+      final stderrBuffer = StringBuffer();
+
+      // stdout 实时流式输出（allowMalformed 容忍 GBK 等非 UTF-8 字节）
+      final stdoutDone = Completer<void>();
+      process.stdout
+          .transform(const Utf8Decoder(allowMalformed: true))
+          .transform(const LineSplitter())
+          .listen(
+        (line) {
+          stdoutBuffer.writeln(line);
+          // 实时推送输出行给调用方
+          onOutput?.call(line);
+        },
+        onDone: () => stdoutDone.complete(),
+        onError: (e) {
+          if (!stdoutDone.isCompleted) stdoutDone.completeError(e);
+        },
+      );
+
+      // stderr 实时流式输出（allowMalformed 容忍 GBK 等非 UTF-8 字节）
+      final stderrDone = Completer<void>();
+      process.stderr
+          .transform(const Utf8Decoder(allowMalformed: true))
+          .transform(const LineSplitter())
+          .listen(
+        (line) {
+          stderrBuffer.writeln(line);
+          onOutput?.call(line);
+        },
+        onDone: () => stderrDone.complete(),
+        onError: (e) {
+          if (!stderrDone.isCompleted) stderrDone.completeError(e);
+        },
+      );
+
+      // 等待进程结束，带超时
+      final exitCode = await process.exitCode
+          .timeout(Duration(seconds: timeoutSec));
+
+      // 等待所有输出流关闭
+      await Future.wait([
+        stdoutDone.future,
+        stderrDone.future,
+      ]).timeout(const Duration(seconds: 5), onTimeout: () => <void>[]);
+
+      final stdout = stdoutBuffer.toString().trim();
+      final stderr = stderrBuffer.toString().trim();
 
       // 收集新生成的文件
       final outputFiles = await SkillFileUtils.collectNewFiles(effectiveWorkDir, existingFiles);
 
       // 构建结果消息
       final sb = StringBuffer();
-      if (result.exitCode == 0) {
+      if (exitCode == 0) {
         sb.writeln('✅ 执行成功 (exit code: 0)');
         if (stdout.isNotEmpty) {
           sb.writeln('\n📤 输出:\n```\n$stdout\n```');
@@ -165,8 +209,8 @@ class ShellExecSkill extends GooseSkill {
           }
         }
       } else {
-        sb.writeln('❌ 执行失败 (exit code: ${result.exitCode})');
-        if (result.exitCode == 9009) {
+        sb.writeln('❌ 执行失败 (exit code: $exitCode)');
+        if (exitCode == 9009) {
           sb.writeln('\n💡 提示: exit code 9009 表示 Windows 找不到指定的程序或命令。');
           final cmdLower = actualCommand.toLowerCase();
           if (cmdLower.startsWith('python ') || cmdLower.startsWith('python3 ')) {
@@ -181,11 +225,11 @@ class ShellExecSkill extends GooseSkill {
           } else {
             sb.writeln('   请检查: 1) 程序是否已安装  2) 是否已加入系统 PATH');
           }
-        } else if (result.exitCode == 103) {
+        } else if (exitCode == 103) {
           sb.writeln('\n💡 提示: exit code 103 表示 py launcher 找不到指定的 Python 版本。');
-        } else if (result.exitCode == 1) {
+        } else if (exitCode == 1) {
           sb.writeln('\n💡 提示: 程序运行出错，请查看下方错误信息。');
-        } else if (result.exitCode == 2) {
+        } else if (exitCode == 2) {
           sb.writeln('\n💡 提示: exit code 2 通常表示文件未找到或语法错误。');
         }
         if (stderr.isNotEmpty) {
@@ -200,34 +244,26 @@ class ShellExecSkill extends GooseSkill {
         }
       }
 
-      debugPrint('💻 shell_exec 结果: exit=${result.exitCode}, '
+      debugPrint('💻 shell_exec 结果: exit=$exitCode, '
           'stdout=${stdout.length} chars, files=${outputFiles.length}');
 
       return SkillResult.ok(
         sb.toString(),
         data: {
-          'exitCode': result.exitCode,
+          'exitCode': exitCode,
           'stdout': stdout,
           'stderr': stderr,
           'command': actualCommand,
           'outputFiles': outputFiles,
           'workingDir': effectiveWorkDir,
         },
+        onOutput: onOutput,
       );
     } on TimeoutException {
       return SkillResult.fail('命令执行超时，请尝试增大 timeout 参数或优化命令');
-    } on FormatException catch (e) {
-      debugPrint('💻 shell_exec 编码异常: $e');
-      return SkillResult.fail(
-        '❌ 命令输出编码解析失败: $e\n'
-        '💡 可能是命令输出包含特殊字符。请尝试：\n'
-        '   1) 在命令前加 chcp 65001 切换到 UTF-8\n'
-        '   2) 使用英文参数避免中文输出',
-      );
     } catch (e) {
       debugPrint('💻 shell_exec 异常: $e');
       return SkillResult.fail('❌ 命令执行出错: $e');
     }
   }
 }
-

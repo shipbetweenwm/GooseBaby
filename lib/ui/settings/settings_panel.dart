@@ -21,8 +21,9 @@ import 'scheduled_task_panel.dart';
 /// 设置面板
 class SettingsPanel extends StatefulWidget {
   final VoidCallback? onClose;
+  final void Function(String message)? onShowBubble;
 
-  const SettingsPanel({super.key, this.onClose});
+  const SettingsPanel({super.key, this.onClose, this.onShowBubble});
 
   @override
   State<SettingsPanel> createState() => _SettingsPanelState();
@@ -33,6 +34,9 @@ class _SettingsPanelState extends State<SettingsPanel> {
   String _workingDir = '';
 
   final _tabs = const ['🧠 AI模型', '🎮 技能', '🔌 MCP', '⏰ 定时任务', '🦢 宠物', '📋 关于'];
+
+  /// 气泡回调便捷方法
+  void _bubble(String message) => widget.onShowBubble?.call(message);
 
   @override
   void initState() {
@@ -210,17 +214,17 @@ class _SettingsPanelState extends State<SettingsPanel> {
   Widget _buildTabContent() {
     switch (_selectedTab) {
       case 0:
-        return _AIModelSettings();
+        return _AIModelSettings(onShowBubble: _bubble);
       case 1:
         return _SkillSettings();
       case 2:
-        return _McpSettings();
+        return _McpSettings(onShowBubble: _bubble);
       case 3:
         return _ScheduledTaskSettings();
       case 4:
         return _PetSettings();
       case 5:
-        return _AboutPanel();
+        return _AboutPanel(onShowBubble: _bubble);
       default:
         return const SizedBox();
     }
@@ -229,6 +233,8 @@ class _SettingsPanelState extends State<SettingsPanel> {
 
 /// AI 模型设置
 class _AIModelSettings extends StatefulWidget {
+  final void Function(String)? onShowBubble;
+  const _AIModelSettings({this.onShowBubble});
   @override
   State<_AIModelSettings> createState() => _AIModelSettingsState();
 }
@@ -537,12 +543,7 @@ class _AIModelSettingsState extends State<_AIModelSettings> {
     final box = Hive.box('settings');
     box.put('llm_config_${_selectedProvider}', config.toJson());
 
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        content: Text('✅ AI模型配置已保存~ 嘎！'),
-        backgroundColor: Color(0xFF4FC3F7),
-      ),
-    );
+    widget.onShowBubble?.call('✅ AI模型配置已保存~ 嘎！');
   }
 }
 
@@ -649,12 +650,14 @@ class _SkillSettingsState extends State<_SkillSettings> {
                   ...entry.value.map((skill) {
                     final isEnabled = skillManager.enabledSkills.contains(skill);
                     final isExternal = skillManager.isExternalSkill(skill.id);
+                    // 有源文件目录的技能才允许删除（外部导入 + skills/ 目录加载的目录级技能）
+                    final canDelete = _skillHasSource(skill);
                     return _SkillCard(
                       skill: skill,
                       isEnabled: isEnabled,
                       isExternal: isExternal,
                       onToggle: (v) => skillManager.setEnabled(skill.id, v),
-                      onDelete: isExternal ? () => _deleteSkill(skillManager, skill) : null,
+                      onDelete: canDelete ? () => _deleteSkill(skillManager, skill) : null,
                       onTap: () => _showSkillDetail(skill),
                     );
                   }),
@@ -837,17 +840,23 @@ class _SkillSettingsState extends State<_SkillSettings> {
       builder: (ctx) => AlertDialog(
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
         title: Text('删除技能 "${skill.name}"？'),
-        content: const Text('此操作只会从当前会话中移除，不会删除源文件。'),
+        content: const Text('此操作将永久删除技能及其源文件，无法恢复。'),
         actions: [
           TextButton(
             onPressed: () => Navigator.of(ctx).pop(),
             child: const Text('取消'),
           ),
           TextButton(
-            onPressed: () {
-              skillManager.unregister(skill.id);
+            onPressed: () async {
               Navigator.of(ctx).pop();
-              setState(() => _statusMessage = '已移除技能: ${skill.name}');
+              final deleted = await skillManager.deleteSkill(skill.id);
+              if (mounted) {
+                setState(() {
+                  _statusMessage = deleted
+                      ? '已删除技能: ${skill.name}'
+                      : '已移除技能: ${skill.name}（源文件未找到）';
+                });
+              }
             },
             style: TextButton.styleFrom(foregroundColor: Colors.red),
             child: const Text('删除'),
@@ -855,6 +864,13 @@ class _SkillSettingsState extends State<_SkillSettings> {
         ],
       ),
     );
+  }
+
+  /// 判断技能是否有源文件目录（可删除）
+  bool _skillHasSource(GooseSkill skill) {
+    if (skill is AgentSkill) return skill.sourcePath != null;
+    if (skill is ScriptSkill) return skill.sourcePath != null;
+    return false;
   }
 
   void _createSkillFromJson(SkillManager skillManager) {
@@ -1137,6 +1153,8 @@ class _SkillSettingsState extends State<_SkillSettings> {
 
 /// MCP 服务器设置
 class _McpSettings extends StatefulWidget {
+  final void Function(String)? onShowBubble;
+  const _McpSettings({this.onShowBubble});
   @override
   State<_McpSettings> createState() => _McpSettingsState();
 }
@@ -1338,9 +1356,7 @@ class _McpSettingsState extends State<_McpSettings> {
   void _addServer(BuildContext ctx) {
     final name = _nameController.text.trim();
     if (name.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('请输入服务器名称')),
-      );
+      widget.onShowBubble?.call('请输入服务器名称');
       return;
     }
 
@@ -1375,9 +1391,7 @@ class _McpSettingsState extends State<_McpSettings> {
     _saveConfigs();
     Navigator.of(ctx).pop();
 
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text('✅ 已添加 MCP 服务器: $name')),
-    );
+    widget.onShowBubble?.call('✅ 已添加 MCP 服务器: $name');
   }
 
   void _editServer(String name, McpServerConfig config) {
@@ -1802,6 +1816,8 @@ class _PetSettingsState2 extends State<_PetSettings> {
 
 /// 关于面板
 class _AboutPanel extends StatelessWidget {
+  final void Function(String)? onShowBubble;
+  const _AboutPanel({this.onShowBubble});
   @override
   Widget build(BuildContext context) {
     final engine = context.watch<PetEngine>();
@@ -1970,12 +1986,7 @@ class _AboutPanel extends StatelessWidget {
             onPressed: () {
               memoryManager.clearAll();
               Navigator.of(ctx).pop();
-              ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(
-                  content: Text('🦢 鹅宝的记忆已清除~ 让我们重新认识吧！'),
-                  backgroundColor: Color(0xFF4FC3F7),
-                ),
-              );
+              onShowBubble?.call('🦢 鹅宝的记忆已清除~ 让我们重新认识吧！');
             },
             style: TextButton.styleFrom(foregroundColor: Colors.orange),
             child: const Text('确定清除'),
@@ -2002,12 +2013,7 @@ class _AboutPanel extends StatelessWidget {
               await StorageManager.clearAll();
               if (ctx.mounted) Navigator.of(ctx).pop();
               if (context.mounted) {
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(
-                    content: Text('🦢 所有数据已重置~ 重启应用后生效'),
-                    backgroundColor: Colors.red,
-                  ),
-                );
+                onShowBubble?.call('🦢 所有数据已重置~ 重启应用后生效');
               }
             },
             style: TextButton.styleFrom(foregroundColor: Colors.red),

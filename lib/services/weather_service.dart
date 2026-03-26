@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'package:flutter/foundation.dart';
 import '../utils/http_client.dart';
+import '../utils/type_utils.dart';
 
 /// 天气数据模型
 class WeatherInfo {
@@ -114,11 +115,12 @@ class WeatherService {
         'https://ipapi.co/json/',
       );
       final data = response.data;
-      if (data is Map<String, dynamic>) {
-        _cachedCity = data['city'] as String? ?? '未知';
+      if (data is Map) {
+        final safeData = safeMap(data);
+        _cachedCity = safeData['city'] as String? ?? '未知';
         return {
-          'lat': (data['latitude'] as num).toDouble(),
-          'lon': (data['longitude'] as num).toDouble(),
+          'lat': (safeData['latitude'] as num).toDouble(),
+          'lon': (safeData['longitude'] as num).toDouble(),
         };
       }
       return null;
@@ -129,12 +131,13 @@ class WeatherService {
         final response = await HttpClient.instance.get(
           'http://ip-api.com/json/',
         );
-        final data = response.data;
-        if (data is Map<String, dynamic>) {
-          _cachedCity = data['city'] as String? ?? '未知';
+        final data2 = response.data;
+        if (data2 is Map) {
+          final safeData2 = safeMap(data2);
+          _cachedCity = safeData2['city'] as String? ?? '未知';
           return {
-            'lat': (data['lat'] as num).toDouble(),
-            'lon': (data['lon'] as num).toDouble(),
+            'lat': (safeData2['lat'] as num).toDouble(),
+            'lon': (safeData2['lon'] as num).toDouble(),
           };
         }
       } catch (e2) {
@@ -158,11 +161,12 @@ class WeatherService {
     );
 
     final data = response.data;
-    if (data is! Map<String, dynamic>) {
+    if (data is! Map) {
       return _buildFallbackWeather();
     }
 
-    final current = data['current'] as Map<String, dynamic>?;
+    final safeData = safeMap(data);
+    final current = safeData['current'] is Map ? safeMap(safeData['current']) : null;
     if (current == null) return _buildFallbackWeather();
 
     final code = (current['weather_code'] as num?)?.toInt() ?? 0;

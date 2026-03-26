@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'package:dio/dio.dart';
 import '../../models/models.dart';
+import '../../utils/type_utils.dart';
 import '../agent/agent_types.dart';
 import 'llm_provider.dart';
 
@@ -69,7 +70,7 @@ class OpenAIProvider extends LLMProvider {
 
     if (message['tool_calls'] != null) {
       final toolCalls = (message['tool_calls'] as List)
-          .map((tc) => ToolCall.fromJson(tc as Map<String, dynamic>))
+          .map((tc) => ToolCall.fromJson(safeMap(tc)))
           .toList();
       return AgentResponse.tools(toolCalls);
     }
@@ -238,7 +239,7 @@ class OpenAIProvider extends LLMProvider {
             final choice = data['choices']?[0];
             if (choice == null) continue;
             
-            final delta = choice['delta'] as Map<String, dynamic>?;
+            final delta = choice['delta'] is Map ? safeMap(choice['delta']) : null;
             final finishReason = choice['finish_reason'] as String?;
             
             // 处理文本增量
@@ -265,7 +266,7 @@ class OpenAIProvider extends LLMProvider {
                 if (tc is! Map<String, dynamic>) continue;
                 
                 final index = tc['index'] as int? ?? 0;
-                final func = tc['function'] as Map<String, dynamic>?;
+                final func = tc['function'] is Map ? safeMap(tc['function']) : null;
                 
                 // 工具调用开始
                 if (tc['id'] != null) {

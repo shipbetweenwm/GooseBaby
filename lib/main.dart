@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
@@ -20,6 +22,15 @@ import 'ui/widgets/tray_manager.dart';
 /// 鹅宝 - GooseBaby
 /// AI 驱动的桌面智能宠物伙伴
 void main() async {
+  // 全局异步错误捕获（防止未处理的 Future 错误导致闪退）
+  runZonedGuarded(() async {
+    await _runApp();
+  }, (error, stack) {
+    debugPrint('🦢 [Zone Error] 未捕获的异常: $error\n$stack');
+  });
+}
+
+Future<void> _runApp() async {
   WidgetsFlutterBinding.ensureInitialized();
 
   // 初始化 MediaKit（视频播放引擎）

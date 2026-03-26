@@ -4,6 +4,7 @@
 ///   dart run test/agent_skill_import_test.dart
 import 'dart:io';
 import 'dart:convert';
+import 'package:goose_baby/utils/type_utils.dart';
 
 // 直接复制 agent_skill.dart 中需要的解析逻辑来测试
 // （避免依赖 flutter 库的 debugPrint）
@@ -140,9 +141,9 @@ void main() async {
   }
 
   if (fmMetadata.containsKey('clawdbot')) {
-    final cb = fmMetadata['clawdbot'] as Map<String, dynamic>? ?? {};
+    final cb = fmMetadata['clawdbot'] is Map ? safeMap(fmMetadata['clawdbot']) : {};
     icon = cb['emoji'] as String? ?? '🤖';
-    final requires = cb['requires'] as Map<String, dynamic>? ?? {};
+    final requires = cb['requires'] is Map ? safeMap(cb['requires']) : {};
     requiredBins = _parseStringList(requires['bins']);
   }
 

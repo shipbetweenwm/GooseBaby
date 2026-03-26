@@ -46,7 +46,7 @@ class WriteFileSkill extends GooseSkill {
       ];
 
   @override
-  Future<SkillResult> execute(Map<String, dynamic> args) async {
+  Future<SkillResult> execute(Map<String, dynamic> args, {void Function(String line)? onOutput}) async {
     final path = SkillFileUtils.stripPathQuotes(args['path'] as String? ?? '');
     final content = args['content'] as String? ?? '';
 
@@ -224,7 +224,7 @@ class ReadFileSkill extends GooseSkill {
       ];
 
   @override
-  Future<SkillResult> execute(Map<String, dynamic> args) async {
+  Future<SkillResult> execute(Map<String, dynamic> args, {void Function(String line)? onOutput}) async {
     final path = SkillFileUtils.stripPathQuotes(args['path'] as String? ?? '');
     final maxLines = (args['max_lines'] as int?) ?? 500;
 

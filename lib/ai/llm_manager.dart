@@ -116,6 +116,28 @@ class LLMManager extends ChangeNotifier {
     return await provider.chat(rawMessages, config: _currentConfig, tools: tools);
   }
 
+  /// 流式调用（使用原始消息列表，保留 tool_calls/tool 等 API 字段）
+  /// 用于纯文本回复的流式展示
+  Stream<String> chatStreamWithMessages(
+    List<Map<String, dynamic>> rawMessages, {
+    List<Map<String, dynamic>>? tools,
+  }) async* {
+    final provider = currentProvider;
+    if (provider == null) {
+      throw Exception('未配置模型提供者: ${_currentConfig.provider}');
+    }
+
+    _isProcessing = true;
+    notifyListeners();
+
+    try {
+      yield* provider.chatStream(rawMessages, config: _currentConfig, tools: tools);
+    } finally {
+      _isProcessing = false;
+      notifyListeners();
+    }
+  }
+
   /// 原始对话（供 self-improvement 等内部模块使用）
   Future<String> chatRaw(List<Map<String, dynamic>> messages) async {
     final provider = currentProvider;

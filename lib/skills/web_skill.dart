@@ -601,7 +601,7 @@ class WebInteractSkill extends GooseSkill {
   ];
 
   @override
-  Future<SkillResult> execute(Map<String, dynamic> args) async {
+  Future<SkillResult> execute(Map<String, dynamic> args, {void Function(String line)? onOutput}) async {
     final action = args['action'] as String?;
     
     if (action == null || action.isEmpty) {
