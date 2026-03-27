@@ -6,9 +6,27 @@
 
 一个有长期记忆、有情绪、还会帮你干活的桌面萌宠 🕊️
 
+![Windows](https://img.shields.io/badge/Windows-0078D6?style=flat-square&logo=windows&logoColor=white)
+![macOS](https://img.shields.io/badge/macOS-000000?style=flat-square&logo=apple&logoColor=white)
+![Flutter](https://img.shields.io/badge/Flutter-02569B?style=flat-square&logo=flutter&logoColor=white)
+![License](https://img.shields.io/badge/License-MIT-green?style=flat-square)
+
+**支持 10+ AI 模型** · DeepSeek · OpenAI · Claude · Gemini · Kimi · MiniMax · 通义千问 · 腾讯混元 · 智谱GLM · Ollama
+
 ![鹅宝动画](assets/images/animation.gif)
 
 </div>
+
+---
+
+## 🖥️ 跨平台支持
+
+| 平台 | 状态 | 特性 |
+|:---:|:---:|:---|
+| 🪟 **Windows** | ✅ 已发布 | 透明窗口 · 点击穿透 · 系统托盘 · 全局热键 |
+| 🍎 **macOS** | ✅ 已支持 | 透明窗口 · 点击穿透 · Metal 渲染 · 原生集成 |
+
+> 两个平台都支持宠物在桌面上自由行走，非宠物区域的点击会穿透到桌面，不影响日常操作。
 
 ---
 
@@ -328,7 +346,11 @@ my-skill/
 
 ### 环境要求
 
-- Windows 10 / 11
+| 平台 | 系统要求 | 额外依赖 |
+|:---|:---|:---|
+| 🪟 Windows | Windows 10 / 11 | 无 |
+| 🍎 macOS | macOS 12+ | CocoaPods (`brew install cocoapods`) |
+
 - Flutter SDK 3.16+
 
 ### 安装
@@ -337,13 +359,26 @@ my-skill/
 git clone https://github.com/shipbetweenwm/GooseBaby.git
 cd GooseBaby
 flutter pub get
+```
+
+### 运行
+
+```bash
+# Windows
 flutter run -d windows
+
+# macOS
+flutter run -d macos
 ```
 
 ### 构建
 
 ```bash
+# Windows
 flutter build windows --release
+
+# macOS
+flutter build macos --release
 ```
 
 ---

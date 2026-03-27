@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io' show Platform;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -94,6 +95,12 @@ Future<void> _runApp() async {
         await windowManager.setAsFrameless();
         await windowManager.setHasShadow(false);
         await windowManager.setAlwaysOnTop(true);
+
+        // macOS 修复：setAsFrameless() 会把 isOpaque 设为 true，
+        // 需要再次显式设置透明背景色来覆盖
+        if (Platform.isMacOS) {
+          await windowManager.setBackgroundColor(Colors.transparent);
+        }
 
         // 计算窗口位置：右下角固定
         Offset startPos = const Offset(900, 400); // 回退默认值

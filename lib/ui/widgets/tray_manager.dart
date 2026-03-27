@@ -1,4 +1,4 @@
-import 'dart:io' show exit;
+import 'dart:io' show Platform, exit;
 import 'package:flutter/foundation.dart';
 import 'package:system_tray/system_tray.dart';
 import 'package:window_manager/window_manager.dart';
@@ -27,23 +27,35 @@ class TrayManager {
     try {
       _systemTray = SystemTray();
 
-      // 初始化托盘图标
+      // 获取托盘图标路径
+      final iconPath = _getTrayIconPath();
+
+      // 初始化托盘图标（不显示文字，只显示图标）
       await _systemTray!.initSystemTray(
-        title: '鹅宝 GooseBaby',
-        iconPath: _getTrayIconPath(),
-        toolTip: '🦢 鹅宝 - 你的桌面小伙伴（双击显示）',
+        title: '',
+        iconPath: iconPath,
+        toolTip: '🦢 鹅宝',
       );
 
       // 构建右键菜单
       await _buildContextMenu();
 
-      // 点击托盘图标 → 显示/隐藏窗口
+      // 点击托盘图标事件处理
+      // macOS: 单击弹菜单（macOS 习惯），右击显示窗口
+      // Windows: 单击显示窗口，右击弹菜单
       _systemTray!.registerSystemTrayEventHandler((eventName) {
         if (eventName == kSystemTrayEventClick) {
-          // 单击：如果隐藏了就显示，如果已显示就切换
-          _toggleVisibility();
+          if (Platform.isMacOS) {
+            _systemTray!.popUpContextMenu();
+          } else {
+            _toggleVisibility();
+          }
         } else if (eventName == kSystemTrayEventRightClick) {
-          _systemTray!.popUpContextMenu();
+          if (Platform.isMacOS) {
+            _toggleVisibility();
+          } else {
+            _systemTray!.popUpContextMenu();
+          }
         }
       });
 
@@ -94,9 +106,10 @@ class TrayManager {
   }
 
   /// 获取托盘图标路径
+  /// Windows 使用 .ico，macOS 使用 .png
+  /// system_tray 包在 macOS 上会自动从 asset bundle 读取并转 base64
   static String _getTrayIconPath() {
-    // Windows 使用 .ico，macOS 使用 .png
-    if (defaultTargetPlatform == TargetPlatform.windows) {
+    if (Platform.isWindows) {
       return 'assets/images/tray_icon.ico';
     }
     return 'assets/images/tray_icon.png';
