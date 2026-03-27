@@ -88,12 +88,9 @@ class AgentLoop {
     final recentResultLengths = <int>[];
     final recentFailedToolNames = <String>[];
 
-    // ── 失败经验缓存（等成功后再保存） ──
-    // key: 工具名, value: {summary, error, failedArgs}
-    final pendingFailures = <String, Map<String, String>>{};
-
-    // ── 同类错误反省检测（第2次同类失败就注入反省提示） ──
-    final toolFailCount = <String, int>{}; // 工具名 → 累计失败次数
+    // ── 重试跟踪（用于触发 beforeRetry 钩子） ──
+    final lastFailedTools = <String, ToolCall>{}; // 工具名 → 最后失败的调用
+    final retryCountMap = <String, int>{}; // 工具名 → 重试次数
 
     for (var turn = 0; turn < maxTurns; turn++) {
       debugPrint('🔄 [Agent 第${turn + 1}轮] 发送 ${workingMessages.length} 条消息');
@@ -155,9 +152,25 @@ class AgentLoop {
       }
       
       if (mode == AgentMode.plan) {
-        // Plan 模式：生成计划，不立即执行
-        debugPrint('📋 [Agent] Plan 模式，生成执行计划');
-        final plan = _generatePlan(response.toolCalls, userRequest ?? '');
+        // Plan 模式：先让 LLM 思考并拆分任务，再生成计划
+        debugPrint('📋 [Agent] Plan 模式，引导 LLM 思考并拆分任务');
+        
+        // 注入规划提示，引导 LLM 进行任务分析和拆分
+        final planningPrompt = _buildPlanningPrompt(userRequest ?? '', response.toolCalls);
+        workingMessages.add({
+          'role': 'user',
+          'content': planningPrompt,
+        });
+        
+        // 让 LLM 思考并生成计划
+        final planResponse = await provider.chat(
+          workingMessages,
+          config: config,
+          tools: [], // Plan 模式下不返回工具调用，只返回纯文本计划
+        );
+        
+        // 从 LLM 的规划响应中提取任务步骤
+        final plan = _parsePlanFromResponse(planResponse.text, userRequest ?? '');
         onPlanGenerated?.call(plan);
         
         final planText = _formatPlanAsText(plan);
@@ -237,6 +250,55 @@ class AgentLoop {
 
         debugPrint('🔧 [Agent] 执行工具: ${toolCall.name}(${toolCall.arguments})');
         
+        // ── 检查是否为真正重试（工具之前失败过 且 参数签名相同） ──
+        // 参数不同视为"正常调整"，不触发反思
+        final lastFailed = lastFailedTools[toolCall.name];
+        final isExactRetry = lastFailed != null && lastFailed.signature == toolCall.signature;
+        final isRetry = lastFailedTools.containsKey(toolCall.name);
+        
+        if (isRetry) {
+          if (isExactRetry) {
+            // 参数完全相同 → 真正的重试，触发 beforeRetry 反思
+            final retryCount = retryCountMap[toolCall.name] ?? 0;
+            debugPrint('🔄 [Agent] 检测到真正重试（相同参数）: ${toolCall.name}, 第${retryCount + 1}次');
+            
+            // ── 触发 beforeRetry Hooks ──
+            final retryHookResult = await hookManager.triggerBeforeRetry(
+              toolCall, 
+              retryCount + 1, 
+              context,
+            );
+            
+            if (retryHookResult != null) {
+              if (retryHookResult.shouldBlock) {
+                debugPrint('🪝 [Hook] 阻止重试: ${toolCall.name}');
+                _addStep(steps, '⚠️ Hook 阻止重试', retryHookResult.userMessage ?? '重试被阻止', onStepUpdate);
+                continue;
+              }
+              if (retryHookResult.shouldInject && retryHookResult.injectedMessage != null) {
+                // 注入反思消息
+                workingMessages.add({
+                  'role': 'user',
+                  'content': retryHookResult.injectedMessage!,
+                });
+              }
+              // ── 自动应用替代方案的参数修改 ──
+              if (retryHookResult.modifiedArgs != null) {
+                debugPrint('🪝 [Hook] 自动修改工具参数: ${toolCall.name}');
+                toolCall.arguments.addAll(retryHookResult.modifiedArgs!);
+              }
+            }
+            
+            // 更新重试计数
+            retryCountMap[toolCall.name] = retryCount + 1;
+          } else {
+            // 参数不同 → 正常调整，不触发反思，仅清除记录
+            debugPrint('🔧 [Agent] 检测到参数调整（非重试）: ${toolCall.name}');
+          }
+          // 清除失败记录（这次调用后会有新结果）
+          lastFailedTools.remove(toolCall.name);
+        }
+
         // ── 触发 beforeToolCall Hooks ──
         final hookResult = await hookManager.triggerBeforeToolCall(toolCall, context);
         if (hookResult != null) {
@@ -257,6 +319,11 @@ class AgentLoop {
             // 跳过当前工具
             debugPrint('🪝 [Hook] 跳过工具: ${toolCall.name}');
             continue;
+          }
+          // ── 自动应用 Hook 建议的参数修改 ──
+          if (hookResult.modifiedArgs != null) {
+            debugPrint('🪝 [Hook] beforeToolCall 修改工具参数: ${toolCall.name}');
+            toolCall.arguments.addAll(hookResult.modifiedArgs!);
           }
         }
 
@@ -361,53 +428,20 @@ class AgentLoop {
         // ── 如果工具执行出错，触发 onToolError Hooks ──
         if (result.isError) {
           await hookManager.triggerToolError(toolCall, result.content, context);
-        }
-
-        // ── 记录失败 → 缓存，等成功后关联保存 ──
-        if (result.isError && toolCall.name != 'think' && toolCall.name != 'save_memory') {
-          recentFailedToolNames.add(toolCall.name);
-          if (recentFailedToolNames.length > maxFailedCalls * 2) {
-            recentFailedToolNames.removeRange(0, recentFailedToolNames.length - maxFailedCalls);
-          }
-          // 缓存失败信息（不立即保存，等下次成功时关联解决方案）
-          pendingFailures[toolCall.name] = {
-            'summary': stepDesc,
-            'error': result.content,
-          };
-          // 累计失败计数 + 反省提示（第2次就开始提醒）
-          toolFailCount[toolCall.name] = (toolFailCount[toolCall.name] ?? 0) + 1;
-          final count = toolFailCount[toolCall.name]!;
-          if (count >= 2 && count < maxFailedCalls) {
-            // 不立即停止，但注入反省提示引导 LLM 换思路
-            workingMessages.add({
-              'role': 'user',
-              'content': '【系统提示】$toolCall.name 已经失败了 $count 次（连续失败会被强制终止）。'
-                  '请仔细分析上面的错误信息，换一种完全不同的方法来完成任务。'
-                  '如果之前的参数/路径有问题，请修正后再试。',
-            });
-          }
-        }
-
-        // ── 工具成功 + 有待解决的同类失败 → 保存失败经验（失败+修复方案） ──
-        if (!result.isError && toolCall.name != 'think' && toolCall.name != 'save_memory') {
-          // 先检查是否为之前的失败工具提供了修复
-          if (pendingFailures.isNotEmpty) {
-            // 找到最近一条相关失败（优先同类工具）
-            String? matchedTool;
-            for (final name in pendingFailures.keys) {
-              if (name == toolCall.name) {
-                matchedTool = name;
-                break;
-              }
+          
+          // ── 记录失败的工具调用（用于下一轮检测重试） ──
+          lastFailedTools[toolCall.name] = toolCall;
+          
+          // ── 记录到连续失败检测列表（AgentLoop 级安全网） ──
+          if (toolCall.name != 'think' && toolCall.name != 'save_memory') {
+            recentFailedToolNames.add(toolCall.name);
+            if (recentFailedToolNames.length > maxFailedCalls * 2) {
+              recentFailedToolNames.removeRange(0, recentFailedToolNames.length - maxFailedCalls);
             }
-            // 没有同类工具匹配时，取最后一条失败（说明 LLM 换了思路）
-            matchedTool ??= pendingFailures.keys.last;
-
-            final failure = pendingFailures[matchedTool]!;
-            final solution = _buildSolution(matchedTool, toolCall.name, toolCall.arguments, stepDesc);
-            onToolFailure?.call(matchedTool, failure['summary']!, failure['error']!, solution);
-            pendingFailures.remove(matchedTool);
           }
+        } else {
+          // 成功后清除重试计数
+          retryCountMap.remove(toolCall.name);
         }
       }
 
@@ -548,39 +582,6 @@ class AgentLoop {
     onStepUpdate?.call(step);
   }
 
-  /// 从成功的工具调用中提取"解决方案"描述
-  /// 用于关联之前的失败经验，形成完整的「失败→修复」记忆
-  static String _buildSolution(
-    String failedTool,
-    String successTool,
-    Map<String, dynamic> successArgs,
-    String successDesc,
-  ) {
-    final sb = StringBuffer();
-    if (failedTool == successTool) {
-      // 同类工具重试成功（说明换了参数/方式）
-      sb.write('同工具修正: ');
-      final cmd = successArgs['command'] as String? ?? '';
-      final script = successArgs['script'] as String? ?? '';
-      final path = successArgs['path'] as String? ?? '';
-      if (cmd.isNotEmpty) {
-        sb.write('command → ${cmd.length > 150 ? '${cmd.substring(0, 150)}...' : cmd}');
-      } else if (script.isNotEmpty) {
-        sb.write('script → ${script.length > 150 ? '${script.substring(0, 150)}...' : script}');
-      } else if (path.isNotEmpty) {
-        sb.write('path → ${path.length > 150 ? '${path.substring(0, 150)}...' : path}');
-      } else {
-        sb.write(successDesc.length > 150 ? successDesc.substring(0, 150) : successDesc);
-      }
-    } else {
-      // 换了不同工具（说明换了思路）
-      sb.write('换用 $successTool 解决: ');
-      final desc = successDesc.length > 100 ? '${successDesc.substring(0, 100)}...' : successDesc;
-      sb.write(desc);
-    }
-    return sb.toString();
-  }
-  
   /// 从工具调用列表生成执行计划
   static PendingPlan _generatePlan(List<ToolCall> toolCalls, String userRequest) {
     final planId = DateTime.now().millisecondsSinceEpoch.toString();
@@ -660,5 +661,115 @@ class AgentLoop {
     buffer.writeln('💡 **确认执行请回复「确认」或「执行」，取消请回复「取消」**');
     
     return buffer.toString();
+  }
+  
+  /// 构建规划提示，引导 LLM 思考并拆分任务
+  static String _buildPlanningPrompt(String userRequest, List<ToolCall> initialToolCalls) {
+    final initialToolsDesc = initialToolCalls.isEmpty 
+        ? '（暂无初步判断）'
+        : initialToolCalls.map((tc) => '- ${tc.name}(${tc.arguments})').join('\n');
+    
+    return '''
+【规划模式】请在执行前先进行任务分析和规划。
+
+## 用户请求
+$userRequest
+
+## 初步工具调用判断
+$initialToolsDesc
+
+## 请按以下格式输出计划
+
+### 任务分析
+- 分析用户的核心需求是什么
+- 识别任务的复杂度和潜在风险
+- 判断是否需要分步骤执行
+
+### 执行计划
+按步骤列出具体的执行计划，每步格式：
+**步骤N**: [步骤名称]
+- 操作：[具体要做什么]
+- 工具：[要使用的工具名]
+- 预期结果：[这一步完成后会得到什么]
+
+### 风险提示（可选）
+- 列出可能的失败点和备选方案
+
+---
+请务必认真分析后再输出计划，确保计划完整、可执行。
+''';
+  }
+  
+  /// 从 LLM 规划响应中解析出结构化计划
+  static PendingPlan _parsePlanFromResponse(String responseText, String userRequest) {
+    final planId = DateTime.now().millisecondsSinceEpoch.toString();
+    final steps = <PlanStep>[];
+    
+    // 解析步骤：匹配 "**步骤N**:" 或 "步骤N:" 或 "N." 格式
+    final stepPattern = RegExp(
+      r'\*\*步骤(\d+)\*\*[：:]\s*(.+?)(?=\n-|\n\*\*|$)'
+      r'|步骤(\d+)[：:]\s*(.+?)(?=\n-|\n\*\*|$)'
+      r'|(\d+)\.\s*(.+?)(?=\n|$)',
+      multiLine: true,
+    );
+    
+    int stepOrder = 1;
+    
+    // 尝试按步骤格式解析
+    for (final match in stepPattern.allMatches(responseText)) {
+      final stepName = match.group(2) ?? match.group(4) ?? match.group(6) ?? '';
+      if (stepName.trim().isEmpty) continue;
+      
+      // 提取工具名（如果有）
+      String? toolName;
+      final toolMatch = RegExp(r'工具[：:]\s*(\w+)').firstMatch(responseText.substring(match.start));
+      if (toolMatch != null) {
+        toolName = toolMatch.group(1);
+      }
+      
+      steps.add(PlanStep(
+        id: '${planId}_$stepOrder',
+        order: stepOrder,
+        description: stepName.trim(),
+        toolName: toolName,
+      ));
+      stepOrder++;
+    }
+    
+    // 如果没有解析到步骤，按行分割生成简单计划
+    if (steps.isEmpty) {
+      final lines = responseText.split('\n')
+          .where((l) => l.trim().isNotEmpty && !l.startsWith('#') && !l.startsWith('---'))
+          .take(10);
+      
+      for (final line in lines) {
+        // 去除 markdown 标记
+        final cleanLine = line.replaceAll(RegExp(r'[\*\-]'), '').trim();
+        if (cleanLine.isEmpty) continue;
+        
+        steps.add(PlanStep(
+          id: '${planId}_$stepOrder',
+          order: stepOrder,
+          description: cleanLine,
+        ));
+        stepOrder++;
+      }
+    }
+    
+    // 如果仍然没有步骤，创建一个默认步骤
+    if (steps.isEmpty) {
+      steps.add(PlanStep(
+        id: '${planId}_1',
+        order: 1,
+        description: '执行用户请求: ${userRequest.length > 50 ? userRequest.substring(0, 50) + "..." : userRequest}',
+      ));
+    }
+    
+    return PendingPlan(
+      id: planId,
+      userRequest: userRequest,
+      title: '执行计划',
+      steps: steps,
+    );
   }
 }

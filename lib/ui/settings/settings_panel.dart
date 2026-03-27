@@ -7,6 +7,7 @@ import 'package:hive/hive.dart';
 import 'package:path/path.dart' as p;
 import '../../ai/llm_manager.dart';
 import '../../ai/memory/memory_manager.dart';
+import '../../ai/memory/context_manager.dart';
 
 import '../../core/pet_engine.dart';
 import '../../models/models.dart';
@@ -245,6 +246,9 @@ class _AIModelSettingsState extends State<_AIModelSettings> {
   bool _configLoaded = false;
   bool _enableWebSearch = false;
   bool _enableDeepThink = false;
+  
+  // ── 上下文模式设置 ──
+  PromptLevel _promptLevel = PromptLevel.full; // 默认使用最好的提示词
 
   /// 各 provider 独立缓存配置（provider -> JSON），切换时保存/恢复
   final Map<String, Map<String, dynamic>> _providerConfigs = {};
@@ -328,6 +332,10 @@ class _AIModelSettingsState extends State<_AIModelSettings> {
         'enableWebSearch': _enableWebSearch,
         'enableDeepThink': _enableDeepThink,
       };
+      
+      // 加载上下文模式设置
+      final savedLevel = StorageManager.getSetting<String>('prompt_level', defaultValue: 'full');
+      _promptLevel = PromptLevelExtension.fromString(savedLevel ?? 'full') ?? PromptLevel.full;
     }
   }
 
@@ -483,6 +491,84 @@ class _AIModelSettingsState extends State<_AIModelSettings> {
 
           const SizedBox(height: 20),
 
+          // ── 上下文模式设置 ──
+          Container(
+            padding: const EdgeInsets.all(16),
+            decoration: BoxDecoration(
+              color: Colors.grey.shade50,
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(color: Colors.grey.shade200),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  '上下文模式',
+                  style: TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.w600,
+                    color: Colors.grey[700],
+                  ),
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  '选择 System Prompt 的详细程度',
+                  style: TextStyle(fontSize: 11, color: Colors.grey[500]),
+                ),
+                const SizedBox(height: 12),
+                
+                // 模式选择
+                ...[PromptLevel.minimal, PromptLevel.standard, PromptLevel.full].map((level) {
+                  final isSelected = _promptLevel == level;
+                  return GestureDetector(
+                    onTap: () => setState(() => _promptLevel = level),
+                    child: Container(
+                      margin: const EdgeInsets.only(bottom: 8),
+                      padding: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(
+                        color: isSelected ? const Color(0xFF4FC3F7).withOpacity(0.1) : Colors.white,
+                        borderRadius: BorderRadius.circular(8),
+                        border: Border.all(
+                          color: isSelected ? const Color(0xFF4FC3F7) : Colors.grey.shade300,
+                        ),
+                      ),
+                      child: Row(
+                        children: [
+                          Icon(
+                            isSelected ? Icons.radio_button_checked : Icons.radio_button_off,
+                            color: isSelected ? const Color(0xFF4FC3F7) : Colors.grey,
+                            size: 18,
+                          ),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  _getPromptLevelDisplayName(level),
+                                  style: TextStyle(
+                                    fontSize: 13,
+                                    fontWeight: isSelected ? FontWeight.w600 : FontWeight.normal,
+                                  ),
+                                ),
+                                Text(
+                                  _getPromptLevelDescription(level),
+                                  style: TextStyle(fontSize: 11, color: Colors.grey[500]),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  );
+                }),
+              ],
+            ),
+          ),
+
+          const SizedBox(height: 20),
+
           // 保存按钮
           SizedBox(
             width: double.infinity,
@@ -524,6 +610,28 @@ class _AIModelSettingsState extends State<_AIModelSettings> {
       default: return '';
     }
   }
+  
+  String _getPromptLevelDisplayName(PromptLevel level) {
+    switch (level) {
+      case PromptLevel.minimal:
+        return '简洁模式 (~500 tokens)';
+      case PromptLevel.standard:
+        return '标准模式 (~2000 tokens)';
+      case PromptLevel.full:
+        return '完整模式 (~4000 tokens) ⭐推荐';
+    }
+  }
+  
+  String _getPromptLevelDescription(PromptLevel level) {
+    switch (level) {
+      case PromptLevel.minimal:
+        return '适合简单聊天，节省 token，响应更快';
+      case PromptLevel.standard:
+        return '日常对话，包含基础工具说明';
+      case PromptLevel.full:
+        return '完整人格设定和工具说明，最佳体验';
+    }
+  }
 
   void _saveSettings() {
     final llmManager = context.read<LLMManager>();
@@ -540,6 +648,9 @@ class _AIModelSettingsState extends State<_AIModelSettings> {
     // 独立保存当前 provider 的配置
     final box = Hive.box('settings');
     box.put('llm_config_${_selectedProvider}', config.toJson());
+    
+    // 保存上下文模式设置
+    StorageManager.setSetting('prompt_level', _promptLevel.name);
 
     widget.onShowBubble?.call('✅ AI模型配置已保存~ 嘎！');
   }

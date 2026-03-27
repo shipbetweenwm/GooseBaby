@@ -10,8 +10,11 @@ import '../../ai/llm_manager.dart';
 import '../../ai/agent/agent_types.dart';
 import '../../ai/agent/agent_loop.dart';
 import '../../ai/agent/agent_mode.dart';
+import '../../ai/agent/agent_hooks.dart';
 import '../../ai/agent/sub_agent_types.dart';
+import '../../ai/agent/failure_lesson_hook.dart';
 import '../../ai/memory/memory_manager.dart';
+import '../../ai/memory/context_manager.dart';
 import '../../ai/self_improvement.dart';
 import '../../ai/prompts.dart';
 import '../../core/pet_engine.dart';
@@ -59,6 +62,8 @@ class _ChatPanelState extends State<ChatPanel> with SingleTickerProviderStateMix
   
   /// 当前 Agent 模式
   AgentMode _agentMode = AgentMode.craft;
+  /// 当前待确认的计划（Plan 模式下使用）
+  PendingPlan? _pendingPlan;
   /// 流式输出的当前内容
   String _streamingContent = '';
   /// 工具调用中间步骤（实时显示在页面上）
@@ -95,6 +100,13 @@ class _ChatPanelState extends State<ChatPanel> with SingleTickerProviderStateMix
   CancellationToken? _teamCancellationToken;
   /// Team 模式是否正在执行
   bool _isTeamExecuting = false;
+  
+  // ===== 上下文管理 =====
+  /// 上下文管理器（Token 预算控制、System Prompt 分段管理）
+  final ContextManager _contextManager = ContextManager();
+  /// 当前上下文 Token 使用统计（用于 UI 显示）
+  int _currentHistoryTokens = 0;
+  int _currentSystemPromptTokens = 0;
   
   // ===== 团队任务执行状态跟踪（用于持久化和恢复）=====
   /// 当前执行的用户任务
@@ -634,6 +646,11 @@ class _ChatPanelState extends State<ChatPanel> with SingleTickerProviderStateMix
     if (text.isEmpty && attachments.isEmpty) return;
     if (_isLoading) return;
 
+    // Plan 模式下，如果有待确认计划，不允许发送新消息（应先点击按钮确认/取消）
+    if (_pendingPlan != null && !_pendingPlan!.isConfirmed && !_pendingPlan!.isRejected) {
+      return;
+    }
+
     // Team 模式：检查 @ 提及
     if (_agentMode == AgentMode.team && text.isNotEmpty) {
       debugPrint('🦆 Team 模式发送消息: $text');
@@ -762,14 +779,35 @@ class _ChatPanelState extends State<ChatPanel> with SingleTickerProviderStateMix
       final memoryManager = context.read<MemoryManager>();
       final skillManager = context.read<SkillManager>();
       final selfImprove = context.read<SelfImprovementEngine>();
+      final petEngine = context.read<PetEngine>();
 
       // 获取记忆上下文（首次发送消息时触发衰减清理）
       memoryManager.decayAndCleanup();
-      final memoryContext = memoryManager.getMemoryContext(text);
-
-      // 获取 self-improvement 学习策略上下文
+      
+      // ── 使用 Segment 方式管理记忆注入（优化6） ──
+      // 清空之前的 segments
+      _contextManager.clearSegments();
+      
+      // 添加记忆 Segments
+      final memorySegments = memoryManager.getMemorySegments(text);
+      for (final seg in memorySegments) {
+        _contextManager.addSegment(seg);
+      }
+      
+      // 添加 self-improvement 作为 Segment
       final improvementContext = selfImprove.getImprovementContext();
-
+      if (improvementContext.isNotEmpty) {
+        _contextManager.addSegment(SystemPromptSegment(
+          id: 'self_improvement',
+          title: '学习策略',
+          content: improvementContext,
+          priority: 6,
+          maxTokens: 300,
+          optional: true,
+          compressible: true,
+        ));
+      }
+      
       // 构建鹅宝状态上下文（饥饿、精力、心情等）
       // ── 用户情绪感知 ──
       final recentUserMessages = _messages
@@ -787,23 +825,38 @@ class _ChatPanelState extends State<ChatPanel> with SingleTickerProviderStateMix
         userEmotionHint: userEmotionHint,
         companionRhythm: petEngine.getCompanionRhythm(),
       );
+      
+      // 添加状态上下文作为 Segment
+      if (stateContext.isNotEmpty) {
+        _contextManager.addSegment(SystemPromptSegment(
+          id: 'pet_state',
+          title: '当前状态',
+          content: stateContext,
+          priority: 5,
+          maxTokens: 200,
+          optional: true,
+          compressible: true,
+        ));
+      }
 
       // ── 情感记忆上下文 ──
       final emotionalContext = memoryManager.getEmotionalContext();
-
-      final fullMemoryContext = [
-        if (memoryContext.isNotEmpty) memoryContext,
-        if (stateContext.isNotEmpty) '当前状态: $stateContext',
-        if (emotionalContext.isNotEmpty) emotionalContext,
-      ].join('\n\n');
-
-      // 获取已升级的永久失败经验（高频错误，避免重复犯错）
-      final failureLessonsContext = memoryManager.getFailureLessonsContext();
-      final effectiveMemoryContext = fullMemoryContext.isEmpty
-          ? failureLessonsContext
-          : (failureLessonsContext.isEmpty
-              ? fullMemoryContext
-              : '$fullMemoryContext\n\n$failureLessonsContext');
+      if (emotionalContext.isNotEmpty) {
+        _contextManager.addSegment(SystemPromptSegment(
+          id: 'emotional_events',
+          title: '情感记录',
+          content: emotionalContext,
+          priority: 7,
+          maxTokens: 300,
+          optional: true,
+          compressible: true,
+        ));
+      }
+      
+      // 使用 ContextManager 构建记忆注入部分（统一管理 token 预算）
+      final effectiveMemoryContext = _contextManager.build(
+        customMaxTokens: _contextManager.getSystemPromptMaxForLevel(_contextManager.promptLevel),
+      );
 
       // 获取 Agent Skills 的 prompt 注入（SKILL.md 格式技能的使用说明）
       // 根据用户请求进行任务感知的技能筛选
@@ -832,15 +885,19 @@ class _ChatPanelState extends State<ChatPanel> with SingleTickerProviderStateMix
       }
 
       // ── 预构造运行环境信息 ──
-      final pythonPath = await SkillFileUtils.detectPythonPath();
-      final sessionId = _currentConversationId ?? DateTime.now().millisecondsSinceEpoch.toString();
-      await SkillFileUtils.setSessionWorkingDir(sessionId);
-      final workDir = SkillFileUtils.effectiveWorkingDir;
+      String? pythonPath;
+      String workDir = '';
+      String osName = 'web';
       
-      // Web 端不支持 Platform，使用条件判断
-      final osName = kIsWeb ? 'web' : Platform.operatingSystem;
+      if (!kIsWeb) {
+        pythonPath = await SkillFileUtils.detectPythonPath();
+        final sessionId = _currentConversationId ?? DateTime.now().millisecondsSinceEpoch.toString();
+        await SkillFileUtils.setSessionWorkingDir(sessionId);
+        workDir = SkillFileUtils.effectiveWorkingDir;
+        osName = Platform.operatingSystem;
+      }
       
-      final envPrompt = '\n\n## 运行环境'
+      final envPrompt = kIsWeb ? '' : '\n\n## 运行环境'
           '\n- 操作系统: $osName'
           '\n- 当前工作目录: $workDir（每次对话独立，所有文件写在此目录下）'
           '\n- write_file 写文件：直接用文件名（如 script.py），不需要 ./ 前缀'
@@ -849,20 +906,34 @@ class _ChatPanelState extends State<ChatPanel> with SingleTickerProviderStateMix
 
       final tools = skillManager.toFunctionTools();
 
-      // 构建 system prompt
-      String systemPrompt = widget.workMode
-          ? GoosePrompts.workModeSystemPrompt
-          : GoosePrompts.systemPrompt;
+      // ── 构建 system prompt（支持分级） ──
+      // 从设置中读取用户选择的 Prompt 级别（默认使用最好的提示词）
+      final savedLevel = StorageManager.getSetting<String>('prompt_level', defaultValue: 'full');
+      final promptLevel = PromptLevelExtension.fromString(savedLevel ?? 'full') ?? PromptLevel.full;
+      _contextManager.setPromptLevel(promptLevel);
+      
+      // 根据级别获取基础 System Prompt
+      String systemPrompt = GoosePrompts.getSystemPromptByLevel(
+        promptLevel, 
+        workMode: widget.workMode,
+      );
+      
+      // 添加记忆上下文（优化6：作为 Segment 管理）
       if (effectiveMemoryContext.isNotEmpty) {
         systemPrompt += '\n\n## 关于主人的记忆\n$effectiveMemoryContext';
       }
       if (improvementContext.isNotEmpty) {
         systemPrompt += '\n\n$improvementContext';
       }
-      if (agentSkillsPrompt.isNotEmpty) {
+      // 只有 standard/full 级别才注入 agentSkills
+      if (agentSkillsPrompt.isNotEmpty && promptLevel != PromptLevel.minimal) {
         systemPrompt += '\n\n$agentSkillsPrompt';
       }
       systemPrompt += envPrompt;
+      
+      // 更新 System Prompt Token 统计（用于 UI 显示）
+      _currentSystemPromptTokens = TokenCounter.count(systemPrompt);
+      debugPrint('📊 [Context] System Prompt Token: $_currentSystemPromptTokens (级别: ${promptLevel.name})');
 
       // 构建完整的 API 消息列表（统一处理有/无工具调用历史的情况）
       final hasToolMessages = chatApiHistory.any((m) => m['role'] == 'tool' || (m['role'] == 'assistant' && m['tool_calls'] != null));
@@ -883,6 +954,23 @@ class _ChatPanelState extends State<ChatPanel> with SingleTickerProviderStateMix
       if (response.hasToolCalls) {
         // 有 tool_calls → 进入 Agent 循环
         hasToolCalls = true;
+        
+        // 创建 Hooks
+        final hooks = <AgentHook>[
+          LoopDetectionHook(),
+          FailureLessonHook(memoryManager),
+          ReflectionHook(
+            llmProvider: (prompt) async {
+              // 使用当前 LLM 进行反思分析和替代方案生成
+              final resp = await llmManager.currentProvider!.chat([
+                {'role': 'user', 'content': prompt},
+              ]);
+              return resp.text;
+            },
+          ),
+          PerformanceStatsHook(),
+        ];
+        
         final loopResult = await AgentLoop.run(
           provider: llmManager.currentProvider!,
           config: llmManager.currentConfig,
@@ -890,6 +978,15 @@ class _ChatPanelState extends State<ChatPanel> with SingleTickerProviderStateMix
           tools: tools,
           executeTool: (call, {onOutput}) => _executeTool(call, skillManager, workDir, onOutput: onOutput),
           cancellationToken: _cancellationToken,
+          hooks: hooks,
+          mode: _agentMode,
+          userRequest: text,
+          onPlanGenerated: (plan) {
+            if (!mounted) return;
+            setState(() {
+              _pendingPlan = plan;
+            });
+          },
           onStepUpdate: (step) {
             if (!mounted) return;
             setState(() {
@@ -913,21 +1010,6 @@ class _ChatPanelState extends State<ChatPanel> with SingleTickerProviderStateMix
               }
             });
             _scrollToBottom();
-          },
-          onToolFailure: (failedTool, summary, error, solution) {
-            // 保存「失败+修复方案」到记忆系统
-            try {
-              if (mounted) {
-                final memoryManager = context.read<MemoryManager>();
-                memoryManager.saveFailureLesson(
-                  skillId: failedTool,
-                  summary: summary.length > 100 ? '${summary.substring(0, 100)}...' : summary,
-                  error: error,
-                  solution: solution,
-                );
-                debugPrint('🧠 失败经验已保存: $failedTool → $solution');
-              }
-            } catch (_) {}
           },
         );
         fullResponse = loopResult.text;
@@ -1162,15 +1244,15 @@ class _ChatPanelState extends State<ChatPanel> with SingleTickerProviderStateMix
   /// [messageContent] 最后一条用户消息的实际内容（可能包含附件信息）
   /// [originalText] 用户原始输入文本
   ///
-  /// Token 预算控制：
-  /// - 总消息列表不超过 [maxMessages] 条（约 40 条 user/assistant 消息 ≈ 20 轮对话）
-  /// - 过早的 apiMessages 序列会被整体丢弃（只保留最近 2 组），避免 token 爆炸
+  /// Token 预算控制（优化后）：
+  /// - 使用 ContextManager 的 Token 预算控制替代简单条数限制
+  /// - 历史消息总 Token 不超过 [historyTokenBudget]（默认 20000）
+  /// - 较早的 apiMessages 组使用结构化摘要替代
   List<Map<String, dynamic>> _buildChatApiHistory(String messageContent, String originalText) {
     final apiHistory = <Map<String, dynamic>>[];
-    const maxMessages = 60; // 最多保留 60 条消息
-    const maxApiMessageGroups = 2; // 最多保留最近 2 组 apiMessages（更早的用纯文本替代）
-
-    // 第一遍：收集所有消息，计算总条数
+    final historyTokenBudget = _contextManager.historyReserve;
+    
+    // 第一遍：收集所有消息
     final allEntries = <Map<String, dynamic>>[];
     int apiMessageGroupCount = 0;
 
@@ -1184,51 +1266,103 @@ class _ChatPanelState extends State<ChatPanel> with SingleTickerProviderStateMix
       } else {
         if (m.apiMessages != null && m.apiMessages!.isNotEmpty) {
           apiMessageGroupCount++;
-          // 标记这是一个 apiMessage 组
-          allEntries.add({'_type': 'api_group', '_index': i, '_apiMessages': m.apiMessages, '_content': m.content, '_groupIndex': apiMessageGroupCount});
+          allEntries.add({
+            '_type': 'api_group', 
+            '_index': i, 
+            '_apiMessages': m.apiMessages, 
+            '_content': m.content, 
+            '_groupIndex': apiMessageGroupCount
+          });
         } else {
           allEntries.add({'role': 'assistant', 'content': m.content, '_index': i});
         }
       }
     }
 
-    // 第二遍：构建最终列表，对超出预算的部分进行裁剪
-    // 策略：保留最后的消息，较早的 apiMessage 组替换为纯文本摘要
+    // 第二遍：构建最终列表，使用 Token 预算控制
     final totalApiGroups = apiMessageGroupCount;
-
-    for (final entry in allEntries) {
+    // 保留最近的 2 组完整 apiMessages，更早的用摘要
+    const maxFullApiGroups = 2;
+    
+    // Token 计数和预算控制
+    int currentTokens = 0;
+    final budgetAwareEntries = <Map<String, dynamic>>[];
+    
+    // 从后向前遍历，保留最新消息
+    for (int i = allEntries.length - 1; i >= 0; i--) {
+      final entry = allEntries[i];
+      
       if (entry['_type'] == 'api_group') {
         final groupIndex = entry['_groupIndex'] as int;
         final apiMessages = entry['_apiMessages'] as List<Map<String, dynamic>>;
         final finalContent = entry['_content'] as String?;
-
-        // 如果这是较早的 apiMessage 组（超出保留数量），替换为摘要
-        if (totalApiGroups - groupIndex >= maxApiMessageGroups) {
-          // 提取工具名和简要结果作为摘要
-          final toolNames = <String>[];
-          for (final msg in apiMessages) {
-            if (msg['role'] == 'assistant' && msg['tool_calls'] != null) {
-              for (final tc in msg['tool_calls'] as List) {
-                final fn = safeMap(tc['function']);
-                toolNames.add(fn['name'] as String);
-              }
+        
+        // 判断是否保留完整 apiMessages
+        final shouldKeepFull = (totalApiGroups - groupIndex) < maxFullApiGroups;
+        
+        if (shouldKeepFull) {
+          // 保留完整的 apiMessage 序列
+          int groupTokens = 0;
+          for (final apiMsg in apiMessages) {
+            groupTokens += TokenCounter.countMessages([apiMsg]);
+          }
+          if (finalContent != null) {
+            groupTokens += TokenCounter.count(finalContent);
+          }
+          
+          // 预算检查
+          if (currentTokens + groupTokens <= historyTokenBudget) {
+            budgetAwareEntries.insert(0, {
+              '_type': 'full_api_group',
+              '_apiMessages': apiMessages,
+              '_content': finalContent,
+            });
+            currentTokens += groupTokens;
+          } else {
+            // 预算不足，转为摘要
+            final summary = _contextManager.generateToolCallSummary(apiMessages, finalContent: finalContent);
+            final summaryTokens = TokenCounter.count(summary);
+            if (currentTokens + summaryTokens <= historyTokenBudget) {
+              budgetAwareEntries.insert(0, {'role': 'assistant', 'content': summary});
+              currentTokens += summaryTokens;
             }
           }
-          final summary = '（历史工具调用：${toolNames.join(', ')}，结果已省略）';
-          if (finalContent != null && finalContent.isNotEmpty) {
-            // 保留最终回复，标注省略了中间工具调用
-            apiHistory.add({'role': 'assistant', 'content': '$summary\n\n$finalContent'});
-          } else {
-            apiHistory.add({'role': 'assistant', 'content': summary});
-          }
         } else {
-          // 保留完整的 apiMessage 序列（最近的几组）
-          for (final apiMsg in apiMessages) {
-            apiHistory.add(Map<String, dynamic>.from(apiMsg));
+          // 较早的 apiMessages 组：使用结构化摘要
+          final summary = _contextManager.generateToolCallSummary(apiMessages, finalContent: finalContent);
+          final summaryTokens = TokenCounter.count(summary);
+          
+          if (currentTokens + summaryTokens <= historyTokenBudget) {
+            budgetAwareEntries.insert(0, {'role': 'assistant', 'content': summary});
+            currentTokens += summaryTokens;
           }
-          if (finalContent != null && finalContent.isNotEmpty) {
-            apiHistory.add({'role': 'assistant', 'content': finalContent});
-          }
+        }
+      } else {
+        // 普通消息
+        final content = entry['content'] as String;
+        final msgTokens = TokenCounter.count(content) + 4; // +4 for role overhead
+        
+        if (currentTokens + msgTokens <= historyTokenBudget) {
+          budgetAwareEntries.insert(0, {
+            'role': entry['role'] as String,
+            'content': content,
+          });
+          currentTokens += msgTokens;
+        }
+      }
+    }
+    
+    // 第三遍：展开 full_api_group 为实际的 API 消息
+    for (final entry in budgetAwareEntries) {
+      if (entry['_type'] == 'full_api_group') {
+        final apiMessages = entry['_apiMessages'] as List<Map<String, dynamic>>;
+        final finalContent = entry['_content'] as String?;
+        
+        for (final apiMsg in apiMessages) {
+          apiHistory.add(Map<String, dynamic>.from(apiMsg));
+        }
+        if (finalContent != null && finalContent.isNotEmpty) {
+          apiHistory.add({'role': 'assistant', 'content': finalContent});
         }
       } else {
         apiHistory.add({
@@ -1237,14 +1371,12 @@ class _ChatPanelState extends State<ChatPanel> with SingleTickerProviderStateMix
         });
       }
     }
-
-    // 如果总消息数超限，从头部裁剪（保留 system prompt 和最后 N 条）
-    // 注意：chat_panel 会在前面加 system prompt，所以这里只保留用户/assistant 消息
-    if (apiHistory.length > maxMessages) {
-      final trimmed = apiHistory.sublist(apiHistory.length - maxMessages);
-      return trimmed;
-    }
-
+    
+    // 更新 Token 统计（用于 UI 显示）
+    _currentHistoryTokens = currentTokens;
+    
+    debugPrint('📊 [Context] 历史消息 Token: $currentTokens / $historyTokenBudget');
+    
     return apiHistory;
   }
 
@@ -4616,7 +4748,8 @@ $discussionContext
   Widget _buildMessageList() {
     final stepCount = _isLoading ? _toolCallSteps.length : 0;
     final hasLoadingIndicator = _isLoading && _toolCallSteps.isEmpty;
-    final itemCount = _messages.length + (stepCount > 0 ? stepCount + 1 : 0) + (hasLoadingIndicator ? 1 : 0);
+    final hasPlanButtons = _pendingPlan != null && !_pendingPlan!.isConfirmed && !_pendingPlan!.isRejected;
+    final itemCount = _messages.length + (stepCount > 0 ? stepCount + 1 : 0) + (hasLoadingIndicator ? 1 : 0) + (hasPlanButtons ? 1 : 0);
     return SelectionArea(
       child: ListView.builder(
         controller: _scrollController,
@@ -4631,7 +4764,12 @@ $discussionContext
             return _buildMessageWithSteps(msg);
           }
 
-          if (hasLoadingIndicator && index == msgEnd) {
+          // Plan 模式确认/取消按钮
+          if (hasPlanButtons && index == msgEnd) {
+            return _buildPlanConfirmButtons();
+          }
+
+          if (hasLoadingIndicator && index == msgEnd + (hasPlanButtons ? 1 : 0)) {
             // 没有步骤时的普通加载指示器
             if (_streamingContent.isNotEmpty) {
               return RichMessageBubble(
@@ -4753,6 +4891,151 @@ $discussionContext
   /// 构建工具调用步骤摘要（可展开/折叠）
   Widget _buildToolStepsSummary(List<_ToolCallStep> steps) {
     return _ToolStepsSummary(steps: steps);
+  }
+
+  /// 构建 Plan 模式的确认/取消按钮
+  Widget _buildPlanConfirmButtons() {
+    return Container(
+      margin: const EdgeInsets.symmetric(vertical: 12, horizontal: 8),
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: Colors.blue.shade50,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: Colors.blue.shade200),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // 计划标题
+          Row(
+            children: [
+              const Text('📋 ', style: TextStyle(fontSize: 16)),
+              Expanded(
+                child: Text(
+                  '计划待确认: ${_pendingPlan!.userRequest}',
+                  style: const TextStyle(
+                    fontSize: 14,
+                    fontWeight: FontWeight.w600,
+                    color: Colors.black87,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          // 步骤列表（可滚动，最多显示5条高度）
+          ConstrainedBox(
+            constraints: const BoxConstraints(maxHeight: 240),
+            child: SingleChildScrollView(
+              child: Column(
+                children: _pendingPlan!.steps.asMap().entries.map((entry) {
+                  final i = entry.key;
+                  final step = entry.value;
+                  return Padding(
+                    padding: const EdgeInsets.only(bottom: 8),
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Container(
+                          width: 22,
+                          height: 22,
+                          decoration: BoxDecoration(
+                            color: Colors.blue.shade100,
+                            shape: BoxShape.circle,
+                          ),
+                          alignment: Alignment.center,
+                          child: Text(
+                            '${i + 1}',
+                            style: TextStyle(
+                              fontSize: 11,
+                              fontWeight: FontWeight.bold,
+                              color: Colors.blue.shade700,
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                step.description,
+                                style: const TextStyle(fontSize: 13, color: Colors.black87),
+                              ),
+                              if (step.toolName != null) ...[
+                                const SizedBox(height: 2),
+                                Text(
+                                  '🔧 ${step.toolName}',
+                                  style: TextStyle(
+                                    fontSize: 11,
+                                    color: Colors.grey.shade600,
+                                  ),
+                                ),
+                              ],
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
+                  );
+                }).toList(),
+              ),
+            ),
+          ),
+          const SizedBox(height: 16),
+          // 确认/取消按钮
+          Row(
+            mainAxisAlignment: MainAxisAlignment.end,
+            children: [
+              TextButton(
+                onPressed: () {
+                  setState(() {
+                    _pendingPlan!.isRejected = true;
+                    _messages.add(_ChatMessage(
+                      content: '取消',
+                      isUser: true,
+                      timestamp: DateTime.now(),
+                    ));
+                    _messages.add(_ChatMessage(
+                      content: '好的，计划已取消~ 有需要随时告诉鹅宝！',
+                      isUser: false,
+                      timestamp: DateTime.now(),
+                    ));
+                    _pendingPlan = null;
+                  });
+                  _saveChatHistory();
+                },
+                style: TextButton.styleFrom(
+                  padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
+                ),
+                child: const Text('取消', style: TextStyle(fontSize: 14)),
+              ),
+              const SizedBox(width: 12),
+              ElevatedButton(
+                onPressed: () async {
+                  setState(() {
+                    _pendingPlan!.isConfirmed = true;
+                    _messages.add(_ChatMessage(
+                      content: '确认执行',
+                      isUser: true,
+                      timestamp: DateTime.now(),
+                    ));
+                  });
+                  await _executeConfirmedPlan(_pendingPlan!);
+                },
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.blue,
+                  foregroundColor: Colors.white,
+                  padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                ),
+                child: const Text('确认执行', style: TextStyle(fontSize: 14)),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
   }
 
   /// 构建工具调用中间步骤的 UI
@@ -4887,6 +5170,142 @@ $discussionContext
     );
   }
 
+  /// 构建上下文使用监控 UI（优化5）
+  /// 显示历史消息 Token 使用进度条和 Prompt 级别
+  Widget _buildContextMonitor() {
+    final historyBudget = _contextManager.historyReserve;
+    final historyUsage = _currentHistoryTokens;
+    final usagePercent = (historyUsage / historyBudget * 100).clamp(0.0, 100.0);
+    final promptLevel = _contextManager.promptLevel;
+    
+    // 根据使用率选择颜色
+    Color progressColor;
+    String statusText;
+    if (usagePercent < 50) {
+      progressColor = Colors.green;
+      statusText = '正常';
+    } else if (usagePercent < 75) {
+      progressColor = Colors.orange;
+      statusText = '适中';
+    } else {
+      progressColor = Colors.red;
+      statusText = '较高';
+    }
+    
+    // Prompt 级别标签
+    String levelLabel;
+    Color levelColor;
+    switch (promptLevel) {
+      case PromptLevel.minimal:
+        levelLabel = '轻量';
+        levelColor = Colors.blue;
+        break;
+      case PromptLevel.standard:
+        levelLabel = '标准';
+        levelColor = Colors.teal;
+        break;
+      case PromptLevel.full:
+        levelLabel = '完整';
+        levelColor = Colors.purple;
+        break;
+    }
+    
+    // 总 Token（System + History）
+    final totalTokens = _currentSystemPromptTokens + historyUsage;
+    
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+      decoration: BoxDecoration(
+        color: Colors.grey.shade50,
+        border: Border(
+          bottom: BorderSide(color: Colors.grey.shade200, width: 0.5),
+        ),
+      ),
+      child: Row(
+        children: [
+          // Prompt 级别标签
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+            decoration: BoxDecoration(
+              color: levelColor.withValues(alpha: 0.1),
+              borderRadius: BorderRadius.circular(4),
+              border: Border.all(color: levelColor.withValues(alpha: 0.3)),
+            ),
+            child: Text(
+              levelLabel,
+              style: TextStyle(
+                fontSize: 10,
+                color: levelColor,
+                fontWeight: FontWeight.w500,
+              ),
+            ),
+          ),
+          const SizedBox(width: 8),
+          // Token 使用进度条
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Row(
+                  children: [
+                    Text(
+                      '上下文',
+                      style: TextStyle(
+                        fontSize: 10,
+                        color: Colors.grey.shade600,
+                      ),
+                    ),
+                    const SizedBox(width: 4),
+                    Text(
+                      '${(totalTokens / 1000).toStringAsFixed(1)}k',
+                      style: TextStyle(
+                        fontSize: 10,
+                        color: progressColor,
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                    Text(
+                      ' (Sys ${(_currentSystemPromptTokens / 1000).toStringAsFixed(1)}k + Hist ${(historyUsage / 1000).toStringAsFixed(1)}k)',
+                      style: TextStyle(
+                        fontSize: 9,
+                        color: Colors.grey.shade500,
+                      ),
+                    ),
+                    const SizedBox(width: 4),
+                    Text(
+                      '($statusText)',
+                      style: TextStyle(
+                        fontSize: 9,
+                        color: progressColor,
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 2),
+                LinearProgressIndicator(
+                  value: usagePercent / 100,
+                  backgroundColor: Colors.grey.shade200,
+                  valueColor: AlwaysStoppedAnimation<Color>(progressColor),
+                  minHeight: 3,
+                ),
+              ],
+            ),
+          ),
+          // 消息数量
+          const SizedBox(width: 8),
+          Text(
+            '${_messages.length}条',
+            style: TextStyle(
+              fontSize: 10,
+              color: Colors.grey.shade500,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _buildInputBar() {
     return EnhancedInputBar(
       controller: _inputController,
@@ -4899,6 +5318,132 @@ $discussionContext
       onSend: _sendMessage,
       onStop: _stopCurrentSession,
     );
+  }
+
+  /// 执行已确认的计划
+  Future<void> _executeConfirmedPlan(PendingPlan plan) async {
+    if (!mounted) return;
+    
+    final llmManager = context.read<LLMManager>();
+    final skillManager = context.read<SkillManager>();
+    final workDir = SkillFileUtils.effectiveWorkingDir;
+    
+    setState(() {
+      _isLoading = true;
+      _cancellationToken = CancellationToken();
+    });
+    
+    // 添加执行提示消息
+    setState(() {
+      _messages.add(_ChatMessage(
+        content: '🚀 开始执行计划...',
+        isUser: false,
+        timestamp: DateTime.now(),
+      ));
+    });
+    _scrollToBottom();
+    
+    try {
+      // 按步骤执行
+      for (int i = 0; i < plan.steps.length; i++) {
+        final step = plan.steps[i];
+        
+        if (!mounted || _cancellationToken?.isCancelled == true) break;
+        
+        // 更新步骤状态
+        setState(() {
+          if (_messages.isNotEmpty && _messages.last.content.startsWith('🚀')) {
+            _messages.last = _ChatMessage(
+              content: '⚙️ 执行步骤 ${i + 1}/${plan.steps.length}: ${step.description}',
+              isUser: false,
+              timestamp: DateTime.now(),
+            );
+          }
+        });
+        _scrollToBottom();
+        
+        // 如果步骤有对应的工具调用，执行它
+        if (step.toolName != null && step.toolArgs != null) {
+          final toolCall = ToolCall(
+            id: 'plan_${plan.id}_$i',
+            name: step.toolName!,
+            arguments: step.toolArgs!,
+          );
+          
+          final result = await _executeTool(toolCall, skillManager, workDir);
+          
+          setState(() {
+            step.isExecuted = true;
+            step.result = result.content;
+            step.isFailed = result.isError;
+          });
+          
+          if (result.isError) {
+            // 步骤失败，询问是否继续
+            final shouldContinue = await showDialog<bool>(
+              context: context,
+              builder: (context) => AlertDialog(
+                title: const Text('步骤执行失败'),
+                content: Text('${step.description}\n\n错误: ${result.content}\n\n是否继续执行后续步骤？'),
+                actions: [
+                  TextButton(
+                    onPressed: () => Navigator.pop(context, false),
+                    child: const Text('停止执行'),
+                  ),
+                  TextButton(
+                    onPressed: () => Navigator.pop(context, true),
+                    child: const Text('继续执行'),
+                  ),
+                ],
+              ),
+            );
+            
+            if (shouldContinue != true) break;
+          }
+        } else {
+          // 没有具体工具调用的步骤，让 LLM 自由执行
+          final prompt = '继续执行计划：当前是步骤 "${step.description}"，请执行相关操作。';
+          final response = await llmManager.currentProvider!.chat([
+            {'role': 'user', 'content': prompt},
+          ], config: llmManager.currentConfig);
+          
+          setState(() {
+            step.isExecuted = true;
+            step.result = response.text;
+          });
+        }
+      }
+      
+      // 完成
+      if (mounted) {
+        setState(() {
+          _messages.add(_ChatMessage(
+            content: '✅ 计划执行完成！',
+            isUser: false,
+            timestamp: DateTime.now(),
+          ));
+        });
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _messages.add(_ChatMessage(
+            content: '❌ 计划执行出错: $e',
+            isUser: false,
+            timestamp: DateTime.now(),
+            isError: true,
+          ));
+        });
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isLoading = false;
+          _cancellationToken = null;
+          _pendingPlan = null;
+        });
+      }
+    }
   }
 
   /// 从当前会话加载消息（工作模式）

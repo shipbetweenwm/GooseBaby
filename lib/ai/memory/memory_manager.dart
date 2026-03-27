@@ -1,6 +1,8 @@
 import 'dart:math' as math;
 import 'package:flutter/foundation.dart';
 import 'package:hive/hive.dart';
+import 'vector_memory.dart';
+import 'context_manager.dart';
 
 /// 记忆管理器
 /// 管理鹅宝的短期记忆和长期记忆
@@ -10,6 +12,9 @@ class MemoryManager extends ChangeNotifier {
 
   // ── 情感事件记忆 ──
   final List<Map<String, dynamic>> _emotionalEvents = [];
+  
+  // ── 向量记忆存储（可选，用于语义搜索 fallback） ──
+  VectorMemoryStore? _vectorStore;
 
   // ── 衰减配置常量 ──
   /// 失败经验最大保留天数
@@ -32,12 +37,25 @@ class MemoryManager extends ChangeNotifier {
   static const int promotedThreshold = 3;
   /// 是否在本次会话中已执行过衰减清理
   bool _decayCleanedThisSession = false;
+  
+  // ── 扩展记忆容量 ──
+  /// 普通记忆最大存储条数（支持大量记忆）
+  static const int normalMemoryMaxCount = 1000;
+  /// 重要记忆标签（这些记忆永不衰减）
+  static const List<String> importantMemoryTags = ['重要', '永久', '喜好', '名字', '生日', '地址', '电话'];
+  /// 注入 prompt 的记忆检索数量
+  static const int retrievalMaxCount = 10;
 
   List<Map<String, dynamic>> get longTermMemories => _longTermMemories;
   Map<String, dynamic> get userProfile => _userProfile;
 
   MemoryManager() {
     _loadMemories();
+  }
+  
+  /// 设置向量记忆存储（用于语义搜索 fallback）
+  void setVectorStore(VectorMemoryStore store) {
+    _vectorStore = store;
   }
 
   void _loadMemories() {
@@ -77,9 +95,15 @@ class MemoryManager extends ChangeNotifier {
   }
 
   /// 保存一条长期记忆
-  void save(String content, {Map<String, dynamic>? metadata}) {
+  /// [content] 记忆内容
+  /// [metadata] 可选的元数据，可包含 type, importance, tags 等
+  /// [isImportant] 是否为重要记忆（重要记忆永不衰减，优先检索）
+  void save(String content, {Map<String, dynamic>? metadata, bool? isImportant}) {
     if (content.trim().isEmpty) return;
 
+    // 判断是否为重要记忆
+    final isImportantMemory = isImportant ?? _isImportantContent(content);
+    
     // 去重：如果已存在高度相似的记忆（完全相同或已包含），则更新而非新增
     final existingIdx = _findSimilarMemory(content);
     if (existingIdx != null) {
@@ -89,7 +113,13 @@ class MemoryManager extends ChangeNotifier {
       if (content.length > existingContent.length * 1.2) {
         existing['content'] = content;
         existing['timestamp'] = DateTime.now().toIso8601String();
-        existing['metadata'] = {'type': '合并更新', 'source': 'merged', 'original': existingContent};
+        existing['metadata'] = {
+          ...(metadata ?? {}),
+          'isImportant': isImportantMemory,
+          'type': '合并更新',
+          'source': 'merged',
+          'original': existingContent,
+        };
         debugPrint('🧠 记忆合并更新: $content');
         _saveMemories();
         notifyListeners();
@@ -101,16 +131,126 @@ class MemoryManager extends ChangeNotifier {
       'content': content,
       'timestamp': DateTime.now().toIso8601String(),
       'accessCount': 0,
-      'metadata': metadata ?? {},
+      'importance': isImportantMemory ? 1.0 : _calculateImportance(content),
+      'metadata': {
+        ...(metadata ?? {}),
+        'isImportant': isImportantMemory,
+      },
+    });
+    
+    // 同步到向量存储（用于语义搜索）
+    _vectorStore?.add(content, metadata: {
+      'isImportant': isImportantMemory,
+      'timestamp': DateTime.now().toIso8601String(),
     });
 
-    // 限制最多 200 条长期记忆
-    if (_longTermMemories.length > 200) {
-      _longTermMemories.removeAt(0);
+    // 智能淘汰：当超过限制时，优先淘汰非重要、低访问、旧的普通记忆
+    if (_longTermMemories.length > normalMemoryMaxCount) {
+      _smartEviction();
     }
 
     _saveMemories();
     notifyListeners();
+  }
+  
+  /// 判断内容是否为重要记忆
+  bool _isImportantContent(String content) {
+    final lower = content.toLowerCase();
+    // 检查是否包含重要标签
+    for (final tag in importantMemoryTags) {
+      if (lower.contains(tag.toLowerCase())) {
+        return true;
+      }
+    }
+    // 检查特定模式
+    if (lower.contains('我叫') || lower.contains('名字是') || 
+        lower.contains('生日是') || lower.contains('喜欢吃') ||
+        lower.contains('不喜欢') || lower.contains('住址') ||
+        lower.contains('电话') || lower.contains('记得') ||
+        lower.contains('别忘了') || lower.contains('一定要记住')) {
+      return true;
+    }
+    return false;
+  }
+  
+  /// 计算记忆的重要性评分（0.0-1.0）
+  double _calculateImportance(String content) {
+    double score = 0.5; // 基础分
+    
+    // 包含个人信息的加分
+    if (content.contains('我') || content.contains('我的')) {
+      score += 0.1;
+    }
+    // 包含情感词汇的加分
+    if (content.contains('喜欢') || content.contains('爱') || content.contains('讨厌')) {
+      score += 0.15;
+    }
+    // 包含时间相关（生日、纪念日等）加分
+    if (content.contains('生日') || content.contains('纪念日') || content.contains('节日')) {
+      score += 0.2;
+    }
+    // 内容长度适中的加分（太短可能不重要，太长可能是日志）
+    if (content.length > 20 && content.length < 200) {
+      score += 0.1;
+    }
+    
+    return score.clamp(0.0, 1.0);
+  }
+  
+  /// 智能淘汰：优先淘汰非重要、低访问、旧的普通记忆
+  void _smartEviction() {
+    // 分离重要记忆和普通记忆
+    final importantMemories = _longTermMemories.where((m) {
+      final metadata = m['metadata'];
+      return metadata is Map && metadata['isImportant'] == true;
+    }).toList();
+    
+    final normalMemories = _longTermMemories.where((m) {
+      final metadata = m['metadata'];
+      return !(metadata is Map && metadata['isImportant'] == true);
+    }).toList();
+    
+    // 计算需要淘汰的数量
+    final excessCount = _longTermMemories.length - normalMemoryMaxCount;
+    if (excessCount <= 0) return;
+    
+    // 对普通记忆按综合评分排序（低分优先淘汰）
+    normalMemories.sort((a, b) {
+      final scoreA = _calculateEvictionScore(a);
+      final scoreB = _calculateEvictionScore(b);
+      return scoreA.compareTo(scoreB); // 低分在前
+    });
+    
+    // 淘汰最低评分的记忆
+    final toRemove = normalMemories.take(excessCount).toList();
+    for (final m in toRemove) {
+      _longTermMemories.remove(m);
+    }
+    
+    debugPrint('🧠 智能淘汰: 移除 ${toRemove.length} 条低优先级记忆，保留 ${importantMemories.length} 条重要记忆');
+  }
+  
+  /// 计算记忆的淘汰评分（越低越容易被淘汰）
+  double _calculateEvictionScore(Map<String, dynamic> memory) {
+    final importance = (memory['importance'] as num?)?.toDouble() ?? 0.5;
+    final accessCount = (memory['accessCount'] as int?) ?? 0;
+    final timestampStr = memory['timestamp'] as String?;
+    
+    // 时间衰减
+    double timeScore = 0.5;
+    if (timestampStr != null) {
+      final timestamp = DateTime.tryParse(timestampStr);
+      if (timestamp != null) {
+        final daysOld = DateTime.now().difference(timestamp).inDays;
+        timeScore = math.exp(-normalDecayRate * daysOld);
+      }
+    }
+    
+    // 访问加分
+    final accessScore = (accessCount * accessBoostPerHit).clamp(0.0, accessBoostCap);
+    
+    // 综合评分：重要性权重最高
+    return importance * 0.5 + timeScore * 0.3 + accessScore * 0.2;
   }
 
   /// 保存一条失败经验记忆（工具执行失败 + 解决方案）
@@ -159,6 +299,13 @@ class MemoryManager extends ChangeNotifier {
       'promoted': false, // 尚未升级为永久记忆
       'hitCount': 0, // 被检索命中的次数
     });
+    
+    // 同步到向量存储（用于语义搜索 fallback）
+    _vectorStore?.add(content, metadata: {
+      'type': 'failure_lesson',
+      'skillId': skillId,
+    });
+    
     debugPrint('🧠 失败经验保存: $skillId - $summary');
   }
 
@@ -223,6 +370,11 @@ class MemoryManager extends ChangeNotifier {
   /// [toolId] 工具 ID（如 shell_exec、write_file）
   /// [args] 工具参数（用于关键词匹配）
   /// 返回匹配到的失败经验文本，不命中返回 null
+  /// 
+  /// 优化策略：
+  /// 1. 错误类型分类索引（工具ID精确匹配权重更高）
+  /// 2. 关键词长度加权（长关键词匹配更有意义）
+  /// 3. 最小匹配阈值过滤误匹配
   String? searchRelevantFailures(String toolId, Map<String, dynamic> args) {
     final failures = getFailureLessons();
     if (failures.isEmpty) return null;
@@ -240,33 +392,68 @@ class MemoryManager extends ChangeNotifier {
     searchTerms.removeWhere((s) => s.trim().isEmpty);
     if (searchTerms.isEmpty) return null;
 
-    final matched = <Map<String, dynamic>>[];
+    // 提取有意义的关键词（去掉过短的通用词）
+    final keywords = <String>[];
+    for (final term in searchTerms) {
+      final parts = term.split(RegExp(r'[\\/\s,;]+'));
+      for (final part in parts) {
+        if (part.length > 2) {
+          keywords.add(part);
+        }
+      }
+    }
+    if (keywords.isEmpty) return null;
+
+    final matched = <MapEntry<Map<String, dynamic>, double>>[];
 
     for (final failure in failures) {
       // 已升级为永久记忆的跳过（已通过 system prompt 注入，避免重复提示）
       final metadata = failure['metadata'];
       if (metadata is Map && metadata['promoted'] == true) continue;
+      // 已标记为过时的跳过（环境已变化，经验不再适用）
+      if (metadata is Map && metadata['outdated'] == true) continue;
 
       final content = (failure['content'] as String).toLowerCase();
-      int score = 0;
+      double score = 0;
 
-      // 关键词匹配
-      for (final term in searchTerms) {
-        // 提取 term 中的关键部分（去掉路径中的具体文件名，保留命令/扩展名等）
-        final keywords = term.split(RegExp(r'[\\/\s,;]+')).where((s) => s.length > 1);
-        for (final kw in keywords) {
-          if (content.contains(kw)) score++;
+      // 工具ID精确匹配（最高权重）
+      if (content.contains('[失败经验] ${toolId.toLowerCase()}')) {
+        score += 5.0;
+      } else if (content.contains(toolId.toLowerCase())) {
+        score += 3.0;
+      }
+
+      // 关键词匹配（长关键词权重更高，避免短关键词误匹配）
+      for (final kw in keywords) {
+        if (content.contains(kw)) {
+          // 长关键词加权：>8字符 +2, >4字符 +1.5, 其他 +1
+          if (kw.length > 8) {
+            score += 2.0;
+          } else if (kw.length > 4) {
+            score += 1.5;
+          } else {
+            score += 1.0;
+          }
+        }
+      }
+      
+      // 错误类型分类匹配：如果参数中包含相同的错误模式关键词，加分
+      final errorType = _extractErrorType(content);
+      if (errorType != null) {
+        // 检查当前参数是否涉及类似场景
+        for (final term in searchTerms) {
+          if (_isRelatedToErrorType(term, errorType)) {
+            score += 2.0;
+            break;
+          }
         }
       }
 
-      // 工具ID精确匹配加分
-      if (content.contains(toolId.toLowerCase())) score += 3;
-
-      if (score > 0) {
-        matched.add(failure);
+      // 最小匹配阈值：至少需要工具ID匹配 或 2个以上关键词匹配
+      if (score >= 3.0) {
+        matched.add(MapEntry(failure, score));
 
         // 更新命中次数
-        final metadata = failure['metadata'];
         if (metadata is Map) {
           metadata['hitCount'] = (metadata['hitCount'] as int? ?? 0) + 1;
 
@@ -274,7 +461,7 @@ class MemoryManager extends ChangeNotifier {
           if (metadata['promoted'] != true &&
               (metadata['hitCount'] as int) >= promotedThreshold) {
             metadata['promoted'] = true;
-            debugPrint('🧠 失败经验升级为永久记忆: ${failure['content'].substring(0, 50)}...');
+            debugPrint('🧠 失败经验升级为永久记忆: ${failure['content'].toString().substring(0, 50)}...');
             _saveMemories();
           }
         }
@@ -284,24 +471,240 @@ class MemoryManager extends ChangeNotifier {
       }
     }
 
-    if (matched.isEmpty) return null;
+    if (matched.isEmpty) {
+      // ── Fallback: 向量语义搜索 ──
+      if (_vectorStore != null) {
+        return _semanticSearchFailures(toolId, searchTerms);
+      }
+      return null;
+    }
 
     // 按匹配分排序，取 top 3
-    matched.sort((a, b) {
-      final aHits = (a['metadata'] as Map?)?['hitCount'] as int? ?? 0;
-      final bHits = (b['metadata'] as Map?)?['hitCount'] as int? ?? 0;
-      return bHits.compareTo(aHits); // 高频经验优先
-    });
+    matched.sort((a, b) => b.value.compareTo(a.value));
 
     final topResults = matched.take(3);
     final sb = StringBuffer('【⚠️ 相关失败经验提示】\n');
     sb.writeln('之前执行类似操作时遇到过以下问题，请参考避免：\n');
-    for (final f in topResults) {
-      sb.writeln('- ${f['content'] as String}');
+    for (final entry in topResults) {
+      sb.writeln('- ${entry.key['content'] as String}');
     }
     sb.writeln('\n请根据以上经验调整你的操作。');
 
     return sb.toString();
+  }
+  
+  /// 从失败经验内容中提取错误类型标签
+  String? _extractErrorType(String content) {
+    if (content.contains('permission denied') || content.contains('eacces') || content.contains('权限')) {
+      return 'permission';
+    }
+    if (content.contains('no such file') || content.contains('enoent') || content.contains('not found') && content.contains('file')) {
+      return 'file_not_found';
+    }
+    if (content.contains('connection') || content.contains('network') || content.contains('timeout') || content.contains('fetch failed')) {
+      return 'network';
+    }
+    if (content.contains('syntax error') || content.contains('unexpected token') || content.contains('parse error')) {
+      return 'syntax';
+    }
+    if (content.contains('command not found') || content.contains('module not found') || content.contains('no module named')) {
+      return 'dependency';
+    }
+    return null;
+  }
+  
+  /// 检查搜索词是否与特定错误类型相关
+  bool _isRelatedToErrorType(String searchTerm, String errorType) {
+    switch (errorType) {
+      case 'permission':
+        return searchTerm.contains('sudo') || searchTerm.contains('chmod') || searchTerm.contains('chown');
+      case 'file_not_found':
+        return searchTerm.contains('/') || searchTerm.contains('\\') || searchTerm.contains('.');
+      case 'network':
+        return searchTerm.contains('http') || searchTerm.contains('npm') || searchTerm.contains('pip') || searchTerm.contains('curl');
+      case 'syntax':
+        return searchTerm.contains('sh') || searchTerm.contains('bash') || searchTerm.contains('python') || searchTerm.contains('node');
+      case 'dependency':
+        return searchTerm.contains('install') || searchTerm.contains('npm') || searchTerm.contains('pip') || searchTerm.contains('brew');
+      default:
+        return false;
+    }
+  }
+  
+  /// 向量语义搜索失败经验（关键词匹配无结果时的 fallback）
+  String? _semanticSearchFailures(String toolId, List<String> searchTerms) {
+    if (_vectorStore == null || _vectorStore!.count == 0) return null;
+    
+    // 构建查询文本
+    final query = '$toolId ${searchTerms.join(' ')}';
+    
+    // 同步执行语义搜索（VectorMemoryStore.search 是 async 的，这里用 then 回调不阻塞）
+    // 由于 searchRelevantFailures 本身不是 async，我们直接用简单的向量匹配
+    // 注意：LocalEmbeddingService.embed 是轻量级的本地计算，实际上不会真正异步
+    try {
+      final queryVector = _syncEmbed(query);
+      if (queryVector == null) return null;
+      
+      final results = <MapEntry<String, double>>[];
+      
+      // 从失败经验中筛选
+      final failures = getFailureLessons();
+      for (final failure in failures) {
+        final metadata = failure['metadata'];
+        if (metadata is Map && metadata['promoted'] == true) continue;
+        if (metadata is Map && metadata['outdated'] == true) continue;
+        
+        final content = failure['content'] as String;
+        final contentVector = _syncEmbed(content);
+        if (contentVector == null) continue;
+        
+        final score = _cosineSimilarity(queryVector, contentVector);
+        if (score > 0.3) { // 语义相似度阈值
+          results.add(MapEntry(content, score));
+        }
+      }
+      
+      if (results.isEmpty) return null;
+      
+      results.sort((a, b) => b.value.compareTo(a.value));
+      final topResults = results.take(3);
+      
+      final sb = StringBuffer('【⚠️ 相关失败经验提示（语义匹配）】\n');
+      sb.writeln('之前执行类似操作时遇到过以下问题，请参考避免：\n');
+      for (final entry in topResults) {
+        sb.writeln('- ${entry.key}');
+      }
+      sb.writeln('\n请根据以上经验调整你的操作。');
+      
+      debugPrint('🧠 语义搜索 fallback 命中 ${results.length} 条失败经验');
+      return sb.toString();
+    } catch (e) {
+      debugPrint('🧠 语义搜索 fallback 失败: $e');
+      return null;
+    }
+  }
+  
+  /// 简单的同步向量嵌入（使用 LocalEmbeddingService 的逻辑）
+  List<double>? _syncEmbed(String text) {
+    const dimension = 256;
+    final tokens = <String>[];
+    
+    // 英文单词
+    for (final match in RegExp(r'[a-zA-Z]+').allMatches(text.toLowerCase())) {
+      tokens.add(match.group(0)!);
+    }
+    // 中文字符
+    for (final match in RegExp(r'[\u4e00-\u9fff]').allMatches(text)) {
+      tokens.add(match.group(0)!);
+    }
+    
+    if (tokens.isEmpty) return null;
+    
+    final vector = List<double>.filled(dimension, 0.0);
+    for (int i = 0; i < tokens.length; i++) {
+      final hash = tokens[i].hashCode.abs() % (dimension ~/ 2);
+      vector[hash] += 1.0;
+      if (i < dimension ~/ 2) {
+        vector[dimension ~/ 2 + i] = 1.0 / (i + 1);
+      }
+    }
+    
+    // L2 归一化
+    double norm = 0;
+    for (final v in vector) {
+      norm += v * v;
+    }
+    norm = math.sqrt(norm);
+    if (norm > 0) {
+      for (int i = 0; i < vector.length; i++) {
+        vector[i] /= norm;
+      }
+    }
+    
+    return vector;
+  }
+  
+  /// 余弦相似度
+  double _cosineSimilarity(List<double> a, List<double> b) {
+    if (a.length != b.length) return 0;
+    double dot = 0, normA = 0, normB = 0;
+    for (int i = 0; i < a.length; i++) {
+      dot += a[i] * b[i];
+      normA += a[i] * a[i];
+      normB += b[i] * b[i];
+    }
+    if (normA == 0 || normB == 0) return 0;
+    return dot / (math.sqrt(normA) * math.sqrt(normB));
+  }
+
+  /// 失效相关的失败经验（工具成功执行后调用）
+  /// 当同一工具+类似操作成功了，说明之前的失败经验可能已过时
+  /// [toolId] 成功的工具 ID
+  /// [args] 成功的工具参数
+  void invalidateRelatedFailures(String toolId, Map<String, dynamic> args) {
+    final failures = getFailureLessons();
+    if (failures.isEmpty) return;
+    
+    final toolLower = toolId.toLowerCase();
+    int invalidatedCount = 0;
+    
+    // 构建成功操作的关键词
+    final successKeywords = <String>[];
+    if (args['command'] != null) {
+      final cmd = (args['command'] as String).toLowerCase();
+      // 提取命令核心（如 npm install → npm, pip install → pip）
+      final parts = cmd.split(RegExp(r'\s+'));
+      if (parts.isNotEmpty) successKeywords.add(parts.first);
+      if (parts.length > 1) successKeywords.add(parts.take(2).join(' '));
+    }
+    if (args['path'] != null) {
+      successKeywords.add((args['path'] as String).toLowerCase());
+    }
+    
+    for (final failure in failures) {
+      final metadata = failure['metadata'];
+      if (metadata is! Map) continue;
+      // 跳过已失效的
+      if (metadata['outdated'] == true) continue;
+      
+      final content = (failure['content'] as String).toLowerCase();
+      final skillId = metadata['skillId'] as String? ?? '';
+      
+      // 条件1: 同一工具
+      if (skillId.toLowerCase() != toolLower) continue;
+      
+      // 条件2: 操作相似（关键词匹配）
+      bool isRelated = false;
+      for (final kw in successKeywords) {
+        if (kw.length > 3 && content.contains(kw)) {
+          isRelated = true;
+          break;
+        }
+      }
+      
+      if (!isRelated) continue;
+      
+      // 条件3: 属于环境类错误（这类错误随环境变化而失效）
+      final errorType = _extractErrorType(content);
+      final isEnvironmentError = errorType == 'dependency' || 
+                                  errorType == 'file_not_found' || 
+                                  errorType == 'permission' ||
+                                  errorType == 'network';
+      
+      if (isEnvironmentError) {
+        // 标记为已过时，不再在 searchRelevantFailures 中返回
+        metadata['outdated'] = true;
+        metadata['outdatedAt'] = DateTime.now().toIso8601String();
+        metadata['outdatedReason'] = '同工具成功执行，环境可能已变化';
+        invalidatedCount++;
+        debugPrint('🧠 失败经验标记为过时: ${failure['content'].toString().substring(0, 60)}...');
+      }
+    }
+    
+    if (invalidatedCount > 0) {
+      _saveMemories();
+      debugPrint('🧠 共 $invalidatedCount 条失败经验被标记为过时');
+    }
   }
 
   /// 查找是否已存在相似记忆（返回索引，无则 null）
@@ -326,8 +729,11 @@ class MemoryManager extends ChangeNotifier {
     return null;
   }
 
-  /// 搜索相关记忆（关键词匹配 + 中文 bigram 匹配 + 时间衰减排序）
-  List<String> search(String query, {int limit = 5}) {
+  /// 搜索相关记忆（关键词匹配 + 中文 bigram + 重要性排序 + 语义搜索 fallback）
+  /// [query] 搜索查询
+  /// [limit] 返回结果数量限制
+  /// [includeImportant] 是否优先包含重要记忆
+  List<String> search(String query, {int limit = retrievalMaxCount, bool includeImportant = true}) {
     if (query.isEmpty) return [];
 
     final queryLower = query.toLowerCase();
@@ -358,7 +764,13 @@ class MemoryManager extends ChangeNotifier {
       ..clear()
       ..addAll(keywordSet);
 
-    if (keywords.isEmpty) return [];
+    if (keywords.isEmpty) {
+      // 关键词为空时，返回重要记忆
+      if (includeImportant) {
+        return _getImportantMemories(limit);
+      }
+      return [];
+    }
 
     final scored = <MapEntry<Map<String, dynamic>, double>>[];
 
@@ -369,17 +781,91 @@ class MemoryManager extends ChangeNotifier {
         if (content.contains(keyword)) matchScore++;
       }
       if (matchScore > 0) {
-        // 关键词匹配分 × (1 + 衰减分) → 新记忆排序靠前
+        // 基础匹配分
+        double score = matchScore.toDouble();
+        
+        // 重要记忆加分
+        final metadata = memory['metadata'];
+        final isImportant = metadata is Map && metadata['isImportant'] == true;
+        if (isImportant && includeImportant) {
+          score *= 2.0;
+        }
+        
+        // 重要性评分加成
+        final importance = (memory['importance'] as num?)?.toDouble() ?? 0.5;
+        score *= (1.0 + importance * 0.5);
+        
+        // 时间衰减加成
         final decayBonus = _calculateDecayScore(memory);
-        scored.add(MapEntry(memory, matchScore * (1.0 + decayBonus)));
+        score *= (1.0 + decayBonus * 0.3);
+        
+        scored.add(MapEntry(memory, score));
 
         // 被搜索命中时增加访问次数
         _incrementAccessCount(memory);
       }
     }
 
+    // 如果关键词匹配没有结果，尝试语义搜索
+    if (scored.isEmpty && _vectorStore != null && _vectorStore!.count > 0) {
+      final semanticResults = _semanticSearch(query, limit);
+      if (semanticResults.isNotEmpty) {
+        return semanticResults;
+      }
+    }
+
     scored.sort((a, b) => b.value.compareTo(a.value));
     return scored.take(limit).map((e) => e.key['content'] as String).toList();
+  }
+  
+  /// 获取重要记忆列表
+  List<String> _getImportantMemories(int limit) {
+    final important = _longTermMemories.where((m) {
+      final metadata = m['metadata'];
+      return metadata is Map && metadata['isImportant'] == true;
+    }).toList();
+    
+    // 按时间倒序
+    important.sort((a, b) {
+      final ta = DateTime.tryParse(a['timestamp'] as String? ?? '') ?? DateTime(2000);
+      final tb = DateTime.tryParse(b['timestamp'] as String? ?? '') ?? DateTime(2000);
+      return tb.compareTo(ta);
+    });
+    
+    return important.take(limit).map((m) => m['content'] as String).toList();
+  }
+  
+  /// 语义搜索（使用本地向量计算）
+  List<String> _semanticSearch(String query, int limit) {
+    try {
+      // 使用已实现的同步向量嵌入方法
+      final queryVector = _syncEmbed(query);
+      if (queryVector == null) return [];
+      
+      final results = <MapEntry<String, double>>[];
+      
+      // 从长期记忆中搜索
+      for (final memory in _longTermMemories) {
+        final content = memory['content'] as String;
+        final contentVector = _syncEmbed(content);
+        if (contentVector == null) continue;
+        
+        final score = _cosineSimilarity(queryVector, contentVector);
+        if (score > 0.3) { // 语义相似度阈值
+          results.add(MapEntry(content, score));
+        }
+      }
+      
+      if (results.isEmpty) return [];
+      
+      // 按相似度排序
+      results.sort((a, b) => b.value.compareTo(a.value));
+      debugPrint('🧠 语义搜索命中 ${results.length} 条记忆');
+      return results.take(limit).map((e) => e.key).toList();
+    } catch (e) {
+      debugPrint('🧠 语义搜索失败: $e');
+      return [];
+    }
   }
 
   /// 获取记忆上下文字符串（注入到 system prompt）
@@ -420,6 +906,73 @@ class MemoryManager extends ChangeNotifier {
     }
 
     return parts.join('\n\n');
+  }
+  
+  // ═══════════════════════════════════════════════════════════════════
+  /// 记忆注入作为 SystemPromptSegment 统一管理（优化6）
+  /// ═══════════════════════════════════════════════════════════════════
+  
+  /// 获取记忆注入 Segment 列表
+  /// 返回可用于 ContextManager 的 SystemPromptSegment 列表
+  /// 每个 Segment 有独立的优先级和 token 上限
+  List<SystemPromptSegment> getMemorySegments(String userMessage, {
+    int userProfileMaxTokens = 200,
+    int relevantMemoriesMaxTokens = 800,
+    int failureLessonsMaxTokens = 500,
+  }) {
+    final segments = <SystemPromptSegment>[];
+    
+    // 1. 用户画像 Segment（优先级最高）
+    if (_userProfile.isNotEmpty) {
+      final profileContent = _userProfile.entries
+          .map((e) => '${e.key}: ${e.value}')
+          .join('\n');
+      segments.add(SystemPromptSegment(
+        id: 'user_profile',
+        title: '用户信息',
+        content: profileContent,
+        priority: 9, // 高优先级
+        maxTokens: userProfileMaxTokens,
+        optional: false,
+        compressible: true,
+      ));
+    }
+    
+    // 2. 相关记忆 Segment
+    final relevantMemories = search(userMessage, limit: 5);
+    if (relevantMemories.isNotEmpty) {
+      segments.add(SystemPromptSegment(
+        id: 'relevant_memories',
+        title: '相关记忆',
+        content: relevantMemories.map((m) => '- $m').join('\n'),
+        priority: 7,
+        maxTokens: relevantMemoriesMaxTokens,
+        optional: true,
+        compressible: true,
+      ));
+    }
+    
+    // 3. 高频失败经验 Segment（升级为永久记忆的）
+    final failureContext = getFailureLessonsContext();
+    if (failureContext.isNotEmpty) {
+      segments.add(SystemPromptSegment(
+        id: 'failure_lessons',
+        title: '高频失败经验',
+        content: failureContext,
+        priority: 8, // 优先级高于普通记忆
+        maxTokens: failureLessonsMaxTokens,
+        optional: false, // 不可省略
+        compressible: false,
+      ));
+    }
+    
+    return segments;
+  }
+  
+  /// 获取所有记忆 Segment 的总 token 数估算
+  int estimateMemorySegmentsTokens(String userMessage) {
+    final segments = getMemorySegments(userMessage);
+    return segments.fold(0, (sum, seg) => sum + seg.tokenCount);
   }
 
   /// 更新用户画像

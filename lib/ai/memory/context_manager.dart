@@ -1,5 +1,45 @@
 import 'package:flutter/foundation.dart';
 
+/// System Prompt 级别
+/// 根据任务复杂度和 token 预算自动选择
+enum PromptLevel {
+  /// 最小级：仅人格设定（~500 token）- 简单聊天
+  minimal,
+  /// 标准级：人格 + 基础工具说明（~2000 token）- 默认
+  standard,
+  /// 完整级：完整说明 + 技能文档（~8000 token）- 复杂任务
+  full,
+}
+
+/// PromptLevel 扩展方法
+extension PromptLevelExtension on PromptLevel {
+  /// 从字符串解析
+  static PromptLevel? fromString(String value) {
+    switch (value.toLowerCase()) {
+      case 'minimal':
+        return PromptLevel.minimal;
+      case 'standard':
+        return PromptLevel.standard;
+      case 'full':
+        return PromptLevel.full;
+      default:
+        return null;
+    }
+  }
+  
+  /// 显示名称
+  String get displayName {
+    switch (this) {
+      case PromptLevel.minimal:
+        return '简洁模式';
+      case PromptLevel.standard:
+        return '标准模式';
+      case PromptLevel.full:
+        return '完整模式';
+    }
+  }
+}
+
 /// Token 计数器
 /// 提供精确或估算的 token 计数功能
 class TokenCounter {
@@ -190,6 +230,19 @@ class ContextManager extends ChangeNotifier {
   /// 当前使用的 token 数
   int _currentTokens = 0;
   
+  /// 当前 Prompt 级别
+  PromptLevel _promptLevel = PromptLevel.standard;
+  
+  /// 历史消息摘要缓存
+  String? _cachedHistorySummary;
+  int _cachedHistoryTokenCount = 0;
+  
+  /// LLM 摘要生成函数（由外部注入）
+  Future<String> Function(String prompt)? _llmSummarizer;
+  
+  /// 工具调用摘要缓存（key: 消息索引, value: 摘要）
+  final Map<int, String> _toolCallSummaryCache = {};
+  
   /// 获取上下文窗口大小
   int get contextWindow => _contextWindow;
   
@@ -199,10 +252,27 @@ class ContextManager extends ChangeNotifier {
   /// 获取可用 token 预算
   int get availableTokens => _contextWindow - _outputReserve - _toolsReserve - _currentTokens;
   
+  /// 获取当前 Prompt 级别
+  PromptLevel get promptLevel => _promptLevel;
+  
+  /// 获取历史预留 token 数
+  int get historyReserve => _historyReserve;
+  
   /// 设置模型上下文窗口大小
   void setContextWindow(int tokens) {
     _contextWindow = tokens;
     notifyListeners();
+  }
+  
+  /// 设置 Prompt 级别
+  void setPromptLevel(PromptLevel level) {
+    _promptLevel = level;
+    notifyListeners();
+  }
+  
+  /// 设置 LLM 摘要生成器
+  void setLLMSummarizer(Future<String> Function(String prompt) summarizer) {
+    _llmSummarizer = summarizer;
   }
   
   /// 设置输出预留
@@ -368,8 +438,314 @@ class ContextManager extends ChangeNotifier {
       'history_reserve': _historyReserve,
       'system_prompt_max': _systemPromptMax,
       'segment_count': _segments.length,
+      'prompt_level': _promptLevel.name,
     };
   }
+  
+  // ═══════════════════════════════════════════════════════════════════
+  /// Token 预算控制的历史消息修剪
+  /// 返回修剪后的消息列表，确保总 token 不超过 historyReserve
+  /// ═══════════════════════════════════════════════════════════════════
+  
+  /// 修剪历史消息（Token 预算控制）
+  /// [messages] 原始消息列表
+  /// [maxTokens] 最大 token 预算（默认使用 _historyReserve）
+  /// [apiMessageGroups] 需要特殊处理的 apiMessages 组（工具调用序列）
+  /// 返回修剪后的消息列表和被裁剪的 token 数
+  ({List<Map<String, dynamic>> messages, int trimmedTokens, bool needsSummary}) trimHistoryByTokenBudget(
+    List<Map<String, dynamic>> messages, {
+    int? maxTokens,
+    List<List<Map<String, dynamic>>>? apiMessageGroups,
+  }) {
+    final budget = maxTokens ?? _historyReserve;
+    final result = <Map<String, dynamic>>[];
+    int totalTokens = 0;
+    int trimmedTokens = 0;
+    
+    // 从后向前遍历，保留最新消息
+    for (int i = messages.length - 1; i >= 0; i--) {
+      final msg = messages[i];
+      final msgTokens = _countMessageTokens(msg);
+      
+      if (totalTokens + msgTokens <= budget) {
+        result.insert(0, msg);
+        totalTokens += msgTokens;
+      } else {
+        trimmedTokens += msgTokens;
+      }
+    }
+    
+    // 如果有 apiMessageGroups，检查是否需要摘要
+    bool needsSummary = false;
+    if (apiMessageGroups != null && apiMessageGroups.isNotEmpty) {
+      for (final group in apiMessageGroups) {
+        final groupTokens = TokenCounter.countMessages(group);
+        if (groupTokens > budget * 0.3) {
+          needsSummary = true;
+          break;
+        }
+      }
+    }
+    
+    return (messages: result, trimmedTokens: trimmedTokens, needsSummary: needsSummary);
+  }
+  
+  /// 计算单条消息的 token 数
+  int _countMessageTokens(Map<String, dynamic> msg) {
+    int tokens = 4; // 消息格式开销
+    
+    final role = msg['role'] as String?;
+    if (role != null) tokens += TokenCounter.count(role);
+    
+    final content = msg['content'];
+    if (content is String) {
+      tokens += TokenCounter.count(content);
+    } else if (content is List) {
+      for (final part in content) {
+        if (part is Map && part['text'] is String) {
+          tokens += TokenCounter.count(part['text'] as String);
+        }
+        if (part is Map && part['type'] == 'image_url') {
+          tokens += 85;
+        }
+      }
+    }
+    
+    if (msg['tool_calls'] is List) {
+      for (final tc in msg['tool_calls'] as List) {
+        if (tc is Map) {
+          tokens += 4;
+          final func = tc['function'];
+          if (func is Map) {
+            tokens += TokenCounter.count(func['name']?.toString() ?? '');
+            tokens += TokenCounter.count(func['arguments']?.toString() ?? '');
+          }
+        }
+      }
+    }
+    
+    if (msg['tool_call_id'] is String) {
+      tokens += TokenCounter.count(msg['tool_call_id'] as String);
+    }
+    
+    return tokens;
+  }
+  
+  // ═══════════════════════════════════════════════════════════════════
+  /// 工具调用摘要生成
+  /// ═══════════════════════════════════════════════════════════════════
+  
+  /// 生成工具调用序列的结构化摘要
+  /// [apiMessages] 工具调用消息序列（assistant tool_calls + tool results）
+  /// [finalContent] 最终回复内容
+  /// 返回结构化摘要文本
+  String generateToolCallSummary(
+    List<Map<String, dynamic>> apiMessages, {
+    String? finalContent,
+  }) {
+    final toolCalls = <_ToolCallRecord>[];
+    String? failedTool;
+    String? failureReason;
+    
+    for (final msg in apiMessages) {
+      // 提取工具调用
+      if (msg['role'] == 'assistant' && msg['tool_calls'] != null) {
+        for (final tc in msg['tool_calls'] as List) {
+          if (tc is Map) {
+            final func = tc['function'];
+            if (func is Map) {
+              toolCalls.add(_ToolCallRecord(
+                name: func['name']?.toString() ?? 'unknown',
+                arguments: func['arguments']?.toString() ?? '{}',
+              ));
+            }
+          }
+        }
+      }
+      
+      // 提取工具结果和失败信息
+      if (msg['role'] == 'tool') {
+        final content = msg['content']?.toString() ?? '';
+        // 检查是否失败
+        if (content.toLowerCase().contains('error') || 
+            content.contains('失败') || 
+            content.contains('failed')) {
+          failedTool = msg['name']?.toString();
+          failureReason = content.length > 200 
+              ? '${content.substring(0, 200)}...' 
+              : content;
+        }
+      }
+    }
+    
+    // 构建摘要
+    final buffer = StringBuffer();
+    buffer.writeln('【历史工具调用】');
+    buffer.writeln('工具序列: ${toolCalls.map((t) => t.name).join(" → ")}');
+    
+    if (failedTool != null) {
+      buffer.writeln('失败记录: $failedTool - ${failureReason ?? "未知原因"}');
+    }
+    
+    if (finalContent != null && finalContent.isNotEmpty) {
+      buffer.writeln('最终结果: ${finalContent.length > 150 ? "${finalContent.substring(0, 150)}..." : finalContent}');
+    }
+    
+    return buffer.toString();
+  }
+  
+  /// 使用 LLM 生成更智能的工具调用摘要（可选）
+  /// 需要先通过 setLLMSummarizer 设置摘要生成器
+  Future<String?> generateLLMToolCallSummary(
+    List<Map<String, dynamic>> apiMessages, {
+    String? finalContent,
+  }) async {
+    if (_llmSummarizer == null) return null;
+    
+    // 构建摘要 prompt
+    final toolNames = <String>[];
+    for (final msg in apiMessages) {
+      if (msg['role'] == 'assistant' && msg['tool_calls'] != null) {
+        for (final tc in msg['tool_calls'] as List) {
+          if (tc is Map && tc['function'] is Map) {
+            toolNames.add((tc['function'] as Map)['name']?.toString() ?? '');
+          }
+        }
+      }
+    }
+    
+    final prompt = '''
+请为以下工具调用序列生成简洁的结构化摘要（100字以内）：
+
+工具序列: ${toolNames.join(' → ')}
+最终回复: ${finalContent ?? '无'}
+
+请用以下格式输出：
+【任务】...
+【使用工具】...
+【关键结果】...
+【失败记录】（如有）...
+''';
+    
+    try {
+      return await _llmSummarizer!(prompt);
+    } catch (e) {
+      debugPrint('[ContextManager] LLM摘要生成失败: $e');
+      return null;
+    }
+  }
+  
+  // ═══════════════════════════════════════════════════════════════════
+  /// Prompt 级别相关
+  /// ═══════════════════════════════════════════════════════════════════
+  
+  /// 根据 Prompt 级别获取推荐的 System Prompt 最大 token
+  int getSystemPromptMaxForLevel(PromptLevel level) {
+    switch (level) {
+      case PromptLevel.minimal:
+        return 500;
+      case PromptLevel.standard:
+        return 2000;
+      case PromptLevel.full:
+        return _systemPromptMax; // 使用配置的最大值
+    }
+  }
+  
+  /// 自动选择 Prompt 级别
+  /// [userMessage] 用户消息
+  /// [availableBudget] 可用 token 预算
+  PromptLevel autoSelectPromptLevel(String userMessage, int availableBudget) {
+    final msgLower = userMessage.toLowerCase();
+    
+    // 检测复杂任务关键词
+    final complexKeywords = ['分析', '生成', '创建', '开发', '编写', '实现', '处理', '转换', 
+      'analyze', 'generate', 'create', 'develop', 'implement', 'process'];
+    final hasComplexKeyword = complexKeywords.any((k) => msgLower.contains(k));
+    
+    // 检测工具调用意图
+    final toolKeywords = ['文件', '脚本', '执行', '运行', '数据', '表格', '图表',
+      'file', 'script', 'run', 'execute', 'data', 'excel', 'chart'];
+    final hasToolIntent = toolKeywords.any((k) => msgLower.contains(k));
+    
+    // 检测简单聊天
+    final simpleKeywords = ['你好', '早上好', '晚安', '在吗', '怎么样', '开心',
+      'hello', 'hi', 'hey', 'how are', 'good morning', 'good night'];
+    final isSimpleChat = simpleKeywords.any((k) => msgLower.contains(k));
+    
+    // 预算不足时降级
+    if (availableBudget < 2000) {
+      return PromptLevel.minimal;
+    }
+    
+    // 根据意图选择
+    if (isSimpleChat && !hasComplexKeyword && !hasToolIntent) {
+      return PromptLevel.minimal;
+    }
+    
+    if (hasComplexKeyword || hasToolIntent) {
+      return PromptLevel.full;
+    }
+    
+    return PromptLevel.standard;
+  }
+  
+  /// 清除缓存
+  void clearCache() {
+    _cachedHistorySummary = null;
+    _cachedHistoryTokenCount = 0;
+    _toolCallSummaryCache.clear();
+  }
+  
+  /// 获取或生成历史摘要（带缓存）
+  Future<String?> getOrGenerateHistorySummary(
+    List<Map<String, dynamic>> messages,
+  ) async {
+    final currentTokenCount = TokenCounter.countMessages(messages);
+    
+    // 如果缓存有效且 token 数未变，直接返回缓存
+    if (_cachedHistorySummary != null && 
+        _cachedHistoryTokenCount == currentTokenCount) {
+      return _cachedHistorySummary;
+    }
+    
+    // 需要摘要
+    if (!needsHistorySummary(messages)) {
+      return null;
+    }
+    
+    // 使用 LLM 生成摘要
+    if (_llmSummarizer != null) {
+      try {
+        final historyText = messages.map((m) {
+          final role = m['role'] as String? ?? '';
+          final content = m['content']?.toString() ?? '';
+          return '[$role] $content';
+        }).join('\n');
+        
+        final summary = await _llmSummarizer!(
+          '请为以下对话历史生成简洁摘要（200字以内，保留关键决策和结果）：\n\n$historyText',
+        );
+        
+        // 更新缓存
+        _cachedHistorySummary = summary;
+        _cachedHistoryTokenCount = currentTokenCount;
+        
+        return summary;
+      } catch (e) {
+        debugPrint('[ContextManager] 历史摘要生成失败: $e');
+      }
+    }
+    
+    return null;
+  }
+}
+
+/// 工具调用记录（内部使用）
+class _ToolCallRecord {
+  final String name;
+  final String arguments;
+  
+  const _ToolCallRecord({required this.name, required this.arguments});
 }
 
 /// 模型上下文窗口配置

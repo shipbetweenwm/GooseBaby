@@ -270,16 +270,63 @@ class HookManager {
   }
   
   /// 执行工具调用前 Hooks
-  /// 返回第一个非空的 HookResult
+  /// block 立即返回，inject 消息会合并，所有 Hook 都有机会执行
   Future<HookResult?> triggerBeforeToolCall(ToolCall call, AgentLoopContext context) async {
+    final injectedMessages = <String>[];
+    String? userMessage;
+    bool shouldSkip = false;
+    Map<String, dynamic>? modifiedArgs;
+    
     for (final hook in _hooks.where((h) => h.enabled)) {
       try {
         final result = await hook.beforeToolCall(call, context);
-        if (result != null) return result;
+        if (result == null) continue;
+        
+        // block 最高优先级，立刻返回
+        if (result.shouldBlock) return result;
+        
+        // skip 记录但继续收集
+        if (result.shouldSkip) {
+          shouldSkip = true;
+          userMessage ??= result.userMessage;
+        }
+        
+        // inject 消息合并
+        if (result.shouldInject && result.injectedMessage != null) {
+          injectedMessages.add(result.injectedMessage!);
+          userMessage ??= result.userMessage;
+        }
+        
+        // modifyArgs 后者覆盖前者
+        if (result.modifiedArgs != null) {
+          modifiedArgs = result.modifiedArgs;
+          userMessage ??= result.userMessage;
+        }
       } catch (e) {
         print('[Hook ${hook.id}] beforeToolCall error: $e');
       }
     }
+    
+    // 如果有 skip
+    if (shouldSkip) {
+      return HookResult(shouldSkip: true, userMessage: userMessage);
+    }
+    
+    // 合并所有 inject 消息
+    if (injectedMessages.isNotEmpty) {
+      return HookResult(
+        shouldInject: true,
+        injectedMessage: injectedMessages.join('\n\n'),
+        userMessage: userMessage,
+        modifiedArgs: modifiedArgs,
+      );
+    }
+    
+    // 仅有 modifyArgs
+    if (modifiedArgs != null) {
+      return HookResult(modifiedArgs: modifiedArgs, userMessage: userMessage);
+    }
+    
     return null;
   }
   
@@ -443,6 +490,9 @@ class PerformanceStatsHook extends BaseHook {
   DateTime? _loopStartTime;
   final Map<String, _ToolStats> _toolStats = {};
   
+  /// 每个工具调用的开始时间（key: toolCall.id）
+  final Map<String, DateTime> _toolStartTimes = {};
+  
   PerformanceStatsHook()
       : super(
           id: 'performance_stats',
@@ -455,6 +505,7 @@ class PerformanceStatsHook extends BaseHook {
   Future<void> onLoopStart(AgentLoopContext context) async {
     _loopStartTime = DateTime.now();
     _toolStats.clear();
+    _toolStartTimes.clear();
   }
   
   @override
@@ -472,8 +523,15 @@ class PerformanceStatsHook extends BaseHook {
       final avg = entry.value.count > 0
           ? entry.value.totalDurationMs / entry.value.count
           : 0;
-      print('[PerformanceStats] ${entry.key}: ${entry.value.count}次, 平均 ${avg.toStringAsFixed(0)}ms');
+      print('[PerformanceStats] ${entry.key}: ${entry.value.count}次, 平均 ${avg.toStringAsFixed(0)}ms, 失败 ${entry.value.failures}次');
     }
+  }
+  
+  @override
+  Future<HookResult?> beforeToolCall(ToolCall call, AgentLoopContext context) async {
+    // 记录工具调用开始时间
+    _toolStartTimes[call.id] = DateTime.now();
+    return null;
   }
   
   @override
@@ -481,21 +539,32 @@ class PerformanceStatsHook extends BaseHook {
     final stats = _toolStats.putIfAbsent(call.name, () => _ToolStats());
     stats.count++;
     if (result.isError) stats.failures++;
+    
+    // 计算实际耗时
+    final startTime = _toolStartTimes.remove(call.id);
+    if (startTime != null) {
+      final durationMs = DateTime.now().difference(startTime).inMilliseconds;
+      stats.totalDurationMs += durationMs;
+    }
   }
   
   Map<String, dynamic> getStats() {
     int totalCalls = 0;
     int failedCalls = 0;
+    int totalDurationMs = 0;
     for (final stats in _toolStats.values) {
       totalCalls += stats.count;
       failedCalls += stats.failures;
+      totalDurationMs += stats.totalDurationMs;
     }
     return {
       'totalToolCalls': totalCalls,
       'failedCalls': failedCalls,
+      'totalDurationMs': totalDurationMs,
       'toolBreakdown': _toolStats.map((k, v) => MapEntry(k, {
         'count': v.count,
         'failures': v.failures,
+        'avgDurationMs': v.count > 0 ? (v.totalDurationMs / v.count).round() : 0,
       })),
     };
   }

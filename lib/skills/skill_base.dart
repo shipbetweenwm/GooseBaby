@@ -42,6 +42,12 @@ class SkillParam {
   final bool required;
   final dynamic defaultValue;
   final List<String>? enumValues; // type=enum时的可选值
+  
+  /// 参数示例值（用于帮助 LLM 理解如何填写）
+  final String? example;
+  
+  /// 最佳实践提示
+  final String? bestPractice;
 
   const SkillParam({
     required this.name,
@@ -50,6 +56,8 @@ class SkillParam {
     this.required = true,
     this.defaultValue,
     this.enumValues,
+    this.example,
+    this.bestPractice,
   });
 
   Map<String, dynamic> toFunctionParam() {
@@ -60,6 +68,15 @@ class SkillParam {
     if (enumValues != null && enumValues!.isNotEmpty) {
       param['enum'] = enumValues;
     }
+    // 将示例和最佳实践加入描述
+    final descParts = <String>[description];
+    if (example != null) {
+      descParts.add('示例: $example');
+    }
+    if (bestPractice != null) {
+      descParts.add('建议: $bestPractice');
+    }
+    param['description'] = descParts.join('\n');
     return param;
   }
 
@@ -97,6 +114,13 @@ abstract class GooseSkill {
 
   /// 参数定义列表
   List<SkillParam> get params;
+  
+  /// 使用示例（帮助 LLM 理解如何使用此技能）
+  /// 返回示例场景和对应的参数
+  List<SkillExample> get examples => const [];
+  
+  /// 最佳实践（使用此技能的注意事项）
+  String get bestPractice => '';
 
   /// 是否启用
   bool get enabled => true;
@@ -116,12 +140,24 @@ abstract class GooseSkill {
         requiredParams.add(param.name);
       }
     }
+    
+    // 构建完整描述
+    var fullDescription = description;
+    if (bestPractice.isNotEmpty) {
+      fullDescription += '\n\n【最佳实践】$bestPractice';
+    }
+    if (examples.isNotEmpty) {
+      fullDescription += '\n\n【使用示例】';
+      for (final ex in examples) {
+        fullDescription += '\n${ex.scenario}: ${ex.argsJson}';
+      }
+    }
 
     return {
       'type': 'function',
       'function': {
         'name': id,
-        'description': description,
+        'description': fullDescription,
         'parameters': {
           'type': 'object',
           'properties': properties,
@@ -130,4 +166,18 @@ abstract class GooseSkill {
       },
     };
   }
+}
+
+/// 技能使用示例
+class SkillExample {
+  /// 场景描述
+  final String scenario;
+  
+  /// 参数 JSON 示例
+  final String argsJson;
+  
+  const SkillExample({
+    required this.scenario,
+    required this.argsJson,
+  });
 }
