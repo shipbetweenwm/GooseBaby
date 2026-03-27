@@ -463,6 +463,29 @@ class TeamTask {
     'retryCount': retryCount,
   };
   
+  factory TeamTask.fromJson(Map<String, dynamic> json) {
+    final task = TeamTask(
+      id: json['id'] as String,
+      description: json['description'] as String,
+      assignedTo: json['assignedTo'] as String?,
+      dependencies: (json['dependencies'] as List?)?.cast<String>() ?? const [],
+      executionMode: TaskExecutionMode.values.firstWhere(
+        (e) => e.name == json['executionMode'],
+        orElse: () => TaskExecutionMode.auto,
+      ),
+      status: TaskStatus.values.firstWhere(
+        (e) => e.name == json['status'],
+        orElse: () => TaskStatus.pending,
+      ),
+      groupId: json['groupId'] as String?,
+      priority: json['priority'] as int? ?? 100,
+    );
+    task.result = json['result'] as String?;
+    task.error = json['error'] as String?;
+    task.retryCount = json['retryCount'] as int? ?? 0;
+    return task;
+  }
+  
   /// 复制并修改
   TeamTask copyWith({
     String? id,

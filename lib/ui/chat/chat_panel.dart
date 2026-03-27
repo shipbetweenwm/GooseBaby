@@ -96,6 +96,16 @@ class _ChatPanelState extends State<ChatPanel> with SingleTickerProviderStateMix
   /// Team 模式是否正在执行
   bool _isTeamExecuting = false;
   
+  // ===== 团队任务执行状态跟踪（用于持久化和恢复）=====
+  /// 当前执行的用户任务
+  String? _currentTeamTask;
+  /// 当前执行阶段索引
+  int _currentStageIndex = -1;
+  /// 已完成的任务 ID 集合
+  final Set<String> _completedTaskIds = {};
+  /// 任务输出结果（taskId -> output）
+  final Map<String, String> _taskOutputs = {};
+  
   /// 当前团队模式（任务模式 / 圆桌模式）
   TeamMode _teamMode = TeamMode.task;
   /// 讨论轮次记录
@@ -215,6 +225,77 @@ class _ChatPanelState extends State<ChatPanel> with SingleTickerProviderStateMix
       'current_team_agents', 
       _teamAgents.map((a) => a.toJson()).toList(),
     );
+  }
+  
+  // ==================== 团队执行状态持久化 ====================
+  
+  /// 保存团队执行状态（用于恢复被中断的任务）
+  Future<void> _saveTeamExecutionState({
+    required String userTask,
+    required int currentStageIndex,
+    required List<String> completedTaskIds,
+    required Map<String, String> taskOutputs,
+  }) async {
+    final state = {
+      'userTask': userTask,
+      'currentStageIndex': currentStageIndex,
+      'completedTaskIds': completedTaskIds,
+      'taskOutputs': taskOutputs,
+      'tasks': _dynamicTasks.map((t) => t.toJson()).toList(),
+      'messages': _teamMessageBoard.messages.map((m) => m.toJson()).toList(),
+      'outputDir': _currentOutputDir,
+      'savedAt': DateTime.now().toIso8601String(),
+    };
+    await StorageManager.setSetting('team_execution_state', state);
+    debugPrint('💾 团队执行状态已保存: ${completedTaskIds.length}/${_dynamicTasks.length} 任务完成');
+  }
+  
+  /// 加载团队执行状态
+  Map<String, dynamic>? _loadTeamExecutionState() {
+    final state = StorageManager.getSetting<Map<String, dynamic>>('team_execution_state');
+    if (state == null || state.isEmpty) return null;
+    
+    // 检查是否过期（超过 24 小时）
+    final savedAt = state['savedAt'] as String?;
+    if (savedAt != null) {
+      final savedTime = DateTime.parse(savedAt);
+      if (DateTime.now().difference(savedTime).inHours > 24) {
+        debugPrint('💾 团队执行状态已过期，忽略');
+        return null;
+      }
+    }
+    
+    return state;
+  }
+  
+  /// 清除团队执行状态
+  Future<void> _clearTeamExecutionState() async {
+    await StorageManager.setSetting('team_execution_state', null);
+    debugPrint('💾 团队执行状态已清除');
+  }
+  
+  /// 检查是否有可恢复的任务
+  bool get _hasResumableTask {
+    final state = _loadTeamExecutionState();
+    if (state == null) return false;
+    
+    final completedIds = (state['completedTaskIds'] as List?)?.cast<String>() ?? [];
+    final tasks = (state['tasks'] as List?) ?? [];
+    
+    // 有任务且未全部完成
+    return tasks.isNotEmpty && completedIds.length < tasks.length;
+  }
+  
+  /// 获取可恢复任务的描述
+  String? get _resumableTaskDescription {
+    final state = _loadTeamExecutionState();
+    if (state == null) return null;
+    
+    final userTask = state['userTask'] as String? ?? '未知任务';
+    final completedIds = (state['completedTaskIds'] as List?)?.cast<String>() ?? [];
+    final tasks = (state['tasks'] as List?) ?? [];
+    
+    return '$userTask (${completedIds.length}/${tasks.length} 已完成)';
   }
   
   void _saveAgentMode(AgentMode mode) {
@@ -516,6 +597,16 @@ class _ChatPanelState extends State<ChatPanel> with SingleTickerProviderStateMix
       _teamCancellationToken!.cancel();
       debugPrint('🛑 用户取消了 Team 模式任务');
       
+      // 保存当前执行状态（用于恢复）
+      if (_currentTeamTask != null && _currentStageIndex >= 0) {
+        _saveTeamExecutionState(
+          userTask: _currentTeamTask!,
+          currentStageIndex: _currentStageIndex,
+          completedTaskIds: _completedTaskIds.toList(),
+          taskOutputs: _taskOutputs,
+        );
+      }
+      
       // 重置所有角色状态
       setState(() {
         _isTeamExecuting = false;
@@ -530,7 +621,7 @@ class _ChatPanelState extends State<ChatPanel> with SingleTickerProviderStateMix
         fromAgentId: 'system',
         fromAgentName: '系统',
         type: TeamMessageType.broadcast,
-        content: '⚠️ 任务已被用户取消',
+        content: '⚠️ 任务已被用户取消\n💡 可以点击"恢复任务"按钮继续执行',
       );
     }
   }
@@ -1950,6 +2041,37 @@ class _ChatPanelState extends State<ChatPanel> with SingleTickerProviderStateMix
                           textAlign: TextAlign.center,
                           style: TextStyle(fontSize: 9, color: Colors.grey.shade500),
                         ),
+                        // 恢复任务按钮
+                        if (_hasResumableTask) ...[
+                          const SizedBox(height: 8),
+                          InkWell(
+                            onTap: _resumeTeamExecution,
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                              decoration: BoxDecoration(
+                                color: Colors.orange.shade100,
+                                borderRadius: BorderRadius.circular(4),
+                                border: Border.all(color: Colors.orange.shade300),
+                              ),
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Icon(Icons.play_circle_outline, size: 12, color: Colors.orange.shade700),
+                                  const SizedBox(width: 4),
+                                  Text(
+                                    '恢复任务',
+                                    style: TextStyle(fontSize: 9, color: Colors.orange.shade700),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                          const SizedBox(height: 2),
+                          Text(
+                            _resumableTaskDescription ?? '',
+                            style: TextStyle(fontSize: 8, color: Colors.orange.shade600),
+                          ),
+                        ],
                       ],
                     ),
                   )
@@ -2101,7 +2223,8 @@ class _ChatPanelState extends State<ChatPanel> with SingleTickerProviderStateMix
               children: [
                 Text('轮次:', style: TextStyle(fontSize: 9, color: Colors.grey.shade600)),
                 const SizedBox(width: 4),
-                for (int r in [1, 2, 3, 4])
+                // 预设轮次选项
+                for (int r in [1, 2, 3, 4, 5])
                   InkWell(
                     onTap: _isDiscussing ? null : () => setState(() {
                       _discussionConfig = DiscussionConfig(
@@ -2129,6 +2252,41 @@ class _ChatPanelState extends State<ChatPanel> with SingleTickerProviderStateMix
                       ),
                     ),
                   ),
+                const SizedBox(width: 4),
+                // 自定义轮次输入
+                InkWell(
+                  onTap: _isDiscussing ? null : _showCustomRoundsDialog,
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                    decoration: BoxDecoration(
+                      color: (_discussionConfig?.maxRounds ?? 2) > 5 
+                          ? Colors.purple.shade300 
+                          : Colors.grey.shade200,
+                      borderRadius: BorderRadius.circular(3),
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(Icons.edit, size: 10, 
+                          color: (_discussionConfig?.maxRounds ?? 2) > 5 
+                              ? Colors.white 
+                              : Colors.grey.shade600),
+                        const SizedBox(width: 2),
+                        Text(
+                          (_discussionConfig?.maxRounds ?? 2) > 5 
+                              ? '${_discussionConfig?.maxRounds}' 
+                              : '自定义',
+                          style: TextStyle(
+                            fontSize: 9, 
+                            color: (_discussionConfig?.maxRounds ?? 2) > 5 
+                                ? Colors.white 
+                                : Colors.grey.shade600,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
               ],
             ),
             const SizedBox(height: 6),
@@ -3189,13 +3347,21 @@ $skillBuffer
     _dynamicTasks.clear();
     _taskOutputFiles.clear();
     
+    // 初始化执行状态跟踪
+    _currentTeamTask = userTask;
+    _currentStageIndex = 0;
+    _completedTaskIds.clear();
+    _taskOutputs.clear();
+    
     // 初始化取消令牌
     _teamCancellationToken = CancellationToken();
     
-    // 初始化本次任务的输出目录
-    final timestamp = DateTime.now().toIso8601String().replaceAll(':', '-').replaceAll('.', '-').substring(0, 19);
-    final workDir = Directory.current;
-    _currentOutputDir = '${workDir.path}/goosebaby_outputs/$timestamp';
+    // 初始化本次任务的输出目录（Web 平台不支持）
+    if (!kIsWeb) {
+      final timestamp = DateTime.now().toIso8601String().replaceAll(':', '-').replaceAll('.', '-').substring(0, 19);
+      final workDir = Directory.current;
+      _currentOutputDir = '${workDir.path}/goosebaby_outputs/$timestamp';
+    }
     
     // 设置执行状态
     setState(() {
@@ -3242,6 +3408,164 @@ $skillBuffer
     }
   }
   
+  /// 恢复被中断的团队任务
+  Future<void> _resumeTeamExecution() async {
+    final state = _loadTeamExecutionState();
+    if (state == null) {
+      _sendTeamMessage(
+        fromAgentId: 'system',
+        fromAgentName: '系统',
+        type: TeamMessageType.broadcast,
+        content: '⚠️ 没有可恢复的任务',
+      );
+      return;
+    }
+    
+    // 恢复任务状态
+    final userTask = state['userTask'] as String;
+    final savedStageIndex = state['currentStageIndex'] as int;
+    final savedCompletedIds = (state['completedTaskIds'] as List?)?.cast<String>() ?? <String>[];
+    final savedTaskOutputs = Map<String, String>.from(state['taskOutputs'] as Map? ?? {});
+    final savedTasks = (state['tasks'] as List?)?.map((t) => TeamTask.fromJson(Map<String, dynamic>.from(t))).toList() ?? <TeamTask>[];
+    final savedMessages = (state['messages'] as List?)?.map((m) => TeamMessage.fromJson(Map<String, dynamic>.from(m))).toList() ?? <TeamMessage>[];
+    
+    // 恢复状态
+    _currentTeamTask = userTask;
+    _currentStageIndex = savedStageIndex;
+    _completedTaskIds.clear();
+    _completedTaskIds.addAll(savedCompletedIds);
+    _taskOutputs.clear();
+    _taskOutputs.addAll(savedTaskOutputs);
+    _dynamicTasks.clear();
+    _dynamicTasks.addAll(savedTasks);
+    _teamMessageBoard.clear();
+    for (final msg in savedMessages) {
+      _teamMessageBoard.add(msg);
+    }
+    _currentOutputDir = state['outputDir'] as String?;
+    
+    // 检查主管
+    final supervisor = _teamAgents.where((a) => a.id == 'supervisor').firstOrNull;
+    if (supervisor == null) {
+      _sendTeamMessage(
+        fromAgentId: 'system',
+        fromAgentName: '系统',
+        type: TeamMessageType.broadcast,
+        content: '⚠️ 无法恢复：缺少主管角色',
+      );
+      return;
+    }
+    
+    // 初始化取消令牌
+    _teamCancellationToken = CancellationToken();
+    
+    setState(() {
+      _isTeamExecuting = true;
+      _isLoading = true;
+    });
+    
+    _sendTeamMessage(
+      fromAgentId: 'system',
+      fromAgentName: '系统',
+      type: TeamMessageType.broadcast,
+      content: '🔄 恢复任务执行\n任务：$userTask\n已完成：${savedCompletedIds.length}/${savedTasks.length}',
+    );
+    
+    try {
+      // 继续执行工作流
+      await _resumeSupervisorDrivenWorkflow(supervisor, userTask, savedStageIndex);
+      
+      // 成功完成后清除保存的状态
+      await _clearTeamExecutionState();
+    } finally {
+      if (mounted) setState(() {
+        _isTeamExecuting = false;
+        _isLoading = false;
+        _teamCancellationToken = null;
+      });
+    }
+  }
+  
+  /// 恢复执行主管驱动的工作流
+  Future<void> _resumeSupervisorDrivenWorkflow(
+    TeamAgent supervisor,
+    String userTask,
+    int startStageIndex,
+  ) async {
+    // 按阶段分组任务
+    final stages = _groupTasksByStages(_dynamicTasks);
+    
+    _sendTeamMessage(
+      fromAgentId: 'system',
+      fromAgentName: '系统',
+      type: TeamMessageType.broadcast,
+      content: '任务恢复，继续执行第 ${startStageIndex + 1}/${stages.length} 阶段',
+    );
+    
+    // 从中断的阶段继续执行
+    for (int stageIndex = startStageIndex; stageIndex < stages.length; stageIndex++) {
+      // 检查是否被取消
+      if (_teamCancellationToken?.isCancelled ?? false) {
+        // 保存状态
+        await _saveTeamExecutionState(
+          userTask: userTask,
+          currentStageIndex: stageIndex,
+          completedTaskIds: _completedTaskIds.toList(),
+          taskOutputs: _taskOutputs,
+        );
+        return;
+      }
+      
+      _currentStageIndex = stageIndex;
+      final stageTasks = stages[stageIndex];
+      
+      // 过滤掉已完成的任务
+      final pendingTasks = stageTasks.where((t) => !_completedTaskIds.contains(t.id)).toList();
+      if (pendingTasks.isEmpty) {
+        debugPrint('🔄 阶段 ${stageIndex + 1} 所有任务已完成，跳过');
+        continue;
+      }
+      
+      // 主管广播当前阶段任务
+      final taskNames = pendingTasks.map((t) {
+        final agent = _teamAgents.where((a) => a.id == t.assignedTo).firstOrNull;
+        return '${agent?.name ?? "待分配"}: ${t.description}';
+      }).join('\n  ');
+      
+      _sendTeamMessage(
+        fromAgentId: supervisor.id,
+        fromAgentName: supervisor.name,
+        type: TeamMessageType.broadcast,
+        content: '📋 **阶段 ${stageIndex + 1}/${stages.length}**\n当前阶段任务：\n  $taskNames',
+      );
+      
+      // 并行执行当前阶段的所有任务
+      final results = await _executeStageTasks(pendingTasks, _taskOutputs);
+      
+      // 收集结果
+      for (final entry in results.entries) {
+        _taskOutputs[entry.key] = entry.value;
+        _completedTaskIds.add(entry.key);
+      }
+      
+      // 保存进度
+      await _saveTeamExecutionState(
+        userTask: userTask,
+        currentStageIndex: stageIndex + 1,
+        completedTaskIds: _completedTaskIds.toList(),
+        taskOutputs: _taskOutputs,
+      );
+      
+      // 主管汇总当前阶段结果（除了最后一个阶段）
+      if (stageIndex < stages.length - 1) {
+        await _supervisorSummarizeStage(supervisor, stageIndex, pendingTasks, results);
+      }
+    }
+    
+    // 主管输出最终总结
+    await _supervisorFinalSummary(supervisor, userTask, _taskOutputs);
+  }
+  
   /// 执行主管驱动的团队协作（分阶段执行，每个阶段主管介入）
   Future<void> _executeSupervisorDrivenWorkflow(
     TeamAgent supervisor, 
@@ -3257,16 +3581,21 @@ $skillBuffer
       content: '任务分解完成，共 ${stages.length} 个阶段，${_dynamicTasks.length} 个子任务',
     );
     
-    // 用于存储每个任务的输出
-    final taskOutputs = <String, String>{};
-    
     // 逐阶段执行
     for (int stageIndex = 0; stageIndex < stages.length; stageIndex++) {
       // 检查是否被取消
       if (_teamCancellationToken?.isCancelled ?? false) {
+        // 保存状态以便恢复
+        await _saveTeamExecutionState(
+          userTask: userTask,
+          currentStageIndex: stageIndex,
+          completedTaskIds: _completedTaskIds.toList(),
+          taskOutputs: _taskOutputs,
+        );
         return;
       }
       
+      _currentStageIndex = stageIndex;
       final stageTasks = stages[stageIndex];
       
       // 主管广播当前阶段任务
@@ -3283,12 +3612,21 @@ $skillBuffer
       );
       
       // 并行执行当前阶段的所有任务
-      final results = await _executeStageTasks(stageTasks, taskOutputs);
+      final results = await _executeStageTasks(stageTasks, _taskOutputs);
       
       // 收集结果
       for (final entry in results.entries) {
-        taskOutputs[entry.key] = entry.value;
+        _taskOutputs[entry.key] = entry.value;
+        _completedTaskIds.add(entry.key);
       }
+      
+      // 保存进度
+      await _saveTeamExecutionState(
+        userTask: userTask,
+        currentStageIndex: stageIndex + 1,
+        completedTaskIds: _completedTaskIds.toList(),
+        taskOutputs: _taskOutputs,
+      );
       
       // 主管汇总当前阶段结果（除了最后一个阶段）
       if (stageIndex < stages.length - 1) {
@@ -3297,7 +3635,10 @@ $skillBuffer
     }
     
     // 主管输出最终总结
-    await _supervisorFinalSummary(supervisor, userTask, taskOutputs);
+    await _supervisorFinalSummary(supervisor, userTask, _taskOutputs);
+    
+    // 成功完成后清除保存的状态
+    await _clearTeamExecutionState();
   }
   
   /// 按阶段分组任务（基于依赖关系）
@@ -4192,6 +4533,62 @@ $discussionContext
     } finally {
       if (mounted) setState(() => _agentStatus[moderator.id] = 'idle');
     }
+  }
+  
+  /// 显示自定义轮次对话框
+  void _showCustomRoundsDialog() {
+    final controller = TextEditingController(text: '${_discussionConfig?.maxRounds ?? 2}');
+    
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('自定义讨论轮次', style: TextStyle(fontSize: 14)),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TextField(
+              controller: controller,
+              keyboardType: TextInputType.number,
+              decoration: const InputDecoration(
+                labelText: '轮次数 (1-10)',
+                hintText: '输入 1-10 之间的数字',
+                border: OutlineInputBorder(),
+              ),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              '轮次越多，讨论越深入，但耗时也越长',
+              style: TextStyle(fontSize: 10, color: Colors.grey.shade600),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: const Text('取消'),
+          ),
+          ElevatedButton(
+            onPressed: () {
+              final rounds = int.tryParse(controller.text) ?? 2;
+              if (rounds >= 1 && rounds <= 10) {
+                setState(() {
+                  _discussionConfig = DiscussionConfig(
+                    topic: _discussionConfig?.topic ?? '',
+                    maxRounds: rounds,
+                  );
+                });
+                Navigator.of(ctx).pop();
+              }
+            },
+            style: ElevatedButton.styleFrom(
+              backgroundColor: const Color(0xFF9C27B0),
+              foregroundColor: Colors.white,
+            ),
+            child: const Text('确定'),
+          ),
+        ],
+      ),
+    );
   }
   
   /// 结束讨论
