@@ -145,7 +145,7 @@ class PetEngine extends ChangeNotifier {
       _healthReminderInterval = box.get('health_reminder_interval', defaultValue: 30) as int;
       _alwaysOnTop = box.get('always_on_top', defaultValue: true) as bool;
       _opacity = (box.get('opacity', defaultValue: 1.0) as num).toDouble();
-      _scale = (box.get('scale', defaultValue: 1.0) as num).toDouble();
+      _scale = (box.get('scale', defaultValue: 0.75) as num).toDouble();
     } catch (e) {
       debugPrint('🦢 加载设置失败: $e');
     }

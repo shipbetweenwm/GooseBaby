@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:window_manager/window_manager.dart';
+import 'package:screen_retriever/screen_retriever.dart';
 import '../../core/pet_engine.dart';
 import '../../core/achievement_manager.dart';
 import '../../ai/llm_manager.dart';
@@ -102,11 +103,11 @@ class _PetWindowState extends State<PetWindow> with TickerProviderStateMixin, Wi
   /// 宠物区域原始窗口高度（气泡 + 视频 + 底部空间）
   // ignore: unused_field
   static const double _petWindowHeight = 400;
-  /// 面板窗口高度（屏幕高度 * 0.618，最小 550，最大 900）
+  /// 面板窗口高度（屏幕高度 * 0.618）
   double get _panelWindowHeight {
     final screenH = _screenSize.height;
     final h = screenH * 0.618;
-    return h.clamp(550.0, 900.0);
+    return h.clamp(550.0, screenH * 0.9); // 最小 550，最大不超过屏幕 90%
   }
 
 
@@ -223,9 +224,14 @@ class _PetWindowState extends State<PetWindow> with TickerProviderStateMixin, Wi
       if (savedMode != null) {
         _chatWorkMode = savedMode;
       }
-      // 获取屏幕尺寸用于面板自适应
-      final mediaQuery = MediaQuery.of(context);
-      _screenSize = mediaQuery.size;
+      // 获取屏幕尺寸用于面板自适应（用 screen_retriever 获取真实屏幕尺寸）
+      try {
+        final primaryScreen = await screenRetriever.getPrimaryDisplay();
+        _screenSize = primaryScreen.size;
+        debugPrint('🦢 屏幕尺寸: ${_screenSize.width} x ${_screenSize.height}');
+      } catch (e) {
+        debugPrint('🦢 获取屏幕尺寸失败，使用默认值: $e');
+      }
 
       // 获取初始窗口高度（用于关闭面板时恢复）
       try {
@@ -679,20 +685,24 @@ class _PetWindowState extends State<PetWindow> with TickerProviderStateMixin, Wi
   /// 显示成就达成庆祝动画（烟花）
   void _showAchievementCelebration(Achievement achievement) {
     if (!mounted) return;
-    setState(() {
-      _showFirework = true;
-      _fireworkAchievementName = achievement.name;
-      _fireworkAchievementIcon = achievement.icon;
-    });
+    // 用 addPostFrameCallback 确保不在 build 过程中调用 setState
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      setState(() {
+        _showFirework = true;
+        _fireworkAchievementName = achievement.name;
+        _fireworkAchievementIcon = achievement.icon;
+      });
 
-    // 发放成就奖励（金币+经验）
-    if (achievement.rewardCoins > 0 || achievement.rewardExp > 0) {
-      final engine = context.read<PetEngine>();
-      engine.grantAchievementReward(
-        coins: achievement.rewardCoins,
-        exp: achievement.rewardExp,
-      );
-    }
+      // 发放成就奖励（金币+经验）
+      if (achievement.rewardCoins > 0 || achievement.rewardExp > 0) {
+        final engine = context.read<PetEngine>();
+        engine.grantAchievementReward(
+          coins: achievement.rewardCoins,
+          exp: achievement.rewardExp,
+        );
+      }
+    });
   }
 
   @override

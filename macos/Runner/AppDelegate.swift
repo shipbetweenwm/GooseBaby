@@ -3,8 +3,11 @@ import FlutterMacOS
 
 @main
 class AppDelegate: FlutterAppDelegate {
+  private var transparencyApplied = false
+
   override func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
-    return true
+    // 返回 false：窗口隐藏后应用不退出，系统托盘继续驻留
+    return false
   }
 
   override func applicationSupportsSecureRestorableState(_ app: NSApplication) -> Bool {
@@ -12,17 +15,26 @@ class AppDelegate: FlutterAppDelegate {
   }
 
   override func applicationDidFinishLaunching(_ notification: Notification) {
-    // 延迟执行，确保 Flutter 引擎和 FlutterView 完全初始化后再设置透明
+    // 延迟确保 Flutter 引擎完全初始化
     DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-      if let window = NSApplication.shared.mainWindow {
-        window.isOpaque = false
-        window.backgroundColor = .clear
-        window.hasShadow = false
-
-        // 递归设置所有子 view 的 layer 为透明
-        self.makeViewTransparent(window.contentView)
-      }
+      self.applyTransparency()
     }
+  }
+
+  private func applyTransparency() {
+    if transparencyApplied { return }
+    guard let window = NSApplication.shared.windows.first else {
+      // 窗口还没创建，稍后重试
+      DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+        self.applyTransparency()
+      }
+      return
+    }
+    window.isOpaque = false
+    window.backgroundColor = .clear
+    window.hasShadow = false
+    makeViewTransparent(window.contentView)
+    transparencyApplied = true
   }
 
   private func makeViewTransparent(_ view: NSView?) {

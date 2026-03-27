@@ -93,6 +93,9 @@ class AgentLoop {
     final retryCountMap = <String, int>{}; // 工具名 → 重试次数
 
     for (var turn = 0; turn < maxTurns; turn++) {
+      // ── 每轮开始前检查取消 ──
+      cancellationToken?.throwIfCancelled();
+      
       debugPrint('🔄 [Agent 第${turn + 1}轮] 发送 ${workingMessages.length} 条消息');
 
       // ── 调用 LLM ──
@@ -101,6 +104,9 @@ class AgentLoop {
         config: config,
         tools: tools,
       );
+      
+      // ── LLM 返回后再检查取消（等待期间用户可能已点停止） ──
+      cancellationToken?.throwIfCancelled();
 
       // ── 检查是否需要执行工具 ──
       if (!response.hasToolCalls) {

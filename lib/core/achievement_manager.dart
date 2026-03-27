@@ -364,8 +364,10 @@ class AchievementManager extends ChangeNotifier {
     );
     debugPrint('🏆 成就解锁: ${achievement.name} (${achievement.icon})');
 
-    // 触发回调（播放烟花动画）
-    onAchievementUnlocked?.call(achievement);
+    // 延迟触发回调（避免在 notifyListeners/build 期间调用 setState）
+    Future.microtask(() {
+      onAchievementUnlocked?.call(achievement);
+    });
   }
 
   /// 某个成就是否已解锁
