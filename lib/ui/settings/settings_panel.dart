@@ -7,7 +7,7 @@ import 'package:hive/hive.dart';
 import 'package:path/path.dart' as p;
 import '../../ai/llm_manager.dart';
 import '../../ai/memory/memory_manager.dart';
-import '../../ai/mcp/mcp.dart';
+
 import '../../core/pet_engine.dart';
 import '../../models/models.dart';
 import '../../skills/skill_manager.dart';
@@ -33,7 +33,7 @@ class _SettingsPanelState extends State<SettingsPanel> {
   int _selectedTab = 0;
   String _workingDir = '';
 
-  final _tabs = const ['🧠 AI模型', '🎮 技能', '🔌 MCP', '⏰ 定时任务', '🦢 宠物', '📋 关于'];
+  final _tabs = const ['🧠 AI模型', '🎮 技能', '⏰ 定时任务', '🦢 宠物', '📋 关于'];
 
   /// 气泡回调便捷方法
   void _bubble(String message) => widget.onShowBubble?.call(message);
@@ -218,12 +218,10 @@ class _SettingsPanelState extends State<SettingsPanel> {
       case 1:
         return _SkillSettings();
       case 2:
-        return _McpSettings(onShowBubble: _bubble);
-      case 3:
         return _ScheduledTaskSettings();
-      case 4:
+      case 3:
         return _PetSettings();
-      case 5:
+      case 4:
         return _AboutPanel(onShowBubble: _bubble);
       default:
         return const SizedBox();
@@ -582,6 +580,15 @@ class _SkillSettingsState extends State<_SkillSettings> {
     }
 
     final categories = skillManager.getSkillsByCategory();
+    
+    // 过滤掉 MCP 技能（不显示在技能板中）
+    final filteredCategories = <String, List<GooseSkill>>{};
+    categories.forEach((category, skills) {
+      final filtered = skills.where((s) => s.id != 'mcp_tools').toList();
+      if (filtered.isNotEmpty) {
+        filteredCategories[category] = filtered;
+      }
+    });
 
     return Column(
       children: [
@@ -620,7 +627,7 @@ class _SkillSettingsState extends State<_SkillSettings> {
         Expanded(
           child: ListView(
             padding: const EdgeInsets.all(16),
-            children: categories.entries.map((entry) {
+            children: filteredCategories.entries.map((entry) {
               return Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [

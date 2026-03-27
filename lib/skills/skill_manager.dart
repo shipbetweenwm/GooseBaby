@@ -10,11 +10,11 @@ import 'think_skill.dart';
 import 'memory_skill.dart';
 import 'schedule_task_skill.dart';
 import 'scheduled_task.dart';
-import 'web_skill.dart';
 import 'web_fetch_skill.dart';
 import 'batch_file_skill.dart';
 import 'web_search_skill.dart';
-import 'browser_automation_skill.dart';
+import 'news_skill.dart';
+import 'browser_skill.dart';
 import 'mcp_tool_skill.dart';
 import '../ai/agent/sub_agent_skill.dart';
 import '../ai/agent/sub_agent_types.dart';
@@ -82,10 +82,9 @@ class SkillManager extends ChangeNotifier {
     register(WriteFileSkill());
     register(ReadFileSkill());
     register(ScheduleTaskSkill());
-    register(WebInteractSkill()); // Web 浏览器交互技能
-    register(WebFetchSkill());    // 网页抓取技能
-    register(BatchFileSkill());   // 批量文件操作技能
-    register(BrowserAutomationSkill()); // 浏览器自动化技能（增强版）
+    register(BrowserSkill());    // 统一的浏览器自动化技能
+    register(WebFetchSkill());   // 网页抓取技能
+    register(BatchFileSkill());  // 批量文件操作技能
     
     // 注册 MCP 工具技能（动态注入 MCP 服务器的工具）
     _mcpToolSkill = McpToolSkill();
@@ -95,6 +94,9 @@ class SkillManager extends ChangeNotifier {
     _webSearchSkill = WebSearchSkill();
     register(_webSearchSkill!);
 
+    // 注册新闻获取技能
+    register(NewsSkill());
+
     // 注册 Sub-Agent 技能（需要在运行时注入回调）
     _subAgentSkill = SubAgentSkill();
     register(_subAgentSkill!);
@@ -103,7 +105,7 @@ class SkillManager extends ChangeNotifier {
     _agentTeamsSkill = AgentTeamsSkill(_subAgentSkill!);
     register(_agentTeamsSkill!);
 
-    debugPrint('🦢 已注册内置技能: think, save_memory, shell_exec, write_file, read_file, schedule_task, web_interact, web_fetch, batch_file, web_search, browser_automation, mcp_tools, spawn_sub_agent, spawn_agent_team');
+    debugPrint('🦢 已注册内置技能: think, save_memory, shell_exec, write_file, read_file, schedule_task, browser, web_fetch, batch_file, web_search, news, mcp_tools, spawn_sub_agent, spawn_agent_team');
   }
   
   /// 配置 Sub-Agent 技能的回调
@@ -124,11 +126,6 @@ class SkillManager extends ChangeNotifier {
     void Function(TeamMessage message)? onMessage,
   }) {
     _agentTeamsSkill?.onMessage = onMessage;
-  }
-  
-  /// 配置 Web 搜索技能的 API Key
-  void configureWebSearchSkill(String apiKey) {
-    _webSearchSkill?.apiKey = apiKey;
   }
 
   /// 获取 SaveMemorySkill 实例（用于外部注入 MemoryManager）

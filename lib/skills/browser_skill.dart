@@ -5,17 +5,53 @@ import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import 'skill_base.dart';
+import 'skill_file_utils.dart';
 
-/// 浏览器自动化技能（增强版）
+/// 浏览器自动化技能（统一版）
 /// 
-/// 提供完整的浏览器自动化能力：
+/// 整合了基础 Web 交互和高级浏览器自动化功能
+/// 
+/// 【基础操作】
+/// - open/navigate: 打开网页
+/// - screenshot: 截图（整页/元素）
+/// - click: 点击元素
+/// - fill: 填写表单
+/// - scrape: 抓取数据
+/// - scroll: 滚动页面
+/// - wait: 等待元素/时间
+/// 
+/// 【高级操作】
+/// - type: 模拟打字（带延迟）
+/// - hover: 悬停元素
+/// - select: 下拉选择
+/// - upload: 文件上传
+/// - download: 文件下载
+/// - keyboard: 键盘操作
+/// - mouse: 鼠标操作
+/// - drag: 拖拽
+/// - iframe: iframe 内操作
+/// - cookies: Cookie 管理
+/// - evaluate: 执行 JavaScript
+/// - pdf: 生成 PDF
+/// - multi: 多步骤链式操作
+/// 
+/// 【智能定位】
+/// - selector: CSS 选择器
+/// - text: 文本内容
+/// - role: ARIA 角色（button/link/heading）
+/// - label: 标签文本
+/// - placeholder: 占位符文本
+/// - position: 坐标位置
+/// 
+/// 【高级特性】
 /// - 持久化会话：跨多个操作保持浏览器状态
-/// - 多步骤操作：支持链式执行
-/// - 高级交互：悬停、拖拽、键盘操作
-/// - 文件上传、iframe、Cookie 管理
-/// - 智能元素定位：文本、角色、标签等
-/// - 网络拦截：监控请求和响应
-class BrowserAutomationSkill extends GooseSkill {
+/// - 网络拦截：监控/阻止请求
+/// - 用户代理/时区/语言设置
+/// 
+/// 【前提条件】
+/// - 安装 Node.js: https://nodejs.org/
+/// - 安装 Playwright: npx playwright install chromium
+class BrowserSkill extends GooseSkill {
   /// 浏览器会话管理器
   static final BrowserSessionManager _sessionManager = BrowserSessionManager();
   
@@ -114,15 +150,14 @@ class BrowserAutomationSkill extends GooseSkill {
     }
   }
 
-  // ==================== 脚本生成方法 ====================
+  // ==================== 脚本生成 ====================
   
   String _generateScript(String action, Map<String, dynamic> args) {
     final buffer = StringBuffer();
     final sessionId = args['session_id'] as String?;
-    final keepAlive = args['keep_alive'] as bool? ?? false;
     
     // 标准头部
-    buffer.writeln("const { chromium, firefox, webkit } = require('playwright');");
+    buffer.writeln("const { chromium } = require('playwright');");
     buffer.writeln("const path = require('path');");
     buffer.writeln('');
     buffer.writeln('(async () => {');
@@ -140,19 +175,13 @@ class BrowserAutomationSkill extends GooseSkill {
       if (args['user_agent'] != null) {
         buffer.writeln("      userAgent: '${args['user_agent']}',");
       }
-      if (args['locale'] != null) {
-        buffer.writeln("      locale: '${args['locale']}',");
-      }
-      if (args['timezone'] != null) {
-        buffer.writeln("      timezoneId: '${args['timezone']}',");
-      }
       buffer.writeln("    });");
       buffer.writeln("    const pages = browser.pages();");
       buffer.writeln("    page = pages.length > 0 ? pages[0] : await browser.newPage();");
     } else {
       buffer.writeln("    // 新建浏览器实例");
       buffer.writeln("    browser = await chromium.launch({");
-      buffer.writeln("      headless: ${args['headless'] ?? false},");
+      buffer.writeln("      headless: ${args['headless'] ?? true},");
       if (args['slow_mo'] != null) {
         buffer.writeln("      slowMo: ${args['slow_mo']},");
       }
@@ -162,19 +191,13 @@ class BrowserAutomationSkill extends GooseSkill {
       if (args['user_agent'] != null) {
         buffer.writeln("      userAgent: '${args['user_agent']}',");
       }
-      if (args['locale'] != null) {
-        buffer.writeln("      locale: '${args['locale']}',");
-      }
-      if (args['timezone'] != null) {
-        buffer.writeln("      timezoneId: '${args['timezone']}',");
-      }
       if (args['ignore_https_errors'] == true) {
         buffer.writeln("      ignoreHTTPSErrors: true,");
       }
       buffer.writeln("    });");
       
       // 设置网络拦截
-      if (args['intercept_requests'] == true || args['block_resources'] != null) {
+      if (args['block_resources'] != null) {
         _generateNetworkInterception(buffer, args);
       }
       
@@ -183,29 +206,14 @@ class BrowserAutomationSkill extends GooseSkill {
         _generateSetCookies(buffer, args['cookies']);
       }
       
-      // 设置认证
-      if (args['basic_auth'] != null) {
-        final auth = args['basic_auth'] as Map<String, dynamic>;
-        buffer.writeln("    await context.setHTTPCredentials({");
-        buffer.writeln("      username: '${auth['username']}',");
-        buffer.writeln("      password: '${auth['password']}',");
-        buffer.writeln("    });");
-      }
-      
-      // 设置额外的请求头
-      if (args['extra_headers'] != null) {
-        final headers = args['extra_headers'] as Map<String, dynamic>;
-        buffer.writeln("    await context.setExtraHTTPHeaders(${jsonEncode(headers)});");
-      }
-      
       buffer.writeln("    page = await context.newPage();");
     }
     
-    // 设置默认超时
     buffer.writeln("    page.setDefaultTimeout(${args['timeout'] ?? 30000});");
     
     // 根据操作类型生成脚本
     switch (action) {
+      case 'open':
       case 'navigate':
         _generateNavigateAction(buffer, args);
         break;
@@ -275,13 +283,9 @@ class BrowserAutomationSkill extends GooseSkill {
     
     // 会话保存或关闭
     buffer.writeln('  } catch (error) {');
-    buffer.writeln("    console.log(JSON.stringify({ success: false, error: error.message, stack: error.stack }));");
+    buffer.writeln("    console.log(JSON.stringify({ success: false, error: error.message }));");
     buffer.writeln('  } finally {');
-    if (keepAlive && sessionId != null) {
-      buffer.writeln("    // 保持会话活跃");
-    } else if (args['keep_alive'] == true) {
-      buffer.writeln("    // 保持浏览器打开");
-    } else {
+    if (args['keep_alive'] != true) {
       buffer.writeln("    if (browser) await browser.close();");
     }
     buffer.writeln('  }');
@@ -294,8 +298,6 @@ class BrowserAutomationSkill extends GooseSkill {
   
   void _generateNetworkInterception(StringBuffer buffer, Map<String, dynamic> args) {
     buffer.writeln("    await context.route('**', async route => {");
-    
-    // 阻止特定资源类型
     if (args['block_resources'] != null) {
       final resources = (args['block_resources'] as List).map((r) => "'$r'").join(', ');
       buffer.writeln("      const blockedTypes = [$resources];");
@@ -304,16 +306,7 @@ class BrowserAutomationSkill extends GooseSkill {
       buffer.writeln("        return;");
       buffer.writeln("      }");
     }
-    
-    // 请求拦截
-    if (args['intercept_requests'] == true) {
-      buffer.writeln("      const request = route.request();");
-      buffer.writeln("      // 可以在这里修改请求");
-      buffer.writeln("      await route.continue();");
-    } else {
-      buffer.writeln("      await route.continue();");
-    }
-    
+    buffer.writeln("      await route.continue();");
     buffer.writeln("    });");
   }
   
@@ -341,7 +334,6 @@ class BrowserAutomationSkill extends GooseSkill {
     buffer.writeln("      timeout: ${args['timeout'] ?? 60000},");
     buffer.writeln("    });");
     
-    // 等待特定条件
     if (args['wait_for'] != null) {
       buffer.writeln("    await page.waitForSelector('${args['wait_for']}', { timeout: ${args['timeout'] ?? 30000} });");
     }
@@ -360,37 +352,25 @@ class BrowserAutomationSkill extends GooseSkill {
     final label = args['label'] as String?;
     final position = args['position'] as Map<String, dynamic>?;
     
-    // 智能定位元素
     if (text != null) {
-      buffer.writeln("    await page.getByText('${_escapeJs(text)}').first().click({");
+      buffer.writeln("    await page.getByText('${_escapeJs(text)}').first().click();");
     } else if (role != null) {
       buffer.writeln("    await page.getByRole('$role'");
       if (args['name'] != null) {
         buffer.writeln(", { name: '${_escapeJs(args['name'] as String)}' }");
       }
-      buffer.writeln(").first().click({");
+      buffer.writeln(").first().click();");
     } else if (label != null) {
-      buffer.writeln("    await page.getByLabel('${_escapeJs(label)}').first().click({");
+      buffer.writeln("    await page.getByLabel('${_escapeJs(label)}').first().click();");
     } else if (position != null) {
-      buffer.writeln("    await page.mouse.click(${position['x']}, ${position['y']}, {");
+      buffer.writeln("    await page.mouse.click(${position['x']}, ${position['y']});");
     } else if (selector != null) {
-      buffer.writeln("    await page.click('${_escapeJs(selector)}', {");
+      buffer.writeln("    await page.click('${_escapeJs(selector)}');");
     } else {
       buffer.writeln("    console.log(JSON.stringify({ success: false, error: '需要 selector、text、role、label 或 position 参数' }));");
-      buffer.writeln("    return;");
       return;
     }
     
-    // 点击选项
-    buffer.writeln("      button: '${args['button'] ?? 'left'}',");
-    buffer.writeln("      clickCount: ${args['click_count'] ?? 1},");
-    buffer.writeln("      delay: ${args['delay'] ?? 0},");
-    if (args['force'] == true) {
-      buffer.writeln("      force: true,");
-    }
-    buffer.writeln("    });");
-    
-    // 点击后等待
     if (args['wait_for_navigation'] == true) {
       buffer.writeln("    await page.waitForLoadState('domcontentloaded');");
     } else if (args['wait_for'] != null) {
@@ -411,7 +391,6 @@ class BrowserAutomationSkill extends GooseSkill {
     final value = args['value'] as String? ?? '';
     final escapedValue = _escapeJs(value);
     
-    // 智能定位
     if (label != null) {
       buffer.writeln("    await page.getByLabel('${_escapeJs(label)}').fill('$escapedValue');");
     } else if (placeholder != null) {
@@ -423,13 +402,6 @@ class BrowserAutomationSkill extends GooseSkill {
       return;
     }
     
-    // 清空后填写
-    if (args['clear_first'] == true) {
-      buffer.writeln("    await page.fill('${_escapeJs(selector ?? '')}', '');");
-      buffer.writeln("    await page.fill('${_escapeJs(selector ?? '')}', '$escapedValue');");
-    }
-    
-    // 提交表单
     if (args['press_enter'] == true) {
       buffer.writeln("    await page.keyboard.press('Enter');");
       buffer.writeln("    await page.waitForLoadState('domcontentloaded');");
@@ -458,7 +430,6 @@ class BrowserAutomationSkill extends GooseSkill {
     if (selector != null) {
       buffer.writeln("    await page.type('${_escapeJs(selector)}', '$escapedText', { delay: $delay });");
     } else {
-      // 直接在当前焦点元素打字
       buffer.writeln("    await page.keyboard.type('$escapedText', { delay: $delay });");
     }
     
@@ -480,11 +451,6 @@ class BrowserAutomationSkill extends GooseSkill {
       return;
     }
     
-    // 悬停后等待
-    if (args['wait_for'] != null) {
-      buffer.writeln("    await page.waitForSelector('${args['wait_for']}', { timeout: ${args['timeout'] ?? 30000} });");
-    }
-    
     buffer.writeln("    console.log(JSON.stringify({ success: true, message: '已悬停' }));");
   }
   
@@ -497,23 +463,17 @@ class BrowserAutomationSkill extends GooseSkill {
     final toBottom = args['to_bottom'] as bool? ?? false;
     
     if (selector != null) {
-      // 滚动到元素可见
       buffer.writeln("    await page.locator('${_escapeJs(selector)}').scrollIntoViewIfNeeded();");
     } else if (toBottom == true) {
-      // 滚动到底部
       buffer.writeln("    await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));");
     } else {
-      // 按方向和距离滚动
       final scrollY = direction == 'up' ? '-$distance' : '$distance';
       buffer.writeln("    await page.evaluate(() => window.scrollBy(0, $scrollY));");
     }
     
-    // 等待滚动完成
     buffer.writeln("    await page.waitForTimeout(300);");
-    
     buffer.writeln("    const scrollY = await page.evaluate(() => window.scrollY);");
-    buffer.writeln("    const scrollHeight = await page.evaluate(() => document.body.scrollHeight);");
-    buffer.writeln("    console.log(JSON.stringify({ success: true, scroll_position: scrollY, page_height: scrollHeight }));");
+    buffer.writeln("    console.log(JSON.stringify({ success: true, scroll_position: scrollY }));");
   }
   
   // ==================== 截图操作 ====================
@@ -522,7 +482,6 @@ class BrowserAutomationSkill extends GooseSkill {
     final outputPath = args['output_path'] as String?;
     final selector = args['selector'] as String?;
     final fullPage = args['full_page'] as bool? ?? true;
-    final mask = args['mask'] as List<dynamic>?;
     
     buffer.writeln("    const screenshotPath = '$outputPath' || path.join(process.cwd(), 'screenshot_${DateTime.now().millisecondsSinceEpoch}.png');");
     
@@ -531,23 +490,13 @@ class BrowserAutomationSkill extends GooseSkill {
       buffer.writeln("    if (element) {");
       buffer.writeln("      await element.screenshot({ path: screenshotPath });");
       buffer.writeln("    } else {");
-      buffer.writeln("      console.log(JSON.stringify({ success: false, error: '元素未找到: $selector' }));");
+      buffer.writeln("      console.log(JSON.stringify({ success: false, error: '元素未找到' }));");
       buffer.writeln("      return;");
       buffer.writeln("    }");
     } else {
       buffer.writeln("    await page.screenshot({");
       buffer.writeln("      path: screenshotPath,");
       buffer.writeln("      fullPage: $fullPage,");
-      if (mask != null && mask.isNotEmpty) {
-        buffer.writeln("      mask: [");
-        for (final sel in mask) {
-          buffer.writeln("        page.locator('${_escapeJs(sel.toString())}'),");
-        }
-        buffer.writeln("      ],");
-      }
-      if (args['animations'] != null) {
-        buffer.writeln("      animations: '${args['animations']}',");
-      }
       buffer.writeln("    });");
     }
     
@@ -565,22 +514,20 @@ class BrowserAutomationSkill extends GooseSkill {
     final extractText = args['extract_text'] as bool? ?? false;
     
     if (selectors != null && selectors.isNotEmpty) {
-      // 多选择器批量抓取
       buffer.writeln("    const results = {};");
       for (final sel in selectors) {
         final selStr = sel.toString();
-        buffer.writeln("    results['$selStr'] = await page.\$\$('${_escapeJs(selStr)}').then(els => Promise.all(els.map(el => el.textContent().then(t => t?.trim()))));");
+        buffer.writeln("    results['$selStr'] = await page.\$\$('${_escapeJs(selStr)}').then(els => Promise.all(els.map(el => el.textContent())));");
       }
       buffer.writeln("    console.log(JSON.stringify({ success: true, data: results }));");
     } else if (selector != null) {
-      // 单选择器抓取
       if (multiple == true) {
         if (attribute != null) {
           buffer.writeln("    const elements = await page.\$\$('${_escapeJs(selector)}');");
           buffer.writeln("    const results = await Promise.all(elements.map(el => el.getAttribute('$attribute')));");
         } else {
           buffer.writeln("    const elements = await page.\$\$('${_escapeJs(selector)}');");
-          buffer.writeln("    const results = await Promise.all(elements.map(el => el.textContent().then(t => t?.trim())));");
+          buffer.writeln("    const results = await Promise.all(elements.map(el => el.textContent()));");
         }
         buffer.writeln("    console.log(JSON.stringify({ success: true, data: results.filter(r => r) }));");
       } else {
@@ -594,13 +541,10 @@ class BrowserAutomationSkill extends GooseSkill {
         buffer.writeln("    console.log(JSON.stringify({ success: true, data: result }));");
       }
     } else if (extractText == true) {
-      // 提取整页文本
       buffer.writeln("    const text = await page.evaluate(() => document.body.innerText);");
       buffer.writeln("    const title = await page.title();");
-      buffer.writeln("    const html = await page.content();");
-      buffer.writeln("    console.log(JSON.stringify({ success: true, title, text, html_length: html.length }));");
+      buffer.writeln("    console.log(JSON.stringify({ success: true, title, text }));");
     } else if (extractLinks == true) {
-      // 提取所有链接
       buffer.writeln("    const links = await page.evaluate(() => {");
       buffer.writeln("      return Array.from(document.querySelectorAll('a')).map(a => ({");
       buffer.writeln("        text: a.textContent?.trim(),");
@@ -609,11 +553,9 @@ class BrowserAutomationSkill extends GooseSkill {
       buffer.writeln("    });");
       buffer.writeln("    console.log(JSON.stringify({ success: true, links }));");
     } else {
-      // 抓取页面结构
       buffer.writeln("    const content = await page.content();");
       buffer.writeln("    const title = await page.title();");
-      buffer.writeln("    const url = page.url();");
-      buffer.writeln("    console.log(JSON.stringify({ success: true, title, url, html_length: content.length }));");
+      buffer.writeln("    console.log(JSON.stringify({ success: true, title, html_length: content.length }));");
     }
   }
   
@@ -663,16 +605,14 @@ class BrowserAutomationSkill extends GooseSkill {
     final savePath = args['save_path'] as String?;
     
     if (downloadSelector != null) {
-      // 点击下载链接并等待下载
       buffer.writeln("    const [ download ] = await Promise.all([");
       buffer.writeln("      page.waitForEvent('download'),");
       buffer.writeln("      page.click('${_escapeJs(downloadSelector)}'),");
       buffer.writeln("    ]);");
       buffer.writeln("    const downloadPath = '$savePath' || path.join(process.cwd(), download.suggestedFilename());");
       buffer.writeln("    await download.saveAs(downloadPath);");
-      buffer.writeln("    console.log(JSON.stringify({ success: true, download_path: downloadPath, filename: download.suggestedFilename() }));");
+      buffer.writeln("    console.log(JSON.stringify({ success: true, download_path: downloadPath }));");
     } else if (url != null) {
-      // 直接下载 URL
       buffer.writeln("    const response = await page.request.get('$url');");
       buffer.writeln("    const downloadPath = '$savePath' || path.join(process.cwd(), 'download_${DateTime.now().millisecondsSinceEpoch}');");
       buffer.writeln("    await response.body().then(body => require('fs').writeFileSync(downloadPath, body));");
@@ -693,7 +633,7 @@ class BrowserAutomationSkill extends GooseSkill {
     
     if (waitTime != null) {
       buffer.writeln("    await page.waitForTimeout($waitTime);");
-      buffer.writeln("    console.log(JSON.stringify({ success: true, message: '等待 $waitTime ms 完成' }));");
+      buffer.writeln("    console.log(JSON.stringify({ success: true, message: '等待完成' }));");
     } else if (selector != null) {
       final state = args['state'] as String? ?? 'visible';
       buffer.writeln("    await page.waitForSelector('${_escapeJs(selector)}', { state: '$state', timeout: ${args['timeout'] ?? 30000} });");
@@ -723,20 +663,17 @@ class BrowserAutomationSkill extends GooseSkill {
     final delay = args['delay'] as int? ?? 50;
     
     if (key != null) {
-      // 单个按键
       if (modifier != null) {
         buffer.writeln("    await page.keyboard.press('$modifier+$key');");
       } else {
         buffer.writeln("    await page.keyboard.press('$key');");
       }
     } else if (keys != null) {
-      // 多个按键
       final keyList = (keys as String).split(',');
       for (final k in keyList) {
         buffer.writeln("    await page.keyboard.press('${k.trim()}');");
       }
     } else if (text != null) {
-      // 输入文本
       buffer.writeln("    await page.keyboard.type('${_escapeJs(text)}', { delay: $delay });");
     } else {
       buffer.writeln("    console.log(JSON.stringify({ success: false, error: '需要 key、keys 或 text 参数' }));");
@@ -811,7 +748,6 @@ class BrowserAutomationSkill extends GooseSkill {
     buffer.writeln("    const frame = page.frameLocator('${_escapeJs(iframeSelector)}');");
     
     if (subAction != null && subArgs != null) {
-      buffer.writeln("    // 在 iframe 内执行: $subAction");
       switch (subAction) {
         case 'click':
           buffer.writeln("    await frame.locator('${_escapeJs(subArgs['selector'] as String)}').click();");
@@ -876,22 +812,12 @@ class BrowserAutomationSkill extends GooseSkill {
   void _generatePdfAction(StringBuffer buffer, Map<String, dynamic> args) {
     final outputPath = args['output_path'] as String?;
     final format = args['format'] as String? ?? 'A4';
-    final printBackground = args['print_background'] as bool? ?? true;
-    final margin = args['margin'] as Map<String, dynamic>?;
     
     buffer.writeln("    const pdfPath = '$outputPath' || path.join(process.cwd(), 'page_${DateTime.now().millisecondsSinceEpoch}.pdf');");
     buffer.writeln("    await page.pdf({");
     buffer.writeln("      path: pdfPath,");
     buffer.writeln("      format: '$format',");
-    buffer.writeln("      printBackground: $printBackground,");
-    if (margin != null) {
-      buffer.writeln("      margin: {");
-      buffer.writeln("        top: '${margin['top'] ?? '20px'}',");
-      buffer.writeln("        bottom: '${margin['bottom'] ?? '20px'}',");
-      buffer.writeln("        left: '${margin['left'] ?? '20px'}',");
-      buffer.writeln("        right: '${margin['right'] ?? '20px'}',");
-      buffer.writeln("      },");
-    }
+    buffer.writeln("      printBackground: true,");
     buffer.writeln("    });");
     buffer.writeln("    console.log(JSON.stringify({ success: true, pdf_path: pdfPath, message: 'PDF 已生成' }));");
   }
@@ -963,11 +889,6 @@ class BrowserAutomationSkill extends GooseSkill {
   // ==================== 关闭会话 ====================
   
   void _generateCloseAction(StringBuffer buffer, Map<String, dynamic> args) {
-    final sessionId = args['session_id'] as String?;
-    
-    if (sessionId != null) {
-      buffer.writeln("    // 关闭会话: $sessionId");
-    }
     buffer.writeln("    if (browser) await browser.close();");
     buffer.writeln("    console.log(JSON.stringify({ success: true, message: '浏览器已关闭' }));");
   }
@@ -986,36 +907,35 @@ class BrowserAutomationSkill extends GooseSkill {
   // ==================== Skill 接口实现 ====================
   
   @override
-  String get id => 'browser_automation';
+  String get id => 'browser';
 
   @override
   String get name => '浏览器自动化';
 
   @override
   String get description =>
-      '完整的浏览器自动化能力，基于 Playwright。\n\n'
-      '【支持的操作】\n'
-      '- navigate: 导航到网页\n'
-      '- click: 点击元素（支持文本/角色/标签定位）\n'
-      '- fill: 填写表单（支持 label/placeholder 定位）\n'
-      '- type: 模拟打字（带延迟）\n'
-      '- hover: 悬停元素\n'
-      '- scroll: 滚动页面\n'
+      '统一的浏览器自动化技能，基于 Playwright。\n\n'
+      '【基础操作】\n'
+      '- open/navigate: 打开网页\n'
       '- screenshot: 截图（整页/元素）\n'
+      '- click: 点击元素\n'
+      '- fill: 填写表单\n'
       '- scrape: 抓取数据\n'
+      '- scroll: 滚动页面\n'
+      '- wait: 等待元素/时间\n\n'
+      '【高级操作】\n'
+      '- type: 模拟打字\n'
+      '- hover: 悬停元素\n'
       '- select: 下拉选择\n'
-      '- upload: 文件上传\n'
-      '- download: 文件下载\n'
-      '- wait: 智能等待\n'
-      '- keyboard: 键盘操作\n'
-      '- mouse: 鼠标操作\n'
+      '- upload/download: 文件上传下载\n'
+      '- keyboard/mouse: 键盘鼠标操作\n'
       '- drag: 拖拽\n'
       '- iframe: iframe 内操作\n'
       '- cookies: Cookie 管理\n'
       '- evaluate: 执行 JavaScript\n'
       '- pdf: 生成 PDF\n'
       '- multi: 多步骤链式操作\n\n'
-      '【智能定位】支持 selector、text、role、label、placeholder 等多种方式\n'
+      '【智能定位】支持 selector、text、role、label、placeholder、position\n'
       '【前提条件】npx playwright install chromium';
 
   @override
@@ -1028,7 +948,7 @@ class BrowserAutomationSkill extends GooseSkill {
   List<SkillParam> get params => [
     const SkillParam(
       name: 'action',
-      description: '操作类型: navigate/click/fill/type/hover/scroll/screenshot/scrape/select/upload/download/wait/keyboard/mouse/drag/iframe/cookies/evaluate/pdf/multi/close',
+      description: '操作类型: open/navigate/click/fill/type/hover/scroll/screenshot/scrape/select/upload/download/wait/keyboard/mouse/drag/iframe/cookies/evaluate/pdf/multi/close',
       type: 'string',
       required: true,
     ),
@@ -1036,21 +956,17 @@ class BrowserAutomationSkill extends GooseSkill {
     const SkillParam(name: 'selector', description: 'CSS 选择器', type: 'string', required: false),
     const SkillParam(name: 'text', description: '文本内容（用于点击或等待）', type: 'string', required: false),
     const SkillParam(name: 'value', description: '填写值', type: 'string', required: false),
-    const SkillParam(name: 'role', description: 'ARIA 角色（button/link/heading 等）', type: 'string', required: false),
+    const SkillParam(name: 'role', description: 'ARIA 角色（button/link/heading）', type: 'string', required: false),
     const SkillParam(name: 'label', description: '标签文本（表单元素）', type: 'string', required: false),
     const SkillParam(name: 'placeholder', description: '占位符文本', type: 'string', required: false),
-    const SkillParam(name: 'name', description: '元素名称属性', type: 'string', required: false),
     const SkillParam(name: 'output_path', description: '输出文件路径', type: 'string', required: false),
     const SkillParam(name: 'timeout', description: '超时时间（毫秒），默认 30000', type: 'int', required: false, defaultValue: 30000),
-    const SkillParam(name: 'headless', description: '无头模式，默认 false（显示浏览器）', type: 'bool', required: false, defaultValue: false),
+    const SkillParam(name: 'headless', description: '无头模式，默认 true', type: 'bool', required: false, defaultValue: true),
     const SkillParam(name: 'keep_alive', description: '保持浏览器打开', type: 'bool', required: false, defaultValue: false),
     const SkillParam(name: 'wait_for', description: '操作后等待的选择器', type: 'string', required: false),
     const SkillParam(name: 'full_page', description: '整页截图', type: 'bool', required: false, defaultValue: true),
     const SkillParam(name: 'attribute', description: '要获取的元素属性', type: 'string', required: false),
     const SkillParam(name: 'multiple', description: '获取多个元素', type: 'bool', required: false, defaultValue: false),
-    const SkillParam(name: 'button', description: '鼠标按钮 (left/right/middle)', type: 'string', required: false, defaultValue: 'left'),
-    const SkillParam(name: 'click_count', description: '点击次数', type: 'int', required: false, defaultValue: 1),
-    const SkillParam(name: 'delay', description: '延迟（毫秒）', type: 'int', required: false, defaultValue: 0),
     const SkillParam(name: 'key', description: '按键名称', type: 'string', required: false),
     const SkillParam(name: 'keys', description: '多个按键（逗号分隔）', type: 'string', required: false),
     const SkillParam(name: 'modifier', description: '修饰键 (Ctrl/Alt/Shift/Meta)', type: 'string', required: false),
@@ -1061,10 +977,16 @@ class BrowserAutomationSkill extends GooseSkill {
     const SkillParam(name: 'cookies', description: 'Cookie 数组或 JSON', type: 'string', required: false),
     const SkillParam(name: 'script', description: 'JavaScript 代码', type: 'string', required: false),
     const SkillParam(name: 'files', description: '上传文件路径数组', type: 'string', required: false),
+    const SkillParam(name: 'selectors', description: '多个选择器（JSON数组）', type: 'string', required: false),
     const SkillParam(name: 'viewport_width', description: '视口宽度', type: 'int', required: false, defaultValue: 1920),
     const SkillParam(name: 'viewport_height', description: '视口高度', type: 'int', required: false, defaultValue: 1080),
     const SkillParam(name: 'user_agent', description: '用户代理', type: 'string', required: false),
     const SkillParam(name: 'block_resources', description: '阻止的资源类型（如 image,font,stylesheet）', type: 'string', required: false),
+    const SkillParam(name: 'submit', description: '填写后提交表单', type: 'bool', required: false, defaultValue: false),
+    const SkillParam(name: 'press_enter', description: '填写后按 Enter', type: 'bool', required: false, defaultValue: false),
+    const SkillParam(name: 'delay', description: '延迟（毫秒）', type: 'int', required: false, defaultValue: 0),
+    const SkillParam(name: 'extract_text', description: '提取页面文本', type: 'bool', required: false, defaultValue: false),
+    const SkillParam(name: 'extract_links', description: '提取页面链接', type: 'bool', required: false, defaultValue: false),
   ];
 
   @override
@@ -1119,7 +1041,7 @@ class BrowserAutomationSkill extends GooseSkill {
     
     // 默认输出路径
     if (args['output_path'] == null) {
-      final workDir = Directory.current.path;
+      final workDir = SkillFileUtils.effectiveWorkingDir;
       final timestamp = DateTime.now().millisecondsSinceEpoch;
       if (args['action'] == 'screenshot') {
         args['output_path'] = '$workDir/screenshot_$timestamp.png';

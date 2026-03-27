@@ -1,7 +1,7 @@
 import 'package:flutter/foundation.dart';
-import 'skills/skill_manager.dart';
-import 'skills/skill_base.dart';
-import 'skills/agent_skill.dart';
+import '../skills/skill_manager.dart';
+import '../skills/skill_base.dart';
+import '../skills/agent_skill.dart';
 import 'mcp/mcp.dart';
 
 /// 任务类型枚举

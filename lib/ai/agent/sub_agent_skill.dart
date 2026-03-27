@@ -618,18 +618,41 @@ class AgentTeamsSkill extends GooseSkill {
     
     // 构建上游任务的上下文（如果有依赖）
     final upstreamContext = StringBuffer();
+    final upstreamFiles = <String>[];  // 收集上游产出物文件路径
+    
     if (task.dependencies.isNotEmpty) {
       upstreamContext.writeln('\n## 上游任务输出');
       for (final depId in task.dependencies) {
         final depResult = previousResults.where((r) => r.id == depId).firstOrNull;
         if (depResult != null && depResult.success) {
-          upstreamContext.writeln('### 任务 $depId 的输出:');
+          // 收集产出物文件路径
+          if (depResult.outputFile != null) {
+            upstreamFiles.add(depResult.outputFile!);
+            upstreamContext.writeln('### 任务 $depId 产出物文件: ${depResult.outputFile}');
+          }
+          
+          upstreamContext.writeln('### 任务 $depId 的输出摘要:');
           final output = depResult.summary ?? depResult.result;
-          upstreamContext.writeln(output.length > 1000 
-            ? '${output.substring(0, 1000)}...(已截断)' 
-            : output);
+          
+          // 超长输出使用智能摘要（LLM 生成）
+          if (output.length > 2000) {
+            final smartSummary = await _generateSmartSummary(output, taskId: depId);
+            upstreamContext.writeln(smartSummary);
+            upstreamContext.writeln('\n> 💡 详细内容可通过 read_file 技能读取产出物文件');
+          } else {
+            upstreamContext.writeln(output);
+          }
           upstreamContext.writeln();
         }
+      }
+      
+      // 提示可用的产出物文件
+      if (upstreamFiles.isNotEmpty) {
+        upstreamContext.writeln('\n### 可用的产出物文件:');
+        for (final file in upstreamFiles) {
+          upstreamContext.writeln('- $file');
+        }
+        upstreamContext.writeln('\n> 如需详细内容，请使用 read_file 技能读取上述文件');
       }
     }
     
@@ -641,14 +664,34 @@ class AgentTeamsSkill extends GooseSkill {
       'context': upstreamContext.toString(),
     });
     
+    // 提取产出物文件路径（如果 Agent 保存了文件）
+    String? outputFile;
+    if (result.data?['outputFile'] != null) {
+      outputFile = result.data!['outputFile'] as String;
+    } else if (result.data?['writtenFiles'] != null) {
+      // 如果写入了多个文件，取第一个作为主要产出物
+      final files = result.data!['writtenFiles'] as List;
+      if (files.isNotEmpty) {
+        outputFile = files.first as String;
+      }
+    }
+    
+    // 生成智能摘要（如果结果过长）
+    String summary = result.message;
+    if (result.success && result.message.length > 2000) {
+      summary = await _generateSmartSummary(result.message, taskId: task.id);
+      debugPrint('📝 [AgentTeam] 任务 ${task.id} 输出过长，已生成智能摘要');
+    }
+    
     final subResult = SubAgentResult(
       id: task.id,
       success: result.success,
       result: result.message,
       turnsUsed: (result.data?['turnsUsed'] as int?) ?? 0,
       steps: [],
-      summary: result.message,
+      summary: summary,
       error: result.success ? null : result.message,
+      outputFile: outputFile,
     );
     
     // 发送任务完成消息（广播给所有人）
@@ -657,13 +700,38 @@ class AgentTeamsSkill extends GooseSkill {
       fromAgentName: agent.name,
       type: TeamMessageType.taskResult,
       content: result.success 
-          ? '任务完成: ${task.description}\n结果: ${result.message.length > 200 ? '${result.message.substring(0, 200)}...' : result.message}'
+          ? '任务完成: ${task.description}\n结果: ${summary.length > 200 ? '${summary.substring(0, 200)}...' : summary}${outputFile != null ? '\n产出物: $outputFile' : ''}'
           : '任务失败: ${task.description}\n错误: ${result.message}',
       taskId: task.id,
       isBroadcast: true,
     );
     
     return subResult;
+  }
+  
+  /// 使用 LLM 生成智能摘要
+  Future<String> _generateSmartSummary(String content, {String? taskId}) async {
+    try {
+      final provider = _subAgentSkill.providerFactory?.call();
+      if (provider == null) {
+        // 没有 LLM，返回截断版本
+        return '${content.substring(0, 1500)}...\n[内容过长已截断，请读取产出物文件获取完整内容]';
+      }
+      
+      final response = await provider.chat([
+        {'role': 'system', 'content': '你是一个内容摘要助手。请将以下内容压缩成简洁的摘要，保留关键信息和结论。摘要长度控制在500字以内。'},
+        {'role': 'user', 'content': '请摘要以下内容：\n\n$content'},
+      ]);
+      
+      final summary = response.text.isNotEmpty 
+          ? response.text 
+          : '${content.substring(0, 1500)}...\n[智能摘要生成失败，已截断]';
+      
+      return '📌 智能摘要:\n$summary\n\n[详细内容请读取产出物文件]';
+    } catch (e) {
+      debugPrint('⚠️ [AgentTeam] 智能摘要生成失败: $e');
+      return '${content.substring(0, 1500)}...\n[摘要生成异常，已截断]';
+    }
   }
   
   /// 发送团队消息
@@ -689,7 +757,7 @@ class AgentTeamsSkill extends GooseSkill {
     // 调用回调通知 UI
     onMessage?.call(message);
     
-    debugPrint('💬 [AgentTeam] ${fromAgentName}: ${isBroadcast ? "@所有人 " : ""}$content');
+    debugPrint('💬 [AgentTeam] $fromAgentName: ${isBroadcast ? "@所有人 " : ""}$content');
   }
   
   /// 构建团队执行摘要

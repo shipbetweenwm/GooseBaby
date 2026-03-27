@@ -66,11 +66,14 @@ class SubAgentResult {
   /// 执行步骤
   final List<ToolStep> steps;
   
-  /// 结果摘要（如果配置了 needSummary）
+  /// 结果摘要（如果配置了 needSummary 或输出过长时自动生成）
   final String? summary;
   
   /// 错误信息（如果失败）
   final String? error;
+  
+  /// 产出物文件路径（如果 Agent 生成了持久化的产出物）
+  final String? outputFile;
   
   const SubAgentResult({
     required this.id,
@@ -80,6 +83,7 @@ class SubAgentResult {
     required this.steps,
     this.summary,
     this.error,
+    this.outputFile,
   });
   
   Map<String, dynamic> toJson() => {
@@ -90,6 +94,7 @@ class SubAgentResult {
     'stepsCount': steps.length,
     'summary': summary,
     'error': error,
+    'outputFile': outputFile,
   };
 }
 
