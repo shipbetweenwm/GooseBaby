@@ -470,6 +470,8 @@ class _ChatPanelState extends State<ChatPanel> with SingleTickerProviderStateMix
               ? fullMemoryContext
               : '$fullMemoryContext\n\n$failureLessonsContext');
 
+      // 获取 Agent Skills 的 prompt 注入（SKILL.md 格式技能的使用说明）
+      // 注意：这里是定时任务/主动搭话，不进行任务感知筛选
       final agentSkillsPrompt = skillManager.getAgentSkillsPrompt();
 
       final chatHistory = _messages
@@ -804,7 +806,8 @@ class _ChatPanelState extends State<ChatPanel> with SingleTickerProviderStateMix
               : '$fullMemoryContext\n\n$failureLessonsContext');
 
       // 获取 Agent Skills 的 prompt 注入（SKILL.md 格式技能的使用说明）
-      final agentSkillsPrompt = skillManager.getAgentSkillsPrompt();
+      // 根据用户请求进行任务感知的技能筛选
+      final agentSkillsPrompt = skillManager.getAgentSkillsPrompt(userRequest: text);
 
       // 构建对话历史（包含工具调用消息序列）
       final chatApiHistory = _buildChatApiHistory(messageContent, text);

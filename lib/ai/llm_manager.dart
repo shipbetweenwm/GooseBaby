@@ -11,6 +11,7 @@ import 'providers/claude_provider.dart';
 import 'providers/ollama_provider.dart';
 import 'providers/chatglm_provider.dart';
 import 'prompts.dart';
+import 'task_aware_prompt.dart';
 
 /// LLM 管理器
 /// 负责模型路由、配置管理、对话调度

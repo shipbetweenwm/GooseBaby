@@ -7,3 +7,4 @@
 
 export 'mcp_types.dart';
 export 'mcp_client.dart';
+export 'mcp_service.dart';

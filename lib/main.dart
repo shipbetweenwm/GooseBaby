@@ -11,6 +11,7 @@ import 'core/pet_engine.dart';
 import 'core/achievement_manager.dart';
 import 'ai/llm_manager.dart';
 import 'ai/self_improvement.dart';
+import 'ai/mcp/mcp.dart';
 import 'skills/skill_manager.dart';
 import 'skills/scheduled_task.dart';
 import 'ai/memory/memory_manager.dart';
@@ -50,6 +51,13 @@ Future<void> _runApp() async {
     // 初始化日记服务
     await DiaryService.instance.init();
     debugPrint('🦢 日记服务初始化完成');
+    
+    // 初始化 MCP 服务（异步，不阻塞启动）
+    McpService.instance.initialize().then((_) {
+      debugPrint('🦢 MCP 服务初始化完成');
+    }).catchError((e) {
+      debugPrint('🦢 MCP 服务初始化失败: $e');
+    });
   } catch (e, stack) {
     debugPrint('🦢 存储初始化失败: $e\n$stack');
   }

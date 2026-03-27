@@ -15,11 +15,14 @@ import 'web_fetch_skill.dart';
 import 'batch_file_skill.dart';
 import 'web_search_skill.dart';
 import 'browser_automation_skill.dart';
+import 'mcp_tool_skill.dart';
 import '../ai/agent/sub_agent_skill.dart';
 import '../ai/agent/sub_agent_types.dart';
 import '../ai/agent/agent_types.dart';
 import '../ai/agent/agent_hooks.dart';
 import '../ai/providers/llm_provider.dart';
+import '../ai/mcp/mcp.dart';
+import '../ai/task_aware_prompt.dart';
 
 /// 技能管理器
 /// 负责管理和调度所有技能，内置技能从 skills/ 目录加载（OpenClaw 标准格式）
@@ -38,6 +41,9 @@ class SkillManager extends ChangeNotifier {
   
   /// Web 搜索技能实例（需要运行时注入 API Key）
   WebSearchSkill? _webSearchSkill;
+  
+  /// MCP 工具技能实例（动态注入 MCP 工具）
+  McpToolSkill? _mcpToolSkill;
 
   /// 内置技能目录路径（exe 同级的 skills/ 目录）
   String? _skillDir;
@@ -80,6 +86,10 @@ class SkillManager extends ChangeNotifier {
     register(WebFetchSkill());    // 网页抓取技能
     register(BatchFileSkill());   // 批量文件操作技能
     register(BrowserAutomationSkill()); // 浏览器自动化技能（增强版）
+    
+    // 注册 MCP 工具技能（动态注入 MCP 服务器的工具）
+    _mcpToolSkill = McpToolSkill();
+    register(_mcpToolSkill!);
 
     // 注册 Web 搜索技能（需要运行时注入 API Key）
     _webSearchSkill = WebSearchSkill();
@@ -93,7 +103,7 @@ class SkillManager extends ChangeNotifier {
     _agentTeamsSkill = AgentTeamsSkill(_subAgentSkill!);
     register(_agentTeamsSkill!);
 
-    debugPrint('🦢 已注册内置技能: think, save_memory, shell_exec, write_file, read_file, schedule_task, web_interact, web_fetch, batch_file, web_search, browser_automation, spawn_sub_agent, spawn_agent_team');
+    debugPrint('🦢 已注册内置技能: think, save_memory, shell_exec, write_file, read_file, schedule_task, web_interact, web_fetch, batch_file, web_search, browser_automation, mcp_tools, spawn_sub_agent, spawn_agent_team');
   }
   
   /// 配置 Sub-Agent 技能的回调
@@ -511,20 +521,79 @@ class SkillManager extends ChangeNotifier {
 
   /// 获取所有已启用 Agent 技能的 prompt 注入文本（OpenClaw Level 1 渐进式披露）
   /// 仅列出 name + description，让 LLM 判断是否需要 activate
-  String getAgentSkillsPrompt() {
+  /// 
+  /// [userRequest] 可选的用户请求，用于任务感知的技能选择
+  /// 如果提供，将根据任务类型选择性注入相关技能
+  String getAgentSkillsPrompt({String? userRequest}) {
     final agentSkills = enabledAgentSkills;
     if (agentSkills.isEmpty) return '';
+
+    // 如果提供了用户请求，进行任务感知的技能过滤
+    List<AgentSkill> skillsToInject;
+    if (userRequest != null && userRequest.isNotEmpty) {
+      final taskTypes = TaskAnalyzer.analyze(userRequest);
+      debugPrint('🎯 任务类型: $taskTypes');
+      
+      // 根据任务类型筛选相关技能
+      // 简单实现：如果技能名或描述中包含任务相关的关键词，则保留
+      skillsToInject = agentSkills.where((skill) {
+        final skillText = '${skill.name} ${skill.description}'.toLowerCase();
+        
+        return taskTypes.any((taskType) {
+          final taskKeywords = _getTaskTypeKeywords(taskType);
+          return taskKeywords.any((k) => skillText.contains(k.toLowerCase()));
+        });
+      }).toList();
+      
+      // 如果筛选后为空，回退到全部技能
+      if (skillsToInject.isEmpty) {
+        skillsToInject = agentSkills;
+      }
+      
+      debugPrint('🎯 技能筛选: ${agentSkills.length} → ${skillsToInject.length}');
+    } else {
+      skillsToInject = agentSkills;
+    }
 
     final sb = StringBuffer();
     sb.writeln('\n# 可用专业技能');
     sb.writeln('当主人的任务匹配以下技能时，先调用 `activate_skill` 加载完整说明，再按说明用工具实际执行。');
 
-    for (final skill in agentSkills) {
+    for (final skill in skillsToInject) {
       sb.write(skill.getPromptInjection());
       sb.writeln();
     }
 
     return sb.toString();
+  }
+  
+  /// 获取任务类型的关键词列表
+  List<String> _getTaskTypeKeywords(TaskType taskType) {
+    switch (taskType) {
+      case TaskType.coding:
+        return ['代码', 'code', '编程', '脚本', 'python', 'javascript', 'dart'];
+      case TaskType.fileOperation:
+        return ['文件', 'file', '目录', 'folder', '读取', '写入'];
+      case TaskType.webSearch:
+        return ['搜索', 'search', '网络', 'web', '查询'];
+      case TaskType.webInteract:
+        return ['网页', 'website', '浏览器', 'browser', '自动化'];
+      case TaskType.shellCommand:
+        return ['命令', 'command', '终端', 'terminal', 'shell'];
+      case TaskType.dataAnalysis:
+        return ['数据', 'data', '分析', 'analysis', '统计', '图表'];
+      case TaskType.officeDoc:
+        return ['ppt', 'excel', 'word', '文档', '表格', '幻灯片'];
+      case TaskType.schedule:
+        return ['定时', 'schedule', '提醒', 'remind', '任务'];
+      case TaskType.mcpTool:
+        return ['mcp', '外部', 'extension', '插件'];
+      case TaskType.memory:
+        return ['记住', 'remember', '记忆', 'memory'];
+      case TaskType.chat:
+      case TaskType.unknown:
+        return [];
+    }
   }
 
   /// 启用/禁用技能
@@ -543,16 +612,36 @@ class SkillManager extends ChangeNotifier {
   /// 执行技能
   /// [onOutput] 可选的流式输出回调，用于实时推送命令执行过程中的输出
   Future<SkillResult> execute(String skillId, Map<String, dynamic> args, {void Function(String line)? onOutput}) async {
-    final skill = _skills[skillId];
+    // 首先尝试直接通过 ID 查找技能
+    var skill = _skills[skillId];
+    
+    // 如果找不到，尝试通过 MCP 工具检查（支持 MCP 工具）
+    if (skill == null && _mcpToolSkill != null && _mcpToolSkill!.shouldHandleTool(skillId)) {
+      skill = _mcpToolSkill!;
+    }
+    
     if (skill == null) {
       return SkillResult.fail('未找到技能: $skillId');
     }
-    if (_disabledSkills.contains(skillId)) {
+    if (_disabledSkills.contains(skill.id)) {
       return SkillResult.fail('技能 ${skill.name} 已被禁用');
     }
 
     try {
       debugPrint('🦢 执行技能: ${skill.name} ($skillId) 参数: $args');
+      
+      // 对于 MCP 工具，使用专门的执行方法
+      if (skill is McpToolSkill && skillId.startsWith('mcp__')) {
+        final mcpResult = await skill.executeMcpTool(skillId, args, onOutput: onOutput);
+        final success = !mcpResult.isError;
+        debugPrint('🦢 MCP 工具执行完成: ${success ? "✅" : "❌"} ${mcpResult.content}');
+        return SkillResult(
+          success: success,
+          message: mcpResult.content,
+          data: mcpResult.data,
+        );
+      }
+      
       final result = await skill.execute(args, onOutput: onOutput);
       debugPrint('🦢 技能执行完成: ${result.success ? "✅" : "❌"} ${result.message}');
       return result;
@@ -577,6 +666,13 @@ class SkillManager extends ChangeNotifier {
     // 如果有已启用的 Agent 技能，注册 activate_skill 专用工具
     if (enabledAgentSkills.isNotEmpty) {
       tools.add(_buildActivateSkillTool());
+    }
+    
+    // 注入 MCP 工具（如果有已连接的 MCP 服务器）
+    if (McpService.instance.hasServers) {
+      final mcpTools = _mcpToolSkill?.getToolDefinitions() ?? [];
+      tools.addAll(mcpTools);
+      debugPrint('🔌 注入 ${mcpTools.length} 个 MCP 工具');
     }
 
     return tools;
