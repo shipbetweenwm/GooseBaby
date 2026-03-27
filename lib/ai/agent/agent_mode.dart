@@ -6,6 +6,11 @@
 /// - Ask: 只回答问题，不执行任何操作
 /// - Team: 多 Agent 协作模式，创建团队协作完成复杂任务
 enum AgentMode {
+  /// Ask 模式（只回答，不操作）
+  /// 只提供信息和建议，不修改文件或执行命令
+  /// 适合：咨询问题、获取建议、学习知识
+  ask,
+  
   /// Craft 模式（你说话，我直接做）
   /// 立即执行任务，直接修改文件、运行命令
   /// 适合：明确知道要做什么，希望快速完成任务
@@ -15,11 +20,6 @@ enum AgentMode {
   /// 分析需求，制定计划，等用户确认后再执行
   /// 适合：复杂任务，需要规划步骤
   plan,
-  
-  /// Ask 模式（只回答，不操作）
-  /// 只提供信息和建议，不修改文件或执行命令
-  /// 适合：咨询问题、获取建议、学习知识
-  ask,
   
   /// Team 模式（多 Agent 协作）
   /// 创建多个专业 Agent 组成团队，协作完成复杂任务
@@ -130,6 +130,15 @@ extension AgentModeExtension on AgentMode {
   }
 }
 
+/// 计划步骤状态
+enum PlanStepStatus {
+  pending,   // 待执行
+  running,   // 执行中
+  completed, // 已完成
+  failed,    // 失败
+  skipped,   // 已跳过
+}
+
 /// 待确认的执行计划
 class PendingPlan {
   /// 计划 ID
@@ -164,10 +173,19 @@ class PendingPlan {
   }) : createdAt = createdAt ?? DateTime.now();
   
   /// 获取待执行的步骤
-  List<PlanStep> get pendingSteps => steps.where((s) => !s.isExecuted).toList();
+  List<PlanStep> get pendingSteps => steps.where((s) => s.status == PlanStepStatus.pending).toList();
   
   /// 是否所有步骤都已执行
-  bool get isCompleted => steps.every((s) => s.isExecuted || s.isSkipped);
+  bool get isCompleted => steps.every((s) => 
+      s.status == PlanStepStatus.completed || s.status == PlanStepStatus.skipped);
+  
+  /// 获取进度
+  double get progress {
+    if (steps.isEmpty) return 1.0;
+    final completed = steps.where((s) => 
+        s.status == PlanStepStatus.completed || s.status == PlanStepStatus.skipped).length;
+    return completed / steps.length;
+  }
 }
 
 /// 计划中的单个步骤
@@ -187,17 +205,14 @@ class PlanStep {
   /// 工具参数
   final Map<String, dynamic>? toolArgs;
   
-  /// 是否已执行
-  bool isExecuted;
-  
-  /// 是否已跳过
-  bool isSkipped;
+  /// 步骤状态
+  PlanStepStatus status;
   
   /// 执行结果
   String? result;
   
-  /// 是否执行失败
-  bool isFailed;
+  /// 错误信息
+  String? error;
   
   PlanStep({
     required this.id,
@@ -205,11 +220,33 @@ class PlanStep {
     required this.description,
     this.toolName,
     this.toolArgs,
-    this.isExecuted = false,
-    this.isSkipped = false,
+    PlanStepStatus? status,
     this.result,
-    this.isFailed = false,
-  });
+    this.error,
+  }) : status = status ?? PlanStepStatus.pending;
+  
+  /// 兼容旧代码
+  bool get isExecuted => status == PlanStepStatus.completed;
+  bool get isSkipped => status == PlanStepStatus.skipped;
+  bool get isFailed => status == PlanStepStatus.failed;
+  
+  /// 标记为运行中
+  void start() => status = PlanStepStatus.running;
+  
+  /// 标记为完成
+  void complete(String? result) {
+    this.result = result;
+    status = PlanStepStatus.completed;
+  }
+  
+  /// 标记为失败
+  void fail(String error) {
+    this.error = error;
+    status = PlanStepStatus.failed;
+  }
+  
+  /// 标记为跳过
+  void skip() => status = PlanStepStatus.skipped;
   
   /// 转换为 ToolCall（如果包含工具信息）
   Map<String, dynamic>? toToolCall() {

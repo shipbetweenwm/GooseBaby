@@ -62,8 +62,10 @@ class _ChatPanelState extends State<ChatPanel> with SingleTickerProviderStateMix
   
   /// 当前 Agent 模式
   AgentMode _agentMode = AgentMode.craft;
-  /// 当前待确认的计划（Plan 模式下使用）
-  PendingPlan? _pendingPlan;
+  /// 待确认/执行中的计划列表（Plan 模式下使用）
+  final List<PendingPlan> _pendingPlans = [];
+  /// 当前显示的计划索引
+  int _activePlanIndex = 0;
   /// 流式输出的当前内容
   String _streamingContent = '';
   /// 工具调用中间步骤（实时显示在页面上）
@@ -647,7 +649,7 @@ class _ChatPanelState extends State<ChatPanel> with SingleTickerProviderStateMix
     if (_isLoading) return;
 
     // Plan 模式下，如果有待确认计划，不允许发送新消息（应先点击按钮确认/取消）
-    if (_pendingPlan != null && !_pendingPlan!.isConfirmed && !_pendingPlan!.isRejected) {
+    if (_pendingPlans.any((p) => !p.isConfirmed && !p.isRejected)) {
       return;
     }
 
@@ -984,7 +986,8 @@ class _ChatPanelState extends State<ChatPanel> with SingleTickerProviderStateMix
           onPlanGenerated: (plan) {
             if (!mounted) return;
             setState(() {
-              _pendingPlan = plan;
+              _pendingPlans.add(plan);
+              _activePlanIndex = _pendingPlans.length - 1;
             });
           },
           onStepUpdate: (step) {
@@ -1431,6 +1434,7 @@ class _ChatPanelState extends State<ChatPanel> with SingleTickerProviderStateMix
                       children: [
                         _buildHeader(),
                         if (_showAgentTeamPanel) _buildAgentTeamPanel(),
+                        if (_pendingPlans.isNotEmpty) _buildPlanPanel(),
                         Expanded(child: _buildMessageList()),
                         _buildInputBar(),
                       ],
@@ -1442,6 +1446,7 @@ class _ChatPanelState extends State<ChatPanel> with SingleTickerProviderStateMix
                 children: [
                   _buildHeader(),
                   if (_showAgentTeamPanel) _buildAgentTeamPanel(),
+                  if (_pendingPlans.isNotEmpty) _buildPlanPanel(),
                   Expanded(child: _buildMessageList()),
                   _buildInputBar(),
                 ],
@@ -4748,8 +4753,7 @@ $discussionContext
   Widget _buildMessageList() {
     final stepCount = _isLoading ? _toolCallSteps.length : 0;
     final hasLoadingIndicator = _isLoading && _toolCallSteps.isEmpty;
-    final hasPlanButtons = _pendingPlan != null && !_pendingPlan!.isConfirmed && !_pendingPlan!.isRejected;
-    final itemCount = _messages.length + (stepCount > 0 ? stepCount + 1 : 0) + (hasLoadingIndicator ? 1 : 0) + (hasPlanButtons ? 1 : 0);
+    final itemCount = _messages.length + (stepCount > 0 ? stepCount + 1 : 0) + (hasLoadingIndicator ? 1 : 0);
     return SelectionArea(
       child: ListView.builder(
         controller: _scrollController,
@@ -4764,12 +4768,7 @@ $discussionContext
             return _buildMessageWithSteps(msg);
           }
 
-          // Plan 模式确认/取消按钮
-          if (hasPlanButtons && index == msgEnd) {
-            return _buildPlanConfirmButtons();
-          }
-
-          if (hasLoadingIndicator && index == msgEnd + (hasPlanButtons ? 1 : 0)) {
+          if (hasLoadingIndicator && index == msgEnd) {
             // 没有步骤时的普通加载指示器
             if (_streamingContent.isNotEmpty) {
               return RichMessageBubble(
@@ -4893,149 +4892,278 @@ $discussionContext
     return _ToolStepsSummary(steps: steps);
   }
 
-  /// 构建 Plan 模式的确认/取消按钮
-  Widget _buildPlanConfirmButtons() {
+  /// 构建 Plan 面板（支持多 Plan Tab 切换）
+  Widget _buildPlanPanel() {
+    // 安全边界
+    if (_pendingPlans.isEmpty) return const SizedBox.shrink();
+    if (_activePlanIndex >= _pendingPlans.length) {
+      _activePlanIndex = _pendingPlans.length - 1;
+    }
+    final plan = _pendingPlans[_activePlanIndex];
+    final isExecuting = plan.isConfirmed && !plan.isCompleted;
+    
     return Container(
-      margin: const EdgeInsets.symmetric(vertical: 12, horizontal: 8),
-      padding: const EdgeInsets.all(16),
+      constraints: const BoxConstraints(maxHeight: 200),
       decoration: BoxDecoration(
         color: Colors.blue.shade50,
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: Colors.blue.shade200),
+        border: Border(bottom: BorderSide(color: Colors.blue.shade200, width: 0.5)),
       ),
       child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // 计划标题
-          Row(
-            children: [
-              const Text('📋 ', style: TextStyle(fontSize: 16)),
-              Expanded(
-                child: Text(
-                  '计划待确认: ${_pendingPlan!.userRequest}',
-                  style: const TextStyle(
-                    fontSize: 14,
-                    fontWeight: FontWeight.w600,
-                    color: Colors.black87,
-                  ),
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 12),
-          // 步骤列表（可滚动，最多显示5条高度）
-          ConstrainedBox(
-            constraints: const BoxConstraints(maxHeight: 240),
-            child: SingleChildScrollView(
-              child: Column(
-                children: _pendingPlan!.steps.asMap().entries.map((entry) {
-                  final i = entry.key;
-                  final step = entry.value;
-                  return Padding(
-                    padding: const EdgeInsets.only(bottom: 8),
-                    child: Row(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Container(
-                          width: 22,
-                          height: 22,
-                          decoration: BoxDecoration(
-                            color: Colors.blue.shade100,
-                            shape: BoxShape.circle,
-                          ),
-                          alignment: Alignment.center,
-                          child: Text(
-                            '${i + 1}',
-                            style: TextStyle(
-                              fontSize: 11,
-                              fontWeight: FontWeight.bold,
-                              color: Colors.blue.shade700,
-                            ),
-                          ),
+          // 标题栏：Tab 切换 + 操作按钮
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+            decoration: BoxDecoration(
+              color: Colors.blue.shade100,
+              border: Border(bottom: BorderSide(color: Colors.blue.shade200)),
+            ),
+            child: Row(
+              children: [
+                // Plan Tabs（多个时显示）
+                if (_pendingPlans.length > 1)
+                  ..._pendingPlans.asMap().entries.map((entry) {
+                    final idx = entry.key;
+                    final p = entry.value;
+                    final isActive = idx == _activePlanIndex;
+                    final label = p.userRequest.length > 12 
+                        ? '${p.userRequest.substring(0, 12)}…'
+                        : p.userRequest;
+                    return GestureDetector(
+                      onTap: () => setState(() => _activePlanIndex = idx),
+                      child: Container(
+                        margin: const EdgeInsets.only(right: 4),
+                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                        decoration: BoxDecoration(
+                          color: isActive ? Colors.white : Colors.transparent,
+                          borderRadius: BorderRadius.circular(4),
+                          border: isActive ? Border.all(color: Colors.blue.shade300) : null,
                         ),
-                        const SizedBox(width: 10),
-                        Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text(
-                                step.description,
-                                style: const TextStyle(fontSize: 13, color: Colors.black87),
-                              ),
-                              if (step.toolName != null) ...[
-                                const SizedBox(height: 2),
-                                Text(
-                                  '🔧 ${step.toolName}',
-                                  style: TextStyle(
-                                    fontSize: 11,
-                                    color: Colors.grey.shade600,
-                                  ),
-                                ),
-                              ],
-                            ],
-                          ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            if (p.isCompleted)
+                              Icon(Icons.check_circle, size: 10, color: Colors.green.shade600)
+                            else if (p.isConfirmed)
+                              SizedBox(width: 10, height: 10, child: CircularProgressIndicator(strokeWidth: 1.5, color: Colors.blue.shade600))
+                            else
+                              Icon(Icons.circle_outlined, size: 10, color: Colors.grey.shade500),
+                            const SizedBox(width: 4),
+                            Text(label, style: TextStyle(
+                              fontSize: 11, 
+                              color: isActive ? const Color(0xFF2196F3) : Colors.grey.shade600,
+                              fontWeight: isActive ? FontWeight.w600 : FontWeight.normal,
+                            )),
+                          ],
                         ),
-                      ],
+                      ),
+                    );
+                  })
+                else ...[
+                  const Icon(Icons.assignment, size: 14, color: Color(0xFF2196F3)),
+                  const SizedBox(width: 4),
+                  Expanded(
+                    child: Text(
+                      plan.userRequest.length > 30 
+                          ? '${plan.userRequest.substring(0, 30)}…'
+                          : plan.userRequest,
+                      style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: Color(0xFF2196F3)),
+                      overflow: TextOverflow.ellipsis,
                     ),
-                  );
-                }).toList(),
-              ),
+                  ),
+                ],
+                // 进度
+                if (isExecuting) ...[
+                  const SizedBox(width: 6),
+                  Text('${(plan.progress * 100).toInt()}%', style: TextStyle(fontSize: 10, color: Colors.blue.shade700)),
+                  const SizedBox(width: 4),
+                  SizedBox(width: 40, height: 3, child: LinearProgressIndicator(
+                    value: plan.progress,
+                    backgroundColor: Colors.blue.shade100,
+                    valueColor: AlwaysStoppedAnimation<Color>(Colors.blue.shade600),
+                  )),
+                ],
+                if (_pendingPlans.length <= 1) const Spacer(),
+                if (_pendingPlans.length > 1) const Spacer(),
+                // 确认/取消按钮
+                if (!plan.isConfirmed && !plan.isRejected) ...[
+                  TextButton(
+                    onPressed: () {
+                      setState(() {
+                        plan.isRejected = true;
+                        _pendingPlans.removeAt(_activePlanIndex);
+                        if (_activePlanIndex >= _pendingPlans.length && _pendingPlans.isNotEmpty) {
+                          _activePlanIndex = _pendingPlans.length - 1;
+                        }
+                      });
+                    },
+                    style: TextButton.styleFrom(
+                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                      minimumSize: Size.zero,
+                    ),
+                    child: const Text('取消', style: TextStyle(fontSize: 11)),
+                  ),
+                  const SizedBox(width: 2),
+                  ElevatedButton(
+                    onPressed: () async {
+                      setState(() => plan.isConfirmed = true);
+                      await _executeConfirmedPlan(plan);
+                    },
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.blue,
+                      foregroundColor: Colors.white,
+                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                      minimumSize: Size.zero,
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(4)),
+                    ),
+                    child: const Text('确认', style: TextStyle(fontSize: 11)),
+                  ),
+                ],
+                // 已完成的 Plan 可关闭
+                if (plan.isCompleted || plan.isRejected)
+                  InkWell(
+                    onTap: () {
+                      setState(() {
+                        _pendingPlans.removeAt(_activePlanIndex);
+                        if (_activePlanIndex >= _pendingPlans.length && _pendingPlans.isNotEmpty) {
+                          _activePlanIndex = _pendingPlans.length - 1;
+                        }
+                      });
+                    },
+                    child: const Padding(
+                      padding: EdgeInsets.all(4),
+                      child: Icon(Icons.close, size: 14, color: Colors.grey),
+                    ),
+                  ),
+              ],
             ),
           ),
-          const SizedBox(height: 16),
-          // 确认/取消按钮
-          Row(
-            mainAxisAlignment: MainAxisAlignment.end,
-            children: [
-              TextButton(
-                onPressed: () {
-                  setState(() {
-                    _pendingPlan!.isRejected = true;
-                    _messages.add(_ChatMessage(
-                      content: '取消',
-                      isUser: true,
-                      timestamp: DateTime.now(),
-                    ));
-                    _messages.add(_ChatMessage(
-                      content: '好的，计划已取消~ 有需要随时告诉鹅宝！',
-                      isUser: false,
-                      timestamp: DateTime.now(),
-                    ));
-                    _pendingPlan = null;
-                  });
-                  _saveChatHistory();
-                },
-                style: TextButton.styleFrom(
-                  padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
-                ),
-                child: const Text('取消', style: TextStyle(fontSize: 14)),
-              ),
-              const SizedBox(width: 12),
-              ElevatedButton(
-                onPressed: () async {
-                  setState(() {
-                    _pendingPlan!.isConfirmed = true;
-                    _messages.add(_ChatMessage(
-                      content: '确认执行',
-                      isUser: true,
-                      timestamp: DateTime.now(),
-                    ));
-                  });
-                  await _executeConfirmedPlan(_pendingPlan!);
-                },
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: Colors.blue,
-                  foregroundColor: Colors.white,
-                  padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-                ),
-                child: const Text('确认执行', style: TextStyle(fontSize: 14)),
-              ),
-            ],
+          // 步骤列表
+          Expanded(
+            child: ListView.builder(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+              itemCount: plan.steps.length,
+              itemBuilder: (context, index) => _buildPlanStepItem(plan.steps[index], index),
+            ),
           ),
         ],
       ),
     );
+  }
+  
+  /// 构建计划步骤项（参考 Team 任务样式）
+  Widget _buildPlanStepItem(PlanStep step, int index) {
+    final statusColor = _getPlanStepStatusColor(step.status);
+    final statusIcon = _getPlanStepStatusIcon(step.status);
+    
+    return Container(
+      margin: const EdgeInsets.only(bottom: 2),
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(4),
+        border: Border.all(color: Colors.grey.shade200),
+      ),
+      child: Row(
+        children: [
+          // 序号/状态图标
+          Container(
+            width: 20,
+            height: 20,
+            decoration: BoxDecoration(
+              color: statusColor.withOpacity(0.15),
+              shape: BoxShape.circle,
+            ),
+            alignment: Alignment.center,
+            child: step.status == PlanStepStatus.pending
+                ? Text('${index + 1}', style: TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: statusColor))
+                : Icon(statusIcon, size: 12, color: statusColor),
+          ),
+          const SizedBox(width: 8),
+          // 步骤描述
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  step.description,
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: step.status == PlanStepStatus.pending ? Colors.black87 : Colors.grey.shade600,
+                    decoration: step.status == PlanStepStatus.skipped ? TextDecoration.lineThrough : null,
+                  ),
+                ),
+                if (step.toolName != null)
+                  Text(
+                    '🔧 ${step.toolName}',
+                    style: TextStyle(fontSize: 10, color: Colors.grey.shade500),
+                  ),
+              ],
+            ),
+          ),
+          // 状态标签
+          if (step.status != PlanStepStatus.pending)
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+              decoration: BoxDecoration(
+                color: statusColor.withOpacity(0.1),
+                borderRadius: BorderRadius.circular(3),
+              ),
+              child: Text(
+                _getPlanStepStatusLabel(step.status),
+                style: TextStyle(fontSize: 9, color: statusColor),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+  
+  /// 获取步骤状态颜色
+  Color _getPlanStepStatusColor(PlanStepStatus status) {
+    switch (status) {
+      case PlanStepStatus.pending:
+        return Colors.grey;
+      case PlanStepStatus.running:
+        return Colors.blue;
+      case PlanStepStatus.completed:
+        return Colors.green;
+      case PlanStepStatus.failed:
+        return Colors.red;
+      case PlanStepStatus.skipped:
+        return Colors.orange;
+    }
+  }
+  
+  /// 获取步骤状态图标
+  IconData _getPlanStepStatusIcon(PlanStepStatus status) {
+    switch (status) {
+      case PlanStepStatus.pending:
+        return Icons.circle_outlined;
+      case PlanStepStatus.running:
+        return Icons.refresh;
+      case PlanStepStatus.completed:
+        return Icons.check;
+      case PlanStepStatus.failed:
+        return Icons.close;
+      case PlanStepStatus.skipped:
+        return Icons.skip_next;
+    }
+  }
+  
+  /// 获取步骤状态标签
+  String _getPlanStepStatusLabel(PlanStepStatus status) {
+    switch (status) {
+      case PlanStepStatus.pending:
+        return '待执行';
+      case PlanStepStatus.running:
+        return '执行中';
+      case PlanStepStatus.completed:
+        return '完成';
+      case PlanStepStatus.failed:
+        return '失败';
+      case PlanStepStatus.skipped:
+        return '跳过';
+    }
   }
 
   /// 构建工具调用中间步骤的 UI
@@ -5320,111 +5448,191 @@ $discussionContext
     );
   }
 
-  /// 执行已确认的计划
+  /// 执行已确认的计划（利用 Agent 循环逐步执行）
   Future<void> _executeConfirmedPlan(PendingPlan plan) async {
     if (!mounted) return;
     
     final llmManager = context.read<LLMManager>();
+    final memoryManager = context.read<MemoryManager>();
     final skillManager = context.read<SkillManager>();
-    final workDir = SkillFileUtils.effectiveWorkingDir;
+    final petEngine = context.read<PetEngine>();
     
     setState(() {
       _isLoading = true;
+      _streamingContent = '';
+      _toolCallSteps.clear();
       _cancellationToken = CancellationToken();
     });
     
-    // 添加执行提示消息
-    setState(() {
-      _messages.add(_ChatMessage(
-        content: '🚀 开始执行计划...',
-        isUser: false,
-        timestamp: DateTime.now(),
-      ));
-    });
-    _scrollToBottom();
+    petEngine.startWorking();
+    
+    // 初始化工作目录（和主流程一致）
+    String workDir = '';
+    String osName = 'unknown';
+    if (!kIsWeb) {
+      try {
+        final sessionId = _currentConversationId ?? DateTime.now().millisecondsSinceEpoch.toString();
+        await SkillFileUtils.setSessionWorkingDir(sessionId);
+        workDir = SkillFileUtils.effectiveWorkingDir;
+        osName = Platform.operatingSystem;
+      } catch (e) {
+        debugPrint('⚠️ [Plan] 初始化工作目录失败: $e');
+      }
+    }
     
     try {
-      // 按步骤执行
+      // 构建计划步骤描述
+      final stepsDesc = plan.steps.asMap().entries
+          .map((e) => '步骤${e.key + 1}: ${e.value.description}')
+          .join('\n');
+      
+      // 逐步执行
       for (int i = 0; i < plan.steps.length; i++) {
         final step = plan.steps[i];
-        
         if (!mounted || _cancellationToken?.isCancelled == true) break;
         
-        // 更新步骤状态
-        setState(() {
-          if (_messages.isNotEmpty && _messages.last.content.startsWith('🚀')) {
-            _messages.last = _ChatMessage(
-              content: '⚙️ 执行步骤 ${i + 1}/${plan.steps.length}: ${step.description}',
-              isUser: false,
-              timestamp: DateTime.now(),
-            );
-          }
-        });
-        _scrollToBottom();
+        // 标记当前步骤为执行中
+        setState(() => step.start());
         
-        // 如果步骤有对应的工具调用，执行它
-        if (step.toolName != null && step.toolArgs != null) {
-          final toolCall = ToolCall(
-            id: 'plan_${plan.id}_$i',
-            name: step.toolName!,
-            arguments: step.toolArgs!,
-          );
-          
-          final result = await _executeTool(toolCall, skillManager, workDir);
-          
-          setState(() {
-            step.isExecuted = true;
-            step.result = result.content;
-            step.isFailed = result.isError;
-          });
-          
-          if (result.isError) {
-            // 步骤失败，询问是否继续
-            final shouldContinue = await showDialog<bool>(
-              context: context,
-              builder: (context) => AlertDialog(
-                title: const Text('步骤执行失败'),
-                content: Text('${step.description}\n\n错误: ${result.content}\n\n是否继续执行后续步骤？'),
-                actions: [
-                  TextButton(
-                    onPressed: () => Navigator.pop(context, false),
-                    child: const Text('停止执行'),
-                  ),
-                  TextButton(
-                    onPressed: () => Navigator.pop(context, true),
-                    child: const Text('继续执行'),
-                  ),
-                ],
-              ),
-            );
-            
-            if (shouldContinue != true) break;
-          }
-        } else {
-          // 没有具体工具调用的步骤，让 LLM 自由执行
-          final prompt = '继续执行计划：当前是步骤 "${step.description}"，请执行相关操作。';
-          final response = await llmManager.currentProvider!.chat([
-            {'role': 'user', 'content': prompt},
-          ], config: llmManager.currentConfig);
-          
-          setState(() {
-            step.isExecuted = true;
-            step.result = response.text;
-          });
+        // 构建执行该步骤的 prompt
+        final completedSteps = plan.steps
+            .where((s) => s.status == PlanStepStatus.completed)
+            .map((s) => '✅ ${s.description}: ${s.result?.substring(0, (s.result!.length > 200 ? 200 : s.result!.length)) ?? "完成"}')
+            .join('\n');
+        
+        final stepPrompt = '''用户请求: ${plan.userRequest}
+
+完整计划:
+$stepsDesc
+
+${completedSteps.isNotEmpty ? '已完成步骤:\n$completedSteps\n' : ''}当前执行: 步骤${i + 1} - ${step.description}
+
+请执行当前步骤，直接给出结果。''';
+        
+        // 构建 system prompt（复用主流程逻辑）
+        _contextManager.clearSegments();
+        final memorySegments = memoryManager.getMemorySegments(plan.userRequest);
+        for (final seg in memorySegments) {
+          _contextManager.addSegment(seg);
         }
+        final effectiveMemoryContext = _contextManager.build(
+          customMaxTokens: _contextManager.getSystemPromptMaxForLevel(_contextManager.promptLevel),
+        );
+        
+        String systemPrompt = GoosePrompts.getSystemPromptByLevel(
+          _contextManager.promptLevel,
+          workMode: widget.workMode,
+        );
+        if (effectiveMemoryContext.isNotEmpty) {
+          systemPrompt += '\n\n## 关于主人的记忆\n$effectiveMemoryContext';
+        }
+        final agentSkillsPrompt = skillManager.getAgentSkillsPrompt(userRequest: step.description);
+        if (agentSkillsPrompt.isNotEmpty && _contextManager.promptLevel != PromptLevel.minimal) {
+          systemPrompt += '\n\n$agentSkillsPrompt';
+        }
+        
+        // 添加运行环境
+        if (!kIsWeb && workDir.isNotEmpty) {
+          systemPrompt += '\n\n## 运行环境\n- 操作系统: $osName\n- 工作目录: $workDir';
+        }
+        
+        final tools = skillManager.toFunctionTools();
+        final messages = <Map<String, dynamic>>[
+          {'role': 'system', 'content': systemPrompt},
+          {'role': 'user', 'content': stepPrompt},
+        ];
+        
+        // 先检测是否有 tool calls
+        final response = await llmManager.chatWithMessages(messages, tools: tools);
+        
+        String stepResult;
+        if (response.hasToolCalls) {
+          // 有工具调用 → 进入 Agent 循环
+          final hooks = <AgentHook>[
+            LoopDetectionHook(),
+            FailureLessonHook(memoryManager),
+            PerformanceStatsHook(),
+          ];
+          
+          final loopResult = await AgentLoop.run(
+            provider: llmManager.currentProvider!,
+            config: llmManager.currentConfig,
+            messages: messages,
+            tools: tools,
+            executeTool: (call, {onOutput}) => _executeTool(call, skillManager, workDir, onOutput: onOutput),
+            cancellationToken: _cancellationToken,
+            hooks: hooks,
+            mode: AgentMode.craft, // 执行阶段用 craft 模式
+            userRequest: step.description,
+            onStepUpdate: (toolStep) {
+              if (!mounted) return;
+              setState(() {
+                final existIdx = _toolCallSteps.indexWhere(
+                  (s) => identical(s.sourceStep, toolStep),
+                );
+                final widget = _ToolCallStep(
+                  sourceStep: toolStep,
+                  title: toolStep.title,
+                  content: toolStep.content,
+                  isLoading: toolStep.isLoading,
+                  isSkip: toolStep.isSkip,
+                  isFailed: toolStep.isFailed,
+                  timestamp: toolStep.timestamp,
+                );
+                if (existIdx >= 0) {
+                  _toolCallSteps[existIdx] = widget;
+                } else {
+                  _toolCallSteps.add(widget);
+                }
+              });
+              _scrollToBottom();
+            },
+          );
+          stepResult = loopResult.text;
+        } else {
+          // 纯文本回复 → 流式输出
+          final streamBuffer = StringBuffer();
+          await for (final chunk in llmManager.chatStreamWithMessages(messages, tools: tools)) {
+            if (!mounted) break;
+            streamBuffer.write(chunk);
+            setState(() => _streamingContent = streamBuffer.toString());
+            _scrollToBottom();
+          }
+          stepResult = streamBuffer.toString();
+        }
+        
+        // 标记步骤完成
+        setState(() {
+          step.complete(stepResult);
+          _streamingContent = '';
+        });
       }
       
-      // 完成
+      // 全部完成 → 输出最终结果
       if (mounted) {
+        final lastResult = plan.steps.lastWhere(
+          (s) => s.status == PlanStepStatus.completed,
+          orElse: () => plan.steps.last,
+        ).result ?? '计划执行完成';
+        
         setState(() {
           _messages.add(_ChatMessage(
-            content: '✅ 计划执行完成！',
+            content: lastResult,
             isUser: false,
             timestamp: DateTime.now(),
+            toolSteps: List.unmodifiable(_toolCallSteps),
           ));
+          _toolCallSteps.clear();
         });
+        _saveChatHistory();
       }
     } catch (e) {
+      // 标记当前执行中的步骤为失败
+      final runningStep = plan.steps.where((s) => s.status == PlanStepStatus.running).firstOrNull;
+      if (runningStep != null) {
+        setState(() => runningStep.fail('$e'));
+      }
+      
       if (mounted) {
         setState(() {
           _messages.add(_ChatMessage(
@@ -5439,9 +5647,12 @@ $discussionContext
       if (mounted) {
         setState(() {
           _isLoading = false;
+          _streamingContent = '';
           _cancellationToken = null;
-          _pendingPlan = null;
+          // 执行完的 Plan 保留在列表中（显示完成状态），不自动移除
+          // 用户可手动关闭
         });
+        if (!widget.workMode) petEngine.stopWorking();
       }
     }
   }

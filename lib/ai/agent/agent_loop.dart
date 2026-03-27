@@ -104,6 +104,25 @@ class AgentLoop {
 
       // ── 检查是否需要执行工具 ──
       if (!response.hasToolCalls) {
+        // ── Plan 模式：即使没有工具调用，也要先规划 ──
+        if (mode == AgentMode.plan) {
+          debugPrint('📋 [Agent] Plan 模式（纯文本响应），进行任务规划');
+          final plan = _buildPlanFromTextResponse(response.text, userRequest ?? '');
+          onPlanGenerated?.call(plan);
+          
+          final planText = _formatPlanAsText(plan);
+          final result = AgentLoopResult(
+            text: planText,
+            apiMessages: allApiMessages,
+            skillNames: [],
+            outputFiles: [],
+            steps: steps,
+            pendingPlan: plan,
+          );
+          await hookManager.triggerLoopEnd(result);
+          return result;
+        }
+        
         // LLM 返回纯文本 → 循环结束
         final text = response.text;
         debugPrint('🔄 [Agent] LLM 返回纯文本 (${text.length} 字符)，循环结束');
@@ -663,113 +682,102 @@ class AgentLoop {
     return buffer.toString();
   }
   
-  /// 构建规划提示，引导 LLM 思考并拆分任务
+  /// 构建规划提示，引导 LLM 拆解任务（参考 Team 的 JSON 拆解机制）
   static String _buildPlanningPrompt(String userRequest, List<ToolCall> initialToolCalls) {
-    final initialToolsDesc = initialToolCalls.isEmpty 
-        ? '（暂无初步判断）'
-        : initialToolCalls.map((tc) => '- ${tc.name}(${tc.arguments})').join('\n');
-    
-    return '''
-【规划模式】请在执行前先进行任务分析和规划。
+    final toolsInfo = initialToolCalls.isEmpty
+        ? ''
+        : '\n可用工具参考：\n${initialToolCalls.map((tc) => '- ${tc.name}').toSet().join('\n')}\n';
 
-## 用户请求
+    return '''请将以下用户需求分解为可执行的子任务步骤。
+
+用户需求：
 $userRequest
+$toolsInfo
+请以 JSON 数组格式输出任务分解结果，每个元素包含：
+- task: 步骤描述（简洁明确，一句话说清楚要做什么）
+- tool: 可能用到的工具名（可选，没有则为 null）
 
-## 初步工具调用判断
-$initialToolsDesc
+分解原则：
+1. 每个步骤应该是一个明确、可独立执行的动作
+2. 步骤之间按执行顺序排列
+3. 步骤粒度适中（3-8个步骤为宜），不要太细也不要太粗
+4. 对于知识类/分析类任务，步骤应该是信息收集→分析→输出的逻辑
+5. 对于操作类任务，步骤应该对应具体的文件操作或命令执行
 
-## 请按以下格式输出计划
+示例1（操作类）：
+[
+  {"task": "读取当前项目的配置文件，了解项目结构", "tool": "read_file"},
+  {"task": "创建新的工具函数文件 utils.dart", "tool": "write_file"},
+  {"task": "在主文件中导入并集成新工具函数", "tool": "write_file"},
+  {"task": "运行测试验证功能正常", "tool": "shell_exec"}
+]
 
-### 任务分析
-- 分析用户的核心需求是什么
-- 识别任务的复杂度和潜在风险
-- 判断是否需要分步骤执行
+示例2（分析类）：
+[
+  {"task": "梳理当前宏观经济核心指标（GDP、CPI、就业）", "tool": null},
+  {"task": "分析产业结构变化和新兴产业发展趋势", "tool": null},
+  {"task": "评估政策环境和外部风险因素", "tool": null},
+  {"task": "综合分析并输出结构化报告", "tool": null}
+]
 
-### 执行计划
-按步骤列出具体的执行计划，每步格式：
-**步骤N**: [步骤名称]
-- 操作：[具体要做什么]
-- 工具：[要使用的工具名]
-- 预期结果：[这一步完成后会得到什么]
-
-### 风险提示（可选）
-- 列出可能的失败点和备选方案
-
----
-请务必认真分析后再输出计划，确保计划完整、可执行。
-''';
+只输出 JSON 数组，不要其他内容。''';
   }
-  
-  /// 从 LLM 规划响应中解析出结构化计划
+
+  /// 从 LLM 规划响应中解析出结构化计划（优先 JSON，回退文本）
   static PendingPlan _parsePlanFromResponse(String responseText, String userRequest) {
     final planId = DateTime.now().millisecondsSinceEpoch.toString();
     final steps = <PlanStep>[];
-    
-    // 解析步骤：匹配 "**步骤N**:" 或 "步骤N:" 或 "N." 格式
-    final stepPattern = RegExp(
-      r'\*\*步骤(\d+)\*\*[：:]\s*(.+?)(?=\n-|\n\*\*|$)'
-      r'|步骤(\d+)[：:]\s*(.+?)(?=\n-|\n\*\*|$)'
-      r'|(\d+)\.\s*(.+?)(?=\n|$)',
-      multiLine: true,
-    );
-    
-    int stepOrder = 1;
-    
-    // 尝试按步骤格式解析
-    for (final match in stepPattern.allMatches(responseText)) {
-      final stepName = match.group(2) ?? match.group(4) ?? match.group(6) ?? '';
-      if (stepName.trim().isEmpty) continue;
-      
-      // 提取工具名（如果有）
-      String? toolName;
-      final toolMatch = RegExp(r'工具[：:]\s*(\w+)').firstMatch(responseText.substring(match.start));
-      if (toolMatch != null) {
-        toolName = toolMatch.group(1);
+
+    // 优先尝试解析 JSON 数组
+    final jsonMatch = RegExp(r'\[[\s\S]*\]').firstMatch(responseText);
+    if (jsonMatch != null) {
+      try {
+        final tasks = jsonDecode(jsonMatch.group(0)!) as List;
+        for (int i = 0; i < tasks.length; i++) {
+          final taskData = tasks[i] as Map<String, dynamic>;
+          final task = taskData['task'] as String? ?? '';
+          if (task.isEmpty) continue;
+
+          steps.add(PlanStep(
+            id: '${planId}_${i + 1}',
+            order: i + 1,
+            description: task,
+            toolName: taskData['tool'] as String?,
+          ));
+        }
+      } catch (e) {
+        debugPrint('⚠️ [Plan] JSON 解析失败: $e');
       }
-      
-      steps.add(PlanStep(
-        id: '${planId}_$stepOrder',
-        order: stepOrder,
-        description: stepName.trim(),
-        toolName: toolName,
-      ));
-      stepOrder++;
     }
-    
-    // 如果没有解析到步骤，按行分割生成简单计划
+
+    // JSON 解析失败时回退：匹配 "**步骤N**:" 格式
     if (steps.isEmpty) {
-      final lines = responseText.split('\n')
-          .where((l) => l.trim().isNotEmpty && !l.startsWith('#') && !l.startsWith('---'))
-          .take(10);
-      
-      for (final line in lines) {
-        // 去除 markdown 标记
-        final cleanLine = line.replaceAll(RegExp(r'[\*\-]'), '').trim();
-        if (cleanLine.isEmpty) continue;
-        
-        steps.add(PlanStep(
-          id: '${planId}_$stepOrder',
-          order: stepOrder,
-          description: cleanLine,
-        ));
-        stepOrder++;
+      final stepPattern = RegExp(r'\*\*步骤(\d+)\*\*[：:]\s*(.+?)(?=\n\*\*|###|$)', multiLine: true);
+      int stepOrder = 1;
+      for (final match in stepPattern.allMatches(responseText)) {
+        var name = match.group(2)?.trim() ?? '';
+        if (name.contains('|')) {
+          name = name.split('\n').firstWhere((l) => !l.contains('|'), orElse: () => '');
+        }
+        if (name.isEmpty || name.length > 100) continue;
+        steps.add(PlanStep(id: '${planId}_$stepOrder', order: stepOrder++, description: name));
       }
     }
-    
-    // 如果仍然没有步骤，创建一个默认步骤
+
+    // 仍然没有步骤，创建默认
     if (steps.isEmpty) {
       steps.add(PlanStep(
         id: '${planId}_1',
         order: 1,
-        description: '执行用户请求: ${userRequest.length > 50 ? userRequest.substring(0, 50) + "..." : userRequest}',
+        description: userRequest.length > 80 ? '${userRequest.substring(0, 80)}...' : userRequest,
       ));
     }
-    
-    return PendingPlan(
-      id: planId,
-      userRequest: userRequest,
-      title: '执行计划',
-      steps: steps,
-    );
+
+    return PendingPlan(id: planId, userRequest: userRequest, title: '执行计划', steps: steps);
+  }
+
+  /// 从纯文本响应构建计划（无工具调用时使用）
+  static PendingPlan _buildPlanFromTextResponse(String responseText, String userRequest) {
+    return _parsePlanFromResponse(responseText, userRequest);
   }
 }
