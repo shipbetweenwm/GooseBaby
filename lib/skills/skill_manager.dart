@@ -11,6 +11,7 @@ import 'memory_skill.dart';
 import 'schedule_task_skill.dart';
 import 'scheduled_task.dart';
 import 'web_skill.dart';
+import 'web_fetch_skill.dart';
 import 'batch_file_skill.dart';
 import 'web_search_skill.dart';
 import '../ai/agent/sub_agent_skill.dart';
@@ -75,21 +76,22 @@ class SkillManager extends ChangeNotifier {
     register(ReadFileSkill());
     register(ScheduleTaskSkill());
     register(WebInteractSkill()); // Web 浏览器交互技能
+    register(WebFetchSkill());    // 网页抓取技能
     register(BatchFileSkill());   // 批量文件操作技能
-    
+
     // 注册 Web 搜索技能（需要运行时注入 API Key）
     _webSearchSkill = WebSearchSkill();
     register(_webSearchSkill!);
-    
+
     // 注册 Sub-Agent 技能（需要在运行时注入回调）
     _subAgentSkill = SubAgentSkill();
     register(_subAgentSkill!);
-    
+
     // 注册 Agent Teams 技能（需要在运行时注入回调）
     _agentTeamsSkill = AgentTeamsSkill(_subAgentSkill!);
     register(_agentTeamsSkill!);
-    
-    debugPrint('🦢 已注册内置技能: think, save_memory, shell_exec, write_file, read_file, schedule_task, web_interact, batch_file, web_search, spawn_sub_agent, spawn_agent_team');
+
+    debugPrint('🦢 已注册内置技能: think, save_memory, shell_exec, write_file, read_file, schedule_task, web_interact, web_fetch, batch_file, web_search, spawn_sub_agent, spawn_agent_team');
   }
   
   /// 配置 Sub-Agent 技能的回调
