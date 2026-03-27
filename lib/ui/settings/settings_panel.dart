@@ -256,8 +256,12 @@ class _AIModelSettingsState extends State<_AIModelSettings> {
   final _providers = {
     'qwen': {'name': '通义千问', 'icon': '🌐', 'hint': 'DashScope API Key'},
     'hunyuan': {'name': '腾讯混元', 'icon': '🔮', 'hint': '混元 API Key (控制台创建)'},
+    'deepseek': {'name': 'DeepSeek', 'icon': '🔭', 'hint': 'DeepSeek API Key'},
+    'kimi': {'name': 'Kimi', 'icon': '🌙', 'hint': 'Moonshot API Key'},
+    'minimax': {'name': 'MiniMax', 'icon': '⚡', 'hint': 'MiniMax API Key'},
     'openai': {'name': 'OpenAI', 'icon': '🤖', 'hint': 'OpenAI API Key'},
     'claude': {'name': 'Claude', 'icon': '🧠', 'hint': 'Anthropic API Key'},
+    'gemini': {'name': 'Gemini', 'icon': '💎', 'hint': 'Google AI API Key'},
     'ollama': {'name': 'Ollama本地', 'icon': '🏠', 'hint': '无需API Key'},
     'chatglm': {'name': '智谱ChatGLM', 'icon': '🔮', 'hint': '智谱 API Key'},
   };
@@ -592,9 +596,14 @@ class _AIModelSettingsState extends State<_AIModelSettings> {
     switch (_selectedProvider) {
       case 'qwen': return 'qwen-turbo';
       case 'hunyuan': return 'hunyuan-lite';
+      case 'deepseek': return 'deepseek-chat';
+      case 'kimi': return 'moonshot-v1-8k';
+      case 'minimax': return 'abab6.5s-chat';
       case 'openai': return 'gpt-4o-mini';
       case 'claude': return 'claude-3-haiku-20240307';
+      case 'gemini': return 'gemini-2.0-flash';
       case 'ollama': return 'llama3';
+      case 'chatglm': return 'glm-4-flash';
       default: return '';
     }
   }
@@ -603,8 +612,12 @@ class _AIModelSettingsState extends State<_AIModelSettings> {
     switch (_selectedProvider) {
       case 'qwen': return 'https://dashscope.aliyuncs.com/compatible-mode/v1';
       case 'hunyuan': return 'https://api.hunyuan.cloud.tencent.com/v1';
+      case 'deepseek': return 'https://api.deepseek.com/v1';
+      case 'kimi': return 'https://api.moonshot.cn/v1';
+      case 'minimax': return 'https://api.minimax.chat/v1';
       case 'openai': return 'https://api.openai.com/v1';
       case 'claude': return 'https://api.anthropic.com';
+      case 'gemini': return 'https://generativelanguage.googleapis.com/v1beta/openai';
       case 'ollama': return 'http://localhost:11434';
       case 'chatglm': return 'https://open.bigmodel.cn/api/paas/v4';
       default: return '';

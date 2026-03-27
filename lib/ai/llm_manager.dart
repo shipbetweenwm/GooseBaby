@@ -10,6 +10,10 @@ import 'providers/openai_provider.dart';
 import 'providers/claude_provider.dart';
 import 'providers/ollama_provider.dart';
 import 'providers/chatglm_provider.dart';
+import 'providers/deepseek_provider.dart';
+import 'providers/kimi_provider.dart';
+import 'providers/minimax_provider.dart';
+import 'providers/gemini_provider.dart';
 import 'prompts.dart';
 import 'task_aware_prompt.dart';
 
@@ -28,6 +32,10 @@ class LLMManager extends ChangeNotifier {
     _providers['hunyuan'] = HunyuanProvider();
     _providers['openai'] = OpenAIProvider();
     _providers['claude'] = ClaudeProvider();
+    _providers['deepseek'] = DeepSeekProvider();
+    _providers['kimi'] = KimiProvider();
+    _providers['minimax'] = MiniMaxProvider();
+    _providers['gemini'] = GeminiProvider();
     _providers['ollama'] = OllamaProvider();
     _providers['chatglm'] = ChatGLMProvider();
     _loadConfig();
