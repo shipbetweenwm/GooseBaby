@@ -15,15 +15,54 @@ class SkillFileUtils {
   /// 如果为 null，则回退到 effectiveBaseWorkingDir
   static String? _sessionWorkingDir;
 
+  /// 缓存用户 home 路径（避免重复检测）
+  static String? _cachedHome;
+
+  /// 获取当前用户的 home 目录（macOS GUI 应用的 HOME 可能是 /var/root）
+  static String get _userHome {
+    if (_cachedHome != null) return _cachedHome!;
+
+    // macOS GUI 应用启动时 HOME 环境变量可能不正确
+    // 使用 whoami + dscl 获取真实用户 home
+    if (Platform.isMacOS) {
+      try {
+        final whoami = Process.runSync('whoami', []).stdout.toString().trim();
+        if (whoami.isNotEmpty && whoami != 'root') {
+          final result = Process.runSync('dscl', [
+            '.', '-read', '/Users/$whoami', 'NFSHomeDirectory',
+          ]).stdout.toString().trim();
+          // 输出格式: NFSHomeDirectory: /Users/xxx
+          final match = RegExp(r'NFSHomeDirectory:\s*(.+)').firstMatch(result);
+          if (match != null) {
+            final home = match.group(1)!.trim();
+            if (Directory(home).existsSync()) {
+              _cachedHome = home;
+              return home;
+            }
+          }
+        }
+      } catch (_) {}
+    }
+
+    // 回退到环境变量
+    final home = Platform.environment['USERPROFILE']
+        ?? Platform.environment['HOME']
+        ?? p.dirname(Platform.resolvedExecutable);
+    _cachedHome = home;
+    return home;
+  }
+
   /// 默认工作目录：用户桌面
   /// 文件读写、脚本执行的相对路径都基于此目录
   static String get defaultWorkingDir {
-    final home = Platform.environment['USERPROFILE']  // Windows
-        ?? Platform.environment['HOME']                // macOS/Linux
-        ?? p.dirname(Platform.resolvedExecutable);     // fallback
+    final home = _userHome;
     final desktop = p.join(home, 'Desktop');
     // 如果桌面目录存在就用桌面，否则用 home
-    if (Directory(desktop).existsSync()) return desktop;
+    try {
+      if (Directory(desktop).existsSync()) return desktop;
+    } catch (_) {
+      // 权限不足等异常，忽略
+    }
     return home;
   }
 

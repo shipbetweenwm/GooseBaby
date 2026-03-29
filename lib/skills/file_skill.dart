@@ -5,6 +5,26 @@ import 'package:path/path.dart' as p;
 import 'skill_base.dart';
 import 'skill_file_utils.dart';
 
+// ── 系统目录黑名单（write_file 沙箱） ──
+// 绝对不允许 LLM 写入这些路径，防止意外破坏系统文件
+const _kSystemPathPrefixes = [
+  // macOS / Linux 系统目录
+  '/etc/', '/usr/', '/bin/', '/sbin/', '/lib/', '/lib64/',
+  '/System/', '/private/etc/', '/private/var/', '/Applications/',
+  // Windows 系统目录（小写比较）
+  r'c:\windows', r'c:\program files', r'c:\programdata', r'c:\system32',
+];
+
+/// 检查路径是否落在系统目录黑名单中（不区分大小写）
+bool _isSystemPath(String resolvedPath) {
+  final lower = resolvedPath.toLowerCase().replaceAll(r'\', '/');
+  for (final prefix in _kSystemPathPrefixes) {
+    final lp = prefix.toLowerCase().replaceAll(r'\', '/');
+    if (lower.startsWith(lp)) return true;
+  }
+  return false;
+}
+
 /// 文件写入工具
 /// 让 LLM 可以将代码或内容写入本地文件，再通过 shell_exec 执行
 class WriteFileSkill extends GooseSkill {
@@ -58,6 +78,16 @@ class WriteFileSkill extends GooseSkill {
     final resolvedPath = p.isAbsolute(path)
         ? path
         : p.join(SkillFileUtils.effectiveWorkingDir, path);
+
+    // ── 安全校验：禁止写入系统目录 ──
+    if (_isSystemPath(resolvedPath)) {
+      debugPrint('📝 write_file 安全拦截: $resolvedPath');
+      return SkillResult.fail(
+        '⚠️ 安全限制：不允许写入系统目录。\n'
+        '目标路径: `$resolvedPath`\n'
+        '请将文件写入用户目录（如桌面、文稿、工作目录等）。',
+      );
+    }
 
     // 检查是否为二进制输出格式（pptx/pdf/docx/xlsx 等），write_file 只能写文本文件
     final ext = p.extension(resolvedPath).toLowerCase();

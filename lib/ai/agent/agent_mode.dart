@@ -5,6 +5,7 @@
 /// - Plan: 先制定计划，等用户确认后再执行
 /// - Ask: 只回答问题，不执行任何操作
 /// - Team: 多 Agent 协作模式，创建团队协作完成复杂任务
+/// - CUA: Computer Use Agent，使用多模态模型操控电脑
 enum AgentMode {
   /// Ask 模式（只回答，不操作）
   /// 只提供信息和建议，不修改文件或执行命令
@@ -25,6 +26,11 @@ enum AgentMode {
   /// 创建多个专业 Agent 组成团队，协作完成复杂任务
   /// 适合：需要多角色协作、并行处理、专业分工的场景
   team,
+
+  /// CUA 模式（Computer Use Agent）
+  /// 使用多模态模型作为主模型，通过截图感知屏幕，操控鼠标键盘
+  /// 截图直接嵌入对话供主模型看图，无需额外视觉分析步骤
+  cua,
 }
 
 /// Agent 模式扩展方法
@@ -40,6 +46,8 @@ extension AgentModeExtension on AgentMode {
         return 'Ask';
       case AgentMode.team:
         return 'Team';
+      case AgentMode.cua:
+        return 'CUA';
     }
   }
   
@@ -54,6 +62,8 @@ extension AgentModeExtension on AgentMode {
         return '只回答，不操作';
       case AgentMode.team:
         return '多 Agent 协作';
+      case AgentMode.cua:
+        return '操控电脑';
     }
   }
   
@@ -68,6 +78,8 @@ extension AgentModeExtension on AgentMode {
         return '💬';
       case AgentMode.team:
         return '👥';
+      case AgentMode.cua:
+        return '🖥️';
     }
   }
   
@@ -82,6 +94,8 @@ extension AgentModeExtension on AgentMode {
         return '#9E9E9E'; // 灰色 - 轻量对话
       case AgentMode.team:
         return '#9C27B0'; // 紫色 - 团队协作
+      case AgentMode.cua:
+        return '#FF5722'; // 深橙色 - 电脑操控
     }
   }
   
@@ -96,6 +110,8 @@ extension AgentModeExtension on AgentMode {
         return false; // 不执行任何工具
       case AgentMode.team:
         return true; // Team 模式使用 spawn_agent_team 工具
+      case AgentMode.cua:
+        return true; // CUA 模式使用鼠标键盘操控
     }
   }
   
@@ -109,6 +125,8 @@ extension AgentModeExtension on AgentMode {
       case AgentMode.ask:
         return false;
       case AgentMode.team:
+        return false;
+      case AgentMode.cua:
         return false;
     }
   }
@@ -124,6 +142,8 @@ extension AgentModeExtension on AgentMode {
         return AgentMode.ask;
       case 'team':
         return AgentMode.team;
+      case 'cua':
+        return AgentMode.cua;
       default:
         return null;
     }

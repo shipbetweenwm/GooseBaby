@@ -16,6 +16,8 @@ import 'web_search_skill.dart';
 import 'news_skill.dart';
 import 'browser_skill.dart';
 import 'mcp_tool_skill.dart';
+import 'cua_skill.dart';
+import '../ai/memory/memory_manager.dart';
 import '../ai/agent/sub_agent_skill.dart';
 import '../ai/agent/sub_agent_types.dart';
 import '../ai/agent/agent_types.dart';
@@ -41,6 +43,9 @@ class SkillManager extends ChangeNotifier {
   
   /// Web 搜索技能实例（需要运行时注入 API Key）
   WebSearchSkill? _webSearchSkill;
+
+  /// 新闻技能实例（需要运行时注入 GNews API Key）
+  NewsSkill? _newsSkill;
   
   /// MCP 工具技能实例（动态注入 MCP 工具）
   McpToolSkill? _mcpToolSkill;
@@ -83,6 +88,7 @@ class SkillManager extends ChangeNotifier {
     register(ReadFileSkill());
     register(ScheduleTaskSkill());
     register(BrowserSkill());    // 统一的浏览器自动化技能
+    register(CuaSkill());        // CUA 桌面控制（视觉感知+操作模拟）
     register(WebFetchSkill());   // 网页抓取技能
     register(BatchFileSkill());  // 批量文件操作技能
     
@@ -95,7 +101,8 @@ class SkillManager extends ChangeNotifier {
     register(_webSearchSkill!);
 
     // 注册新闻获取技能
-    register(NewsSkill());
+    _newsSkill = NewsSkill();
+    register(_newsSkill!);
 
     // 注册 Sub-Agent 技能（需要在运行时注入回调）
     _subAgentSkill = SubAgentSkill();
@@ -105,7 +112,7 @@ class SkillManager extends ChangeNotifier {
     _agentTeamsSkill = AgentTeamsSkill(_subAgentSkill!);
     register(_agentTeamsSkill!);
 
-    debugPrint('🦢 已注册内置技能: think, save_memory, shell_exec, write_file, read_file, schedule_task, browser, web_fetch, batch_file, web_search, news, mcp_tools, spawn_sub_agent, spawn_agent_team');
+    debugPrint('🦢 已注册内置技能: think, save_memory, shell_exec, write_file, read_file, schedule_task, browser, cua, web_fetch, batch_file, web_search, news, mcp_tools, spawn_sub_agent, spawn_agent_team');
   }
   
   /// 配置 Sub-Agent 技能的回调
@@ -126,6 +133,31 @@ class SkillManager extends ChangeNotifier {
     void Function(TeamMessage message)? onMessage,
   }) {
     _agentTeamsSkill?.onMessage = onMessage;
+  }
+
+  /// 配置搜索 / 新闻技能的 API Key 及 MemoryManager
+  ///
+  /// [keys] map 格式：{provider: apiKey}，支持的 provider：
+  ///   tavily（WebSearchSkill）
+  ///   gnews（NewsSkill）
+  /// [memoryManager] 可选，注入后三级查找时会从永久记忆兜底
+  void configureSearchApiKeys(Map<String, String> keys, {MemoryManager? memoryManager}) {
+    if (memoryManager != null) {
+      _webSearchSkill?.setMemoryManager(memoryManager);
+      _newsSkill?.setMemoryManager(memoryManager);
+    }
+    for (final entry in keys.entries) {
+      final key = entry.value.trim().isEmpty ? null : entry.value.trim();
+      switch (entry.key) {
+        case 'tavily':
+          _webSearchSkill?.setApiKey(key);
+          break;
+        case 'gnews':
+          _newsSkill?.setGNewsApiKey(key);
+          break;
+      }
+    }
+    debugPrint('🦢 搜索 API Key 已更新: ${keys.keys.join(", ")}');
   }
 
   /// 获取 SaveMemorySkill 实例（用于外部注入 MemoryManager）
@@ -650,12 +682,21 @@ class SkillManager extends ChangeNotifier {
 
   /// 生成所有已启用技能的 Function Calling tools 列表
   /// AgentSkill 不注册为 function tool（遵循 OpenClaw 规范），仅注册可执行类技能
-  List<Map<String, dynamic>> toFunctionTools() {
+  ///
+  /// [excludeSkillIds] 排除指定 skill ID 的工具（非 CUA 模式下排除 cua）
+  /// [onlySkillIds] 仅包含指定 skill ID 的工具（CUA 模式下只保留 cua）
+  List<Map<String, dynamic>> toFunctionTools({
+    Set<String>? excludeSkillIds,
+    Set<String>? onlySkillIds,
+  }) {
     final tools = <Map<String, dynamic>>[];
 
     // 注册可执行类技能（ScriptSkill、ShellExecSkill 等）
     for (final s in enabledSkills) {
       if (s is! AgentSkill) {
+        // 按 onlySkillIds / excludeSkillIds 过滤
+        if (onlySkillIds != null && !onlySkillIds.contains(s.id)) continue;
+        if (excludeSkillIds != null && excludeSkillIds.contains(s.id)) continue;
         tools.add(s.toFunctionTool());
       }
     }

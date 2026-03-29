@@ -48,6 +48,8 @@ class ConversationMessage {
   final List<MessageAttachment> attachments;
   /// 工具调用期间产生的 API 消息序列（用于多轮会话上下文）
   final List<Map<String, dynamic>>? apiMessages;
+  /// 工具调用步骤记录（思考+执行过程，用于停止/关闭后恢复显示）
+  final List<Map<String, dynamic>>? toolSteps;
 
   ConversationMessage({
     required this.content,
@@ -57,6 +59,7 @@ class ConversationMessage {
     this.isError = false,
     this.attachments = const [],
     this.apiMessages,
+    this.toolSteps,
   });
 
   Map<String, dynamic> toJson() => {
@@ -67,6 +70,7 @@ class ConversationMessage {
         'isError': isError,
         'attachments': attachments.map((a) => a.toJson()).toList(),
         'apiMessages': apiMessages,
+        'toolSteps': toolSteps,
       };
 
   factory ConversationMessage.fromJson(Map<String, dynamic> json) => ConversationMessage(
@@ -80,6 +84,9 @@ class ConversationMessage {
                 .toList() ??
             [],
         apiMessages: (json['apiMessages'] as List?)
+                ?.map((m) => Map<String, dynamic>.from(m as Map))
+                .toList(),
+        toolSteps: (json['toolSteps'] as List?)
                 ?.map((m) => Map<String, dynamic>.from(m as Map))
                 .toList(),
       );

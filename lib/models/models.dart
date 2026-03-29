@@ -359,6 +359,13 @@ class LLMConfig {
   /// 是否启用深度思考/推理增强（各厂商参数不同，由 provider 自行适配）
   final bool enableDeepThink;
 
+  /// 视觉模型品牌（多模态模型独立选择，如 'qwen'、'chatglm'、'claude'）
+  final String? visionProvider;
+
+  /// 视觉模型名称（用于 CUA 截图分析，如 qwen-vl-max、glm-4v 等）
+  /// 为空则不启用视觉分析能力
+  final String? visionModel;
+
   const LLMConfig({
     required this.provider,
     required this.model,
@@ -369,6 +376,8 @@ class LLMConfig {
     this.maxTokens = 81920,
     this.enableWebSearch = false,
     this.enableDeepThink = false,
+    this.visionProvider,
+    this.visionModel,
   });
 
   /// 复制并修改部分字段
@@ -382,6 +391,8 @@ class LLMConfig {
     int? maxTokens,
     bool? enableWebSearch,
     bool? enableDeepThink,
+    String? visionProvider,
+    String? visionModel,
   }) {
     return LLMConfig(
       provider: provider ?? this.provider,
@@ -393,6 +404,8 @@ class LLMConfig {
       maxTokens: maxTokens ?? this.maxTokens,
       enableWebSearch: enableWebSearch ?? this.enableWebSearch,
       enableDeepThink: enableDeepThink ?? this.enableDeepThink,
+      visionProvider: visionProvider ?? this.visionProvider,
+      visionModel: visionModel ?? this.visionModel,
     );
   }
 
@@ -406,6 +419,8 @@ class LLMConfig {
     'maxTokens': maxTokens,
     'enableWebSearch': enableWebSearch,
     'enableDeepThink': enableDeepThink,
+    if (visionProvider != null) 'visionProvider': visionProvider,
+    if (visionModel != null) 'visionModel': visionModel,
   };
 
   factory LLMConfig.fromJson(Map<String, dynamic> json) => LLMConfig(
@@ -418,6 +433,8 @@ class LLMConfig {
     maxTokens: json['maxTokens'] as int? ?? 81920,
     enableWebSearch: json['enableWebSearch'] as bool? ?? false,
     enableDeepThink: json['enableDeepThink'] as bool? ?? false,
+    visionProvider: json['visionProvider'] as String?,
+    visionModel: json['visionModel'] as String?,
   );
 }
 

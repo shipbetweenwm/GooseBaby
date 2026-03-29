@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
 import 'package:hive/hive.dart';
 import '../models/models.dart';
@@ -117,12 +118,13 @@ class LLMManager extends ChangeNotifier {
   Future<AgentResponse> chatWithMessages(
     List<Map<String, dynamic>> rawMessages, {
     List<Map<String, dynamic>>? tools,
+    CancelToken? cancelToken,
   }) async {
     final provider = currentProvider;
     if (provider == null) {
       throw Exception('未配置模型提供者: ${_currentConfig.provider}');
     }
-    return await provider.chat(rawMessages, config: _currentConfig, tools: tools);
+    return await provider.chat(rawMessages, config: _currentConfig, tools: tools, cancelToken: cancelToken);
   }
 
   /// 流式调用（使用原始消息列表，保留 tool_calls/tool 等 API 字段）
@@ -227,6 +229,67 @@ class LLMManager extends ChangeNotifier {
     }
     return messages;
   }
+
+  /// 使用视觉模型分析截图，返回屏幕内容描述
+  /// 返回 null 表示未配置视觉模型
+  Future<String?> analyzeScreenshot({
+    required String base64Image,
+    required String mimeType,
+    required String prompt,
+  }) async {
+    final visionProvider = _currentConfig.visionProvider;
+    final visionModel = _currentConfig.visionModel;
+    if (visionProvider == null || visionProvider.isEmpty || visionModel == null || visionModel.isEmpty) {
+      debugPrint('🦢 视觉分析跳过: 未配置多模态模型');
+      return null;
+    }
+
+    final provider = _providers[visionProvider];
+    if (provider == null) {
+      debugPrint('🦢 视觉分析跳过: 不支持的多模态品牌 $visionProvider');
+      return null;
+    }
+
+    // 获取多模态品牌的 API Key（从已缓存的品牌配置中查找）
+    final box = Hive.box('settings');
+    final brandConfig = box.get('llm_config_$visionProvider');
+    final apiKey = brandConfig is Map
+        ? (brandConfig['apiKey'] as String? ?? _currentConfig.apiKey)
+        : _currentConfig.apiKey;
+    final baseUrl = _defaultEndpoints[visionProvider];
+
+    try {
+      final visionConfig = _currentConfig.copyWith(
+        provider: visionProvider,
+        model: visionModel,
+        apiKey: apiKey,
+        baseUrl: baseUrl,
+      );
+      debugPrint('🦢 视觉分析: 调用 $visionProvider / $visionModel');
+      final result = await provider.chatWithVision(
+        base64Image: base64Image,
+        mimeType: mimeType,
+        prompt: prompt,
+        config: visionConfig,
+      );
+      debugPrint('🦢 视觉分析完成: ${result.length} 字符');
+      return result;
+    } catch (e) {
+      debugPrint('🦢 视觉分析失败: $e');
+      return null;
+    }
+  }
+
+  /// 各品牌默认 API 端点（与 settings_panel 保持一致）
+  static const _defaultEndpoints = {
+    'qwen':    'https://dashscope.aliyuncs.com/compatible-mode/v1',
+    'hunyuan': 'https://api.hunyuan.cloud.tencent.com/v1',
+    'chatglm': 'https://open.bigmodel.cn/api/paas/v4',
+    'openai':  'https://api.openai.com/v1',
+    'claude':  'https://api.anthropic.com',
+    'gemini':  'https://generativelanguage.googleapis.com/v1beta/openai',
+    'ollama':  'http://localhost:11434',
+  };
 
   String extractEmotion(String response) {
     final lower = response.toLowerCase();

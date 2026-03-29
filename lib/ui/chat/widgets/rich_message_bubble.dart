@@ -1,5 +1,8 @@
+import 'dart:convert';
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/gestures.dart';
+import 'package:flutter/services.dart';
 import 'package:url_launcher/url_launcher.dart';
 import '../../../models/models.dart';
 import 'code_block.dart';
@@ -263,6 +266,13 @@ class _MarkdownText extends StatelessWidget {
         continue;
       }
 
+      // 图片 ![alt](data:image/...base64,...) 或 ![alt](http/https url)
+      final imgMatch = RegExp(r'!\[([^\]]*)\]\((data:image/[^)]+|https?://[^)]+)\)').firstMatch(line);
+      if (imgMatch != null) {
+        widgets.add(_buildMarkdownImage(imgMatch.group(2)!, imgMatch.group(1) ?? ''));
+        continue;
+      }
+
       // 标题
       if (line.startsWith('### ')) {
         widgets.add(_buildHeading(line.substring(4), fontSize * 1.07, FontWeight.w600));
@@ -351,7 +361,97 @@ class _MarkdownText extends StatelessWidget {
         color: Colors.blueGrey.shade700,
         fontStyle: FontStyle.italic,
         height: 1.5,
-      )),
+      )      ),
+    );
+  }
+
+  /// Markdown 图片渲染（支持 data:image base64 和 http/https URL）
+  /// alt 格式支持: "描述" 或 "描述|filePath"（竖线后为文件路径）
+  Widget _buildMarkdownImage(String url, String alt) {
+    final isBase64 = url.startsWith('data:image/');
+    final isNetwork = url.startsWith('http://') || url.startsWith('https://');
+    if (!isBase64 && !isNetwork) return const SizedBox.shrink();
+
+    // 从 alt text 中解析 filePath（格式: "alt text|/path/to/file"）
+    String? filePath;
+    if (alt.contains('|')) {
+      final parts = alt.split('|');
+      if (parts.length >= 2) {
+        filePath = parts.last.trim();
+      }
+    }
+
+    return Builder(builder: (builderContext) {
+      return Padding(
+        padding: const EdgeInsets.symmetric(vertical: 6),
+        child: GestureDetector(
+          onTap: () {
+            if (isBase64) {
+              _showFullscreenImage(builderContext, url, filePath);
+            } else {
+              launchUrl(Uri.parse(url), mode: LaunchMode.externalApplication);
+            }
+          },
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(8),
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 480, maxHeight: 360),
+              child: isBase64
+                  ? _buildBase64Image(url)
+                  : Image.network(url, fit: BoxFit.contain, errorBuilder: (_, __, ___) =>
+                      Container(
+                        padding: const EdgeInsets.all(16),
+                        color: Colors.grey.shade100,
+                        child: Text('图片加载失败: $alt',
+                            style: TextStyle(fontSize: 12, color: Colors.grey.shade500)),
+                      ),
+                    ),
+            ),
+          ),
+        ),
+      );
+    });
+  }
+
+  Widget _buildBase64Image(String dataUrl) {
+    // data:image/png;base64,xxxxx → 提取 base64 部分
+    final commaIdx = dataUrl.indexOf(',');
+    if (commaIdx < 0) return const SizedBox.shrink();
+    final base64Str = dataUrl.substring(commaIdx + 1);
+    try {
+      final bytes = base64Decode(base64Str);
+      return Image.memory(bytes, fit: BoxFit.contain, gaplessPlayback: true);
+    } catch (_) {
+      return Container(
+        padding: const EdgeInsets.all(16),
+        color: Colors.grey.shade100,
+        child: Text('图片解码失败',
+            style: TextStyle(fontSize: 12, color: Colors.grey.shade500)),
+      );
+    }
+  }
+
+  void _showFullscreenImage(BuildContext ctx, String dataUrl, String? filePath) {
+    final commaIdx = dataUrl.indexOf(',');
+    if (commaIdx < 0) return;
+    final base64Str = dataUrl.substring(commaIdx + 1);
+    Uint8List bytes;
+    try {
+      bytes = base64Decode(base64Str);
+    } catch (_) {
+      return;
+    }
+
+    Navigator.of(ctx).push(
+      PageRouteBuilder(
+        opaque: false,
+        barrierColor: Colors.black87,
+        barrierDismissible: true,
+        pageBuilder: (ctx, animation, secondaryAnimation) =>
+            _Base64ImageDialog(bytes: bytes, filePath: filePath),
+        transitionsBuilder: (ctx, animation, secondaryAnimation, child) =>
+            FadeTransition(opacity: animation, child: child),
+      ),
     );
   }
 
@@ -502,5 +602,102 @@ class _MarkdownText extends StatelessWidget {
     }
 
     return spans;
+  }
+}
+
+/// Base64 图片全屏查看弹窗
+class _Base64ImageDialog extends StatelessWidget {
+  final Uint8List bytes;
+  final String? filePath;
+
+  const _Base64ImageDialog({required this.bytes, this.filePath});
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: Colors.transparent,
+      body: Stack(
+        children: [
+          // 点击空白区域关闭
+          Positioned.fill(
+            child: GestureDetector(
+              onTap: () => Navigator.of(context).pop(),
+              child: Container(color: Colors.transparent),
+            ),
+          ),
+          // 图片（居中）
+          Center(
+            child: GestureDetector(
+              onTap: () {}, // 阻止点击穿透到背景
+              child: InteractiveViewer(
+                minScale: 0.5,
+                maxScale: 5.0,
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(8),
+                  child: Image.memory(bytes, fit: BoxFit.contain),
+                ),
+              ),
+            ),
+          ),
+          // 顶部工具栏
+          Positioned(
+            top: 0,
+            left: 0,
+            right: 0,
+            child: SafeArea(
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.end,
+                  children: [
+                    // 打开文件路径按钮（仅当 filePath 存在时显示）
+                    if (filePath != null && filePath!.isNotEmpty)
+                      IconButton(
+                        onPressed: () => _openInFinder(),
+                        icon: const Icon(Icons.folder_open, color: Colors.white, size: 22),
+                        tooltip: '在 Finder 中显示',
+                        style: IconButton.styleFrom(
+                          backgroundColor: Colors.black.withOpacity(0.5),
+                        ),
+                      ),
+                    // 复制图片到剪贴板
+                    IconButton(
+                      onPressed: () => _copyToClipboard(),
+                      icon: const Icon(Icons.copy, color: Colors.white, size: 22),
+                      tooltip: '复制图片',
+                      style: IconButton.styleFrom(
+                        backgroundColor: Colors.black.withOpacity(0.5),
+                      ),
+                    ),
+                    const SizedBox(width: 4),
+                    // 关闭按钮
+                    IconButton(
+                      onPressed: () => Navigator.of(context).pop(),
+                      icon: const Icon(Icons.close, color: Colors.white, size: 28),
+                      style: IconButton.styleFrom(
+                        backgroundColor: Colors.black.withOpacity(0.5),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _openInFinder() {
+    if (filePath == null || !File(filePath!).existsSync()) return;
+    if (Platform.isMacOS) {
+      Process.run('open', ['-R', filePath!]); // 在 Finder 中选中并显示
+    } else if (Platform.isWindows) {
+      Process.run('explorer.exe', ['/select,', filePath!]);
+    }
+  }
+
+  void _copyToClipboard() {
+    Clipboard.setData(ClipboardData(text: 'data:image/png;base64,${base64Encode(bytes)}'));
   }
 }

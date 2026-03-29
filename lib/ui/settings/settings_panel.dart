@@ -240,48 +240,124 @@ class _AIModelSettings extends StatefulWidget {
 
 class _AIModelSettingsState extends State<_AIModelSettings> {
   String _selectedProvider = 'qwen';
+  String _selectedModel = '';
   final _apiKeyController = TextEditingController();
-  final _modelController = TextEditingController();
-  final _endpointController = TextEditingController();
   bool _configLoaded = false;
   bool _enableWebSearch = false;
   bool _enableDeepThink = false;
-  
-  // ── 上下文模式设置 ──
-  PromptLevel _promptLevel = PromptLevel.full; // 默认使用最好的提示词
+  PromptLevel _promptLevel = PromptLevel.full;
 
-  /// 各 provider 独立缓存配置（provider -> JSON），切换时保存/恢复
+  // ── 多模态模型（品牌跟随文本模型）──
+  String _visionModel = '';
+
+  /// 各 provider 独立缓存（切换时保存/恢复）
   final Map<String, Map<String, dynamic>> _providerConfigs = {};
 
-  final _providers = {
-    'qwen': {'name': '通义千问', 'icon': '🌐', 'hint': 'DashScope API Key'},
-    'hunyuan': {'name': '腾讯混元', 'icon': '🔮', 'hint': '混元 API Key (控制台创建)'},
-    'deepseek': {'name': 'DeepSeek', 'icon': '🔭', 'hint': 'DeepSeek API Key'},
-    'kimi': {'name': 'Kimi', 'icon': '🌙', 'hint': 'Moonshot API Key'},
-    'minimax': {'name': 'MiniMax', 'icon': '⚡', 'hint': 'MiniMax API Key'},
-    'openai': {'name': 'OpenAI', 'icon': '🤖', 'hint': 'OpenAI API Key'},
-    'claude': {'name': 'Claude', 'icon': '🧠', 'hint': 'Anthropic API Key'},
-    'gemini': {'name': 'Gemini', 'icon': '💎', 'hint': 'Google AI API Key'},
-    'ollama': {'name': 'Ollama本地', 'icon': '🏠', 'hint': '无需API Key'},
-    'chatglm': {'name': '智谱ChatGLM', 'icon': '🔮', 'hint': '智谱 API Key'},
+  // ════════════════════════════════════════════
+  // 精简的品牌 + 预设模型列表
+  // ════════════════════════════════════════════
+  static const _brands = {
+    'qwen':    {'name': '通义千问',     'icon': '🌐', 'hint': 'DashScope API Key (sk-xxx)'},
+    'hunyuan': {'name': '腾讯混元',     'icon': '🔮', 'hint': '混元 API Key'},
+    'chatglm': {'name': '智谱 GLM',    'icon': '🔬', 'hint': '智谱 API Key'},
+    'openai':  {'name': 'OpenAI',      'icon': '🤖', 'hint': 'OpenAI API Key (sk-xxx)'},
+    'claude':  {'name': 'Claude',      'icon': '🧠', 'hint': 'Anthropic API Key (sk-ant-xxx)'},
+    'gemini':  {'name': 'Gemini',      'icon': '💎', 'hint': 'Google AI API Key'},
+    'ollama':  {'name': 'Ollama 本地', 'icon': '🏠', 'hint': '无需 API Key'},
   };
 
-  /// 将当前输入框的值缓存到 _providerConfigs
+  /// 每个品牌的预设模型列表  [model_id, 显示名]
+  static const _presetModels = <String, List<List<String>>>{
+    'qwen': [
+      ['qwen3-max',         'Qwen3 Max（旗舰）'],
+      ['qwen3-plus',        'Qwen3 Plus（均衡）'],
+      ['qwen3-turbo',       'Qwen3 Turbo（快速）'],
+      ['qwq-plus',          'QwQ Plus（推理增强）'],
+      ['qwen3-235b-a22b',   'Qwen3-235B（开源旗舰）'],
+      ['qwen3-32b',         'Qwen3-32B（开源均衡）'],
+    ],
+    'hunyuan': [
+      ['hunyuan-t1',            'Hunyuan T1（旗舰推理）'],
+      ['hunyuan-turbos-latest', 'Hunyuan TurboS（快速思考）'],
+      ['hunyuan-a13b',          'Hunyuan A13B（MoE 均衡）'],
+      ['hunyuan-large',         'Hunyuan Large（高质量）'],
+      ['hunyuan-lite',          'Hunyuan Lite（免费）'],
+    ],
+    'chatglm': [
+      ['glm-5',        'GLM-5（旗舰）'],
+      ['glm-5-turbo',  'GLM-5 Turbo（快速）'],
+      ['glm-4-plus',   'GLM-4 Plus'],
+      ['glm-4-flash',  'GLM-4 Flash（免费）'],
+    ],
+    'openai': [
+      ['gpt-4o',          'GPT-4o'],
+      ['gpt-4o-mini',     'GPT-4o Mini（快速省钱）'],
+      ['o3',              'o3（最强推理）'],
+      ['o4-mini',         'o4-mini（快速推理）'],
+    ],
+    'claude': [
+      ['claude-opus-4-5',           'Claude Opus 4.5（最强）'],
+      ['claude-sonnet-4-5',         'Claude Sonnet 4.5（均衡）'],
+      ['claude-3-7-sonnet-20250219','Claude 3.7 Sonnet（思考）'],
+      ['claude-3-5-haiku-20241022', 'Claude 3.5 Haiku（快速）'],
+    ],
+    'gemini': [
+      ['gemini-2.5-pro',          'Gemini 2.5 Pro（最强）'],
+      ['gemini-2.0-flash',        'Gemini 2.0 Flash（均衡）'],
+      ['gemini-2.0-flash-lite',   'Gemini 2.0 Flash Lite（快速）'],
+    ],
+    'ollama': [
+      ['llama3.3',       'Llama 3.3 70B'],
+      ['qwen3:30b',      'Qwen3 30B'],
+      ['deepseek-r2',    'DeepSeek R2'],
+      ['gemma3:27b',     'Gemma 3 27B'],
+      ['mistral',        'Mistral'],
+    ],
+  };
+
+  /// 多模态预设模型列表 [model_id, 显示名]
+  static const _visionPresetModels = <String, List<List<String>>>{
+    'qwen': [
+      ['qwen3-vl-plus',    'Qwen3-VL Plus（最强视觉）'],
+      ['qwen3-vl-flash',   'Qwen3-VL Flash（快速）'],
+      ['qwen-vl-max',      'Qwen-VL Max（上代旗舰）'],
+    ],
+    'hunyuan': [
+      ['hunyuan-vision',   'Hunyuan Vision（视觉旗舰）'],
+    ],
+    'chatglm': [
+      ['glm-4v-plus',      'GLM-4V Plus（最强视觉）'],
+      ['glm-4v-flash',     'GLM-4V Flash（快速）'],
+    ],
+    'claude': [
+      ['claude-sonnet-4-20250514',      'Claude Sonnet 4（推荐）'],
+      ['claude-3-5-sonnet-20241022',    'Claude 3.5 Sonnet'],
+      ['claude-3-5-haiku-20241022',     'Claude 3.5 Haiku（快速）'],
+    ],
+  };
+
+  /// 各品牌默认 API 端点
+  static const _defaultEndpoints = {
+    'qwen':    'https://dashscope.aliyuncs.com/compatible-mode/v1',
+    'hunyuan': 'https://api.hunyuan.cloud.tencent.com/v1',
+    'chatglm': 'https://open.bigmodel.cn/api/paas/v4',
+    'openai':  'https://api.openai.com/v1',
+    'claude':  'https://api.anthropic.com',
+    'gemini':  'https://generativelanguage.googleapis.com/v1beta/openai',
+    'ollama':  'http://localhost:11434',
+  };
+
   void _cacheCurrentConfig() {
     _providerConfigs[_selectedProvider] = {
       'apiKey': _apiKeyController.text,
-      'model': _modelController.text,
-      'baseUrl': _endpointController.text,
+      'model': _selectedModel,
       'enableWebSearch': _enableWebSearch,
       'enableDeepThink': _enableDeepThink,
     };
   }
 
-  /// 从 _providerConfigs 或 Hive 恢复指定 provider 的配置到输入框
   void _loadProviderConfig(String provider) {
-    // 优先从内存缓存取
     var cfg = _providerConfigs[provider];
-    // 缓存没有则从 Hive 读取
     if (cfg == null) {
       final box = Hive.box('settings');
       final saved = box.get('llm_config_$provider');
@@ -290,23 +366,26 @@ class _AIModelSettingsState extends State<_AIModelSettings> {
         _providerConfigs[provider] = cfg;
       }
     }
+    final models = _presetModels[provider] ?? [];
+    final defaultModel = models.isNotEmpty ? models.first[0] : '';
+
     if (cfg != null) {
-      _apiKeyController.text = cfg['apiKey'] ?? '';
-      _modelController.text = cfg['model'] ?? '';
-      _endpointController.text = cfg['baseUrl'] ?? '';
-      _enableWebSearch = cfg['enableWebSearch'] ?? false;
-      _enableDeepThink = cfg['enableDeepThink'] ?? false;
+      _apiKeyController.text = cfg['apiKey'] as String? ?? '';
+      final savedModel = cfg['model'] as String? ?? '';
+      // 如果保存的 model 不在预设列表里，也允许保留（自定义模型兼容）
+      _selectedModel = savedModel.isNotEmpty ? savedModel : defaultModel;
+      _enableWebSearch = cfg['enableWebSearch'] as bool? ?? false;
+      _enableDeepThink = cfg['enableDeepThink'] as bool? ?? false;
     } else {
       _apiKeyController.clear();
-      _modelController.clear();
-      _endpointController.clear();
+      _selectedModel = defaultModel;
       _enableWebSearch = false;
       _enableDeepThink = false;
     }
-    // 混元旧版 URL 自动清空
-    if (provider == 'hunyuan' && _endpointController.text.contains('hunyuan.tencentcloudapi.com')) {
-      _endpointController.clear();
-    }
+
+    // 不支持的功能自动关闭
+    if (!_supportsWebSearch(provider)) _enableWebSearch = false;
+    if (!_supportsDeepThink(provider)) _enableDeepThink = false;
   }
 
   @override
@@ -317,27 +396,18 @@ class _AIModelSettingsState extends State<_AIModelSettings> {
       final llmManager = context.read<LLMManager>();
       final config = llmManager.currentConfig;
       _selectedProvider = config.provider;
-      // 用当前活跃的 config 初始化
       _apiKeyController.text = config.apiKey;
-      _modelController.text = config.model;
-      final savedUrl = config.baseUrl ?? '';
-      if (config.provider == 'hunyuan' && savedUrl.contains('hunyuan.tencentcloudapi.com')) {
-        _endpointController.text = '';
-      } else {
-        _endpointController.text = savedUrl;
-      }
+      _selectedModel = config.model;
       _enableWebSearch = config.enableWebSearch;
       _enableDeepThink = config.enableDeepThink;
-      // 缓存当前 provider 的配置
       _providerConfigs[_selectedProvider] = {
-        'apiKey': _apiKeyController.text,
-        'model': _modelController.text,
-        'baseUrl': _endpointController.text,
-        'enableWebSearch': _enableWebSearch,
-        'enableDeepThink': _enableDeepThink,
+        'apiKey': config.apiKey,
+        'model': config.model,
+        'enableWebSearch': config.enableWebSearch,
+        'enableDeepThink': config.enableDeepThink,
       };
-      
-      // 加载上下文模式设置
+      // 多模态配置
+      _visionModel = config.visionModel ?? '';
       final savedLevel = StorageManager.getSetting<String>('prompt_level', defaultValue: 'full');
       _promptLevel = PromptLevelExtension.fromString(savedLevel ?? 'full') ?? PromptLevel.full;
     }
@@ -346,59 +416,54 @@ class _AIModelSettingsState extends State<_AIModelSettings> {
   @override
   void dispose() {
     _apiKeyController.dispose();
-    _modelController.dispose();
-    _endpointController.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
+    final models = _presetModels[_selectedProvider] ?? [];
+
     return SingleChildScrollView(
       padding: const EdgeInsets.all(20),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Text(
-            '选择 AI 模型',
-            style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
-          ),
-          const SizedBox(height: 12),
-
-          // 模型选择卡片
+          // ── 品牌选择 ──
+          const Text('选择 AI 品牌', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
+          const SizedBox(height: 10),
           Wrap(
             spacing: 8,
             runSpacing: 8,
-            children: _providers.entries.map((entry) {
-              final isSelected = _selectedProvider == entry.key;
+            children: _brands.entries.map((e) {
+              final isSelected = _selectedProvider == e.key;
               return GestureDetector(
                 onTap: () {
-                  if (_selectedProvider != entry.key) {
+                  if (_selectedProvider != e.key) {
                     _cacheCurrentConfig();
-                    setState(() {
-                      _selectedProvider = entry.key;
-                    });
-                    _loadProviderConfig(entry.key);
+                    setState(() => _selectedProvider = e.key);
+                    _loadProviderConfig(e.key);
                   }
                 },
-                child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                child: AnimatedContainer(
+                  duration: const Duration(milliseconds: 150),
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
                   decoration: BoxDecoration(
-                    color: isSelected ? const Color(0xFF4FC3F7).withOpacity(0.1) : Colors.grey.shade50,
-                    borderRadius: BorderRadius.circular(12),
+                    color: isSelected ? const Color(0xFF4FC3F7).withOpacity(0.12) : Colors.grey.shade50,
+                    borderRadius: BorderRadius.circular(10),
                     border: Border.all(
                       color: isSelected ? const Color(0xFF4FC3F7) : Colors.grey.shade200,
-                      width: isSelected ? 2 : 1,
+                      width: isSelected ? 1.5 : 1,
                     ),
                   ),
                   child: Row(
                     mainAxisSize: MainAxisSize.min,
                     children: [
-                      Text(entry.value['icon']!, style: const TextStyle(fontSize: 18)),
-                      const SizedBox(width: 6),
+                      Text(e.value['icon']!, style: const TextStyle(fontSize: 16)),
+                      const SizedBox(width: 5),
                       Text(
-                        entry.value['name']!,
+                        e.value['name']!,
                         style: TextStyle(
-                          fontSize: 13,
+                          fontSize: 12,
                           fontWeight: isSelected ? FontWeight.w600 : FontWeight.normal,
                           color: isSelected ? const Color(0xFF4FC3F7) : Colors.black87,
                         ),
@@ -412,92 +477,138 @@ class _AIModelSettingsState extends State<_AIModelSettings> {
 
           const SizedBox(height: 20),
 
-          // API Key 输入
+          // ── API Key（Ollama 不需要）──
           if (_selectedProvider != 'ollama') ...[
             _SettingField(
               label: 'API Key',
-              hint: _providers[_selectedProvider]?['hint'] ?? '',
+              hint: _brands[_selectedProvider]?['hint'] ?? '',
               controller: _apiKeyController,
               isPassword: true,
             ),
-            const SizedBox(height: 12),
+            const SizedBox(height: 14),
           ],
 
-          // 模型名称
-          _SettingField(
-            label: '模型名称',
-            hint: _getDefaultModel(),
-            controller: _modelController,
+          // ── 模型选择 ──
+          const Text('选择模型', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w500)),
+          const SizedBox(height: 8),
+
+          // 文本模型
+          Row(
+            children: [
+              SizedBox(
+                width: 70,
+                child: Text('文本模型', style: TextStyle(fontSize: 12, color: Colors.grey[600])),
+              ),
+              Expanded(
+                child: _buildModelDropdown(
+                  models: models,
+                  value: _selectedModel,
+                  onChanged: (v) {
+                    if (v != null) setState(() => _selectedModel = v);
+                  },
+                ),
+              ),
+            ],
           ),
-          const SizedBox(height: 12),
 
-          // API 端点
-          _SettingField(
-            label: 'API 端点 (可选)',
-            hint: _getDefaultEndpoint(),
-            controller: _endpointController,
+          const SizedBox(height: 10),
+
+          // 多模态模型（品牌跟随文本模型）
+          Row(
+            children: [
+              SizedBox(
+                width: 70,
+                child: Text('视觉模型', style: TextStyle(fontSize: 12, color: Colors.grey[600])),
+              ),
+              Expanded(
+                child: Builder(builder: (context) {
+                  final vModels = _visionPresetModels[_selectedProvider] ?? [];
+                  if (vModels.isEmpty) {
+                    return Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                      decoration: BoxDecoration(
+                        border: Border.all(color: const Color(0xFFE0E0E0)),
+                        borderRadius: BorderRadius.circular(10),
+                        color: Colors.grey.shade50,
+                      ),
+                      child: Text(
+                        '当前品牌暂不支持视觉模型',
+                        style: TextStyle(fontSize: 12, color: Colors.grey[400]),
+                      ),
+                    );
+                  }
+                  // 切换品牌时重置视觉模型选择
+                  final currentModel = vModels.any((m) => m[0] == _visionModel)
+                      ? _visionModel
+                      : vModels.first[0];
+                  if (currentModel != _visionModel) {
+                    WidgetsBinding.instance.addPostFrameCallback((_) {
+                      if (mounted) setState(() => _visionModel = currentModel);
+                    });
+                  }
+                  return _buildModelDropdown(
+                    models: vModels,
+                    value: currentModel,
+                    onChanged: (v) {
+                      if (v != null) setState(() => _visionModel = v);
+                    },
+                  );
+                }),
+              ),
+            ],
+          ),
+          Padding(
+            padding: const EdgeInsets.only(top: 4, left: 74),
+            child: Text(
+              '用于截图分析，复用当前品牌的 API Key',
+              style: TextStyle(fontSize: 10, color: Colors.grey[400]),
+            ),
           ),
 
-          const SizedBox(height: 16),
+          // ── 增强功能（只显示支持的）──
+          if (_supportsWebSearch(_selectedProvider) || _supportsDeepThink(_selectedProvider)) ...[
+            Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: Colors.white.withOpacity(0.7),
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('增强功能', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: Colors.grey[700])),
+                  const SizedBox(height: 6),
+                  if (_supportsWebSearch(_selectedProvider))
+                    SwitchListTile(
+                      contentPadding: EdgeInsets.zero,
+                      dense: true,
+                      title: const Text('联网搜索', style: TextStyle(fontSize: 13)),
+                      subtitle: Text(_webSearchSubtitle(_selectedProvider),
+                          style: TextStyle(fontSize: 11, color: Colors.grey[500])),
+                      value: _enableWebSearch,
+                      activeThumbColor: const Color(0xFF4FC3F7),
+                      onChanged: (v) => setState(() => _enableWebSearch = v),
+                    ),
+                  if (_supportsDeepThink(_selectedProvider))
+                    SwitchListTile(
+                      contentPadding: EdgeInsets.zero,
+                      dense: true,
+                      title: const Text('深度思考', style: TextStyle(fontSize: 13)),
+                      subtitle: Text(_deepThinkSubtitle(_selectedProvider),
+                          style: TextStyle(fontSize: 11, color: Colors.grey[500])),
+                      value: _enableDeepThink,
+                      activeThumbColor: const Color(0xFF4FC3F7),
+                      onChanged: (v) => setState(() => _enableDeepThink = v),
+                    ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 16),
+          ],
 
-          // 增强功能开关
+          // ── 上下文模式 ──
           Container(
             padding: const EdgeInsets.all(12),
-            decoration: BoxDecoration(
-              color: Colors.white.withOpacity(0.7),
-              borderRadius: BorderRadius.circular(12),
-            ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  '增强功能',
-                  style: TextStyle(
-                    fontSize: 13,
-                    fontWeight: FontWeight.w600,
-                    color: Colors.grey[700],
-                  ),
-                ),
-                const SizedBox(height: 8),
-                SwitchListTile(
-                  contentPadding: EdgeInsets.zero,
-                  dense: true,
-                  title: const Text('联网搜索', style: TextStyle(fontSize: 13)),
-                  subtitle: Text(
-                    _selectedProvider == 'ollama'
-                        ? '需要 Ollama v0.5+'
-                        : '让 AI 搜索互联网获取实时信息',
-                    style: TextStyle(fontSize: 11, color: Colors.grey[500]),
-                  ),
-                  value: _enableWebSearch,
-                  activeColor: const Color(0xFF4FC3F7),
-                  onChanged: (v) => setState(() => _enableWebSearch = v),
-                ),
-                SwitchListTile(
-                  contentPadding: EdgeInsets.zero,
-                  dense: true,
-                  title: const Text('深度思考', style: TextStyle(fontSize: 13)),
-                  subtitle: Text(
-                    _selectedProvider == 'hunyuan'
-                        ? '选择思考模型（如 hunyuan-turbos）自动启用'
-                        : '启用推理增强，提高复杂问题回答质量',
-                    style: TextStyle(fontSize: 11, color: Colors.grey[500]),
-                  ),
-                  value: _enableDeepThink,
-                  activeColor: const Color(0xFF4FC3F7),
-                  onChanged: _selectedProvider == 'ollama'
-                      ? null // Ollama 本地模型不支持
-                      : (v) => setState(() => _enableDeepThink = v),
-                ),
-              ],
-            ),
-          ),
-
-          const SizedBox(height: 20),
-
-          // ── 上下文模式设置 ──
-          Container(
-            padding: const EdgeInsets.all(16),
             decoration: BoxDecoration(
               color: Colors.grey.shade50,
               borderRadius: BorderRadius.circular(12),
@@ -506,29 +617,17 @@ class _AIModelSettingsState extends State<_AIModelSettings> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(
-                  '上下文模式',
-                  style: TextStyle(
-                    fontSize: 13,
-                    fontWeight: FontWeight.w600,
-                    color: Colors.grey[700],
-                  ),
-                ),
-                const SizedBox(height: 8),
-                Text(
-                  '选择 System Prompt 的详细程度',
-                  style: TextStyle(fontSize: 11, color: Colors.grey[500]),
-                ),
-                const SizedBox(height: 12),
-                
-                // 模式选择
+                Text('上下文模式', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: Colors.grey[700])),
+                const SizedBox(height: 4),
+                Text('System Prompt 详细程度', style: TextStyle(fontSize: 11, color: Colors.grey[500])),
+                const SizedBox(height: 10),
                 ...[PromptLevel.minimal, PromptLevel.standard, PromptLevel.full].map((level) {
                   final isSelected = _promptLevel == level;
                   return GestureDetector(
                     onTap: () => setState(() => _promptLevel = level),
                     child: Container(
-                      margin: const EdgeInsets.only(bottom: 8),
-                      padding: const EdgeInsets.all(12),
+                      margin: const EdgeInsets.only(bottom: 6),
+                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
                       decoration: BoxDecoration(
                         color: isSelected ? const Color(0xFF4FC3F7).withOpacity(0.1) : Colors.white,
                         borderRadius: BorderRadius.circular(8),
@@ -541,7 +640,7 @@ class _AIModelSettingsState extends State<_AIModelSettings> {
                           Icon(
                             isSelected ? Icons.radio_button_checked : Icons.radio_button_off,
                             color: isSelected ? const Color(0xFF4FC3F7) : Colors.grey,
-                            size: 18,
+                            size: 16,
                           ),
                           const SizedBox(width: 8),
                           Expanded(
@@ -550,14 +649,11 @@ class _AIModelSettingsState extends State<_AIModelSettings> {
                               children: [
                                 Text(
                                   _getPromptLevelDisplayName(level),
-                                  style: TextStyle(
-                                    fontSize: 13,
-                                    fontWeight: isSelected ? FontWeight.w600 : FontWeight.normal,
-                                  ),
+                                  style: TextStyle(fontSize: 12, fontWeight: isSelected ? FontWeight.w600 : FontWeight.normal),
                                 ),
                                 Text(
                                   _getPromptLevelDescription(level),
-                                  style: TextStyle(fontSize: 11, color: Colors.grey[500]),
+                                  style: TextStyle(fontSize: 10, color: Colors.grey[500]),
                                 ),
                               ],
                             ),
@@ -573,7 +669,7 @@ class _AIModelSettingsState extends State<_AIModelSettings> {
 
           const SizedBox(height: 20),
 
-          // 保存按钮
+          // ── 保存按钮 ──
           SizedBox(
             width: double.infinity,
             child: ElevatedButton(
@@ -592,78 +688,131 @@ class _AIModelSettingsState extends State<_AIModelSettings> {
     );
   }
 
-  String _getDefaultModel() {
-    switch (_selectedProvider) {
-      case 'qwen': return 'qwen-turbo';
-      case 'hunyuan': return 'hunyuan-lite';
-      case 'deepseek': return 'deepseek-chat';
-      case 'kimi': return 'moonshot-v1-8k';
-      case 'minimax': return 'abab6.5s-chat';
-      case 'openai': return 'gpt-4o-mini';
-      case 'claude': return 'claude-3-haiku-20240307';
-      case 'gemini': return 'gemini-2.0-flash';
-      case 'ollama': return 'llama3';
-      case 'chatglm': return 'glm-4-flash';
-      default: return '';
+  String _getPromptLevelDisplayName(PromptLevel level) {
+    switch (level) {
+      case PromptLevel.minimal: return '简洁模式 (~500 tokens)';
+      case PromptLevel.standard: return '标准模式 (~2000 tokens)';
+      case PromptLevel.full: return '完整模式 (~4000 tokens) ⭐推荐';
     }
   }
 
-  String _getDefaultEndpoint() {
-    switch (_selectedProvider) {
-      case 'qwen': return 'https://dashscope.aliyuncs.com/compatible-mode/v1';
-      case 'hunyuan': return 'https://api.hunyuan.cloud.tencent.com/v1';
-      case 'deepseek': return 'https://api.deepseek.com/v1';
-      case 'kimi': return 'https://api.moonshot.cn/v1';
-      case 'minimax': return 'https://api.minimax.chat/v1';
-      case 'openai': return 'https://api.openai.com/v1';
-      case 'claude': return 'https://api.anthropic.com';
-      case 'gemini': return 'https://generativelanguage.googleapis.com/v1beta/openai';
-      case 'ollama': return 'http://localhost:11434';
-      case 'chatglm': return 'https://open.bigmodel.cn/api/paas/v4';
-      default: return '';
-    }
-  }
-  
-  String _getPromptLevelDisplayName(PromptLevel level) {
-    switch (level) {
-      case PromptLevel.minimal:
-        return '简洁模式 (~500 tokens)';
-      case PromptLevel.standard:
-        return '标准模式 (~2000 tokens)';
-      case PromptLevel.full:
-        return '完整模式 (~4000 tokens) ⭐推荐';
-    }
-  }
-  
   String _getPromptLevelDescription(PromptLevel level) {
     switch (level) {
-      case PromptLevel.minimal:
-        return '适合简单聊天，节省 token，响应更快';
-      case PromptLevel.standard:
-        return '日常对话，包含基础工具说明';
-      case PromptLevel.full:
-        return '完整人格设定和工具说明，最佳体验';
+      case PromptLevel.minimal: return '简单聊天，节省 token，响应更快';
+      case PromptLevel.standard: return '日常对话，包含基础工具说明';
+      case PromptLevel.full: return '完整人格设定和工具说明，最佳体验';
     }
+  }
+
+  // ── 联网搜索支持 ──
+  bool _supportsWebSearch(String provider) =>
+      const {'qwen', 'hunyuan', 'chatglm', 'openai', 'claude'}.contains(provider);
+
+  String _webSearchSubtitle(String provider) {
+    const map = {
+      'qwen':    '阿里云内置联网搜索',
+      'hunyuan': '腾讯混元内置联网搜索',
+      'chatglm': '智谱 GLM 内置联网搜索',
+      'openai':  'OpenAI web_search_preview',
+      'claude':  'Anthropic 内置联网搜索',
+    };
+    return map[provider] ?? '';
+  }
+
+  // ── 深度思考支持 ──
+  bool _supportsDeepThink(String provider) =>
+      const {'qwen', 'chatglm', 'openai', 'claude'}.contains(provider);
+
+  String _deepThinkSubtitle(String provider) {
+    const map = {
+      'qwen':    '启用推理增强（与工具调用互斥）',
+      'chatglm': '仅 GLM-5 系列支持',
+      'openai':  'o1/o3/o4 系列推理模型',
+      'claude':  'claude-3-7 系列 extended thinking',
+    };
+    return map[provider] ?? '';
+  }
+
+  /// 统一的下拉框样式组件
+  Widget _buildModelDropdown({
+    required List<List<String>> models,
+    required String value,
+    required ValueChanged<String?> onChanged,
+  }) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 12),
+      decoration: BoxDecoration(
+        border: Border.all(color: const Color(0xFFE0E0E0)),
+        borderRadius: BorderRadius.circular(10),
+        color: Colors.white,
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.04),
+            blurRadius: 4,
+            offset: const Offset(0, 1),
+          ),
+        ],
+      ),
+      child: DropdownButtonHideUnderline(
+        child: DropdownButton<String>(
+          value: models.any((m) => m[0] == value) ? value : (models.isNotEmpty ? models.first[0] : null),
+          isExpanded: true,
+          icon: const Icon(Icons.keyboard_arrow_down, size: 20, color: Color(0xFF9E9E9E)),
+          style: const TextStyle(fontSize: 13, color: Colors.black87),
+          dropdownColor: Colors.white,
+          elevation: 8,
+          borderRadius: BorderRadius.circular(10),
+          menuMaxHeight: 280,
+          items: models.map((m) => DropdownMenuItem(
+            value: m[0],
+            child: Text(
+              m[1],
+              style: const TextStyle(fontSize: 13, color: Colors.black87),
+            ),
+          )).toList(),
+          onChanged: onChanged,
+        ),
+      ),
+    );
   }
 
   void _saveSettings() {
     final llmManager = context.read<LLMManager>();
+    final model = _selectedModel.isNotEmpty
+        ? _selectedModel
+        : (_presetModels[_selectedProvider]?.first[0] ?? '');
+    final endpoint = _defaultEndpoints[_selectedProvider] ?? '';
+
+    // 多模态配置
+    final visionModels = _visionPresetModels[_selectedProvider] ?? [];
+    final savedVisionModel = _visionModel.isNotEmpty && visionModels.any((m) => m[0] == _visionModel)
+        ? _visionModel
+        : (visionModels.isNotEmpty ? visionModels.first[0] : '');
+
     final config = LLMConfig(
       provider: _selectedProvider,
       apiKey: _apiKeyController.text.trim(),
-      model: _modelController.text.trim().isEmpty ? _getDefaultModel() : _modelController.text.trim(),
-      baseUrl: _endpointController.text.trim().isEmpty ? _getDefaultEndpoint() : _endpointController.text.trim(),
+      model: model,
+      baseUrl: endpoint,
       enableWebSearch: _enableWebSearch,
       enableDeepThink: _enableDeepThink,
+      visionProvider: _selectedProvider,
+      visionModel: savedVisionModel,
     );
     llmManager.setConfig(config);
 
-    // 独立保存当前 provider 的配置
     final box = Hive.box('settings');
-    box.put('llm_config_${_selectedProvider}', config.toJson());
-    
-    // 保存上下文模式设置
+    box.put('llm_config_$_selectedProvider', config.toJson());
     StorageManager.setSetting('prompt_level', _promptLevel.name);
+
+    // 缓存当前配置
+    _providerConfigs[_selectedProvider] = {
+      'apiKey': _apiKeyController.text,
+      'model': model,
+      'enableWebSearch': _enableWebSearch,
+      'enableDeepThink': _enableDeepThink,
+    };
 
     widget.onShowBubble?.call('✅ AI模型配置已保存~ 嘎！');
   }

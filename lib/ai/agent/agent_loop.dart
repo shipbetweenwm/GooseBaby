@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
 import '../../models/models.dart';
 import 'agent_types.dart';
@@ -48,6 +49,21 @@ class AgentLoop {
     String? userRequest,
     AgentMode mode = AgentMode.craft,
     void Function(PendingPlan plan)? onPlanGenerated,
+    /// 截图分析回调：将截图 base64 + mimeType + 屏幕元信息 发给视觉模型，返回屏幕描述
+    /// 返回 null 则不做视觉分析
+    /// [screenInfo] 包含逻辑分辨率 width/height 和缩放因子 scaleFactor，
+    /// 视觉模型需要根据此信息报告逻辑坐标（与鼠标点击坐标系一致）
+    Future<String?> Function(String base64Image, String mimeType, Map<String, dynamic> screenInfo)? analyzeScreenshot,
+    /// 是否将截图作为多模态图片直接嵌入对话消息（供主模型直接看图）
+    /// 为 true 时，截图会作为 image_url 类型的 user 消息注入到 workingMessages 中，
+    /// 主模型可以直接看到截图并据此决策，无需通过视觉模型间接获取文字描述。
+    /// 启用此选项时，主模型必须是多模态模型（如 qwen-vl-max、gpt-4o 等）。
+    bool embedScreenshotImages = false,
+    /// 截图滑动窗口大小（记忆压缩/上下文窗口管理）
+    /// 在发送给 LLM 前，只保留最近 [maxScreenshotsInContext] 张截图，
+    /// 更早的截图消息会被替换为压缩后的文字摘要，大幅降低 token 消耗。
+    /// 默认 4 张（约 2 轮 screenshot + confirm_screenshot），设为 0 表示不限制。
+    int maxScreenshotsInContext = 4,
   }) async {
     // 创建 Hook 管理器
     final hookManager = HookManager();
@@ -83,10 +99,13 @@ class AgentLoop {
     // ── 循环防护 ──
     const maxDuplicateRounds = 3;
     const maxStagnantRounds = 4;
-    const maxFailedCalls = 3;
+    const maxFailedCalls = 5;
     final recentSignatures = <String>[];
     final recentResultLengths = <int>[];
     final recentFailedToolNames = <String>[];
+
+    // CUA 模式：连续纯文本轮数跟踪（用于防止 LLM "偷懒"）
+    int cuaPlainTextRounds = 0;
 
     // ── 重试跟踪（用于触发 beforeRetry 钩子） ──
     final lastFailedTools = <String, ToolCall>{}; // 工具名 → 最后失败的调用
@@ -96,14 +115,23 @@ class AgentLoop {
       // ── 每轮开始前检查取消 ──
       cancellationToken?.throwIfCancelled();
       
-      debugPrint('🔄 [Agent 第${turn + 1}轮] 发送 ${workingMessages.length} 条消息');
+      // ── 截图滑动窗口（优化3：记忆压缩/上下文窗口管理） ──
+      // 在发送给 LLM 前，压缩超出窗口大小的旧截图，降低 token 消耗
+      if (maxScreenshotsInContext > 0 && embedScreenshotImages) {
+        _applyScreenshotSlidingWindow(workingMessages, maxScreenshotsInContext);
+      }
 
-      // ── 调用 LLM ──
-      final response = await provider.chat(
-        workingMessages,
+      debugPrint('🔄 [Agent 第${turn + 1}轮] 发送 ${workingMessages.length} 条消息, tools=${tools.length}, model=${config.model}');
+
+      // ── 调用 LLM（支持即时取消） ──
+      final response = await _chat(
+        provider, workingMessages,
         config: config,
         tools: tools,
+        cancellationToken: cancellationToken,
       );
+
+      debugPrint('🔄 [Agent 第${turn + 1}轮] LLM返回: stopReason=${response.stopReason}, hasToolCalls=${response.hasToolCalls}, toolCount=${response.toolCalls.length}, textLen=${response.text.length}');
       
       // ── LLM 返回后再检查取消（等待期间用户可能已点停止） ──
       cancellationToken?.throwIfCancelled();
@@ -127,6 +155,31 @@ class AgentLoop {
           );
           await hookManager.triggerLoopEnd(result);
           return result;
+        }
+
+        // ── CUA 模式：不允许纯文本退出，强制要求继续操作 ──
+        if (mode == AgentMode.cua) {
+          cuaPlainTextRounds++;
+          if (cuaPlainTextRounds <= 3) {
+            // 追加 LLM 的纯文本到历史（让它知道自己的回复已被"看到"）
+            workingMessages.add({
+              'role': 'assistant',
+              'content': response.text.isEmpty ? null : response.text,
+            });
+            // 注入强制提醒
+            final reminder = cuaPlainTextRounds == 1
+                ? '【系统强制提醒】你处于 CUA 操作模式，不能只输出文字回复。'
+                    '你必须通过 cua(action=...) 工具执行实际桌面操作。'
+                    '请立即调用 cua 工具执行下一步操作。'
+                    '可选 action: screenshot(截图查看屏幕)、mouse_click(点击)、key_type(输入文本)、key_combo(快捷键)、open_app(打开应用)。'
+                : '【系统第${cuaPlainTextRounds}次提醒】CUA 模式下必须调用 cua 工具操作！'
+                    '不要输出文字描述，直接调用 cua 工具。如果你不确定当前屏幕状态，先调用 cua(action="screenshot") 截图查看。';
+            debugPrint('⚠️ [Agent] CUA 模式 LLM 返回纯文本 (第${cuaPlainTextRounds}次)，注入强制提醒');
+            workingMessages.add({'role': 'user', 'content': reminder});
+            continue; // 不退出循环，继续下一轮
+          }
+          // 超过 3 次纯文本，允许退出
+          debugPrint('⚠️ [Agent] CUA 模式连续 $cuaPlainTextRounds 轮纯文本，允许退出');
         }
         
         // LLM 返回纯文本 → 循环结束
@@ -153,6 +206,11 @@ class AgentLoop {
         await hookManager.triggerLoopEnd(result);
         
         return result;
+      }
+
+      // 有 tool_calls → 重置 CUA 纯文本计数
+      if (mode == AgentMode.cua) {
+        cuaPlainTextRounds = 0;
       }
       
       // ── 触发 LLM 响应后 Hook ──
@@ -188,10 +246,11 @@ class AgentLoop {
         });
         
         // 让 LLM 思考并生成计划
-        final planResponse = await provider.chat(
-          workingMessages,
+        final planResponse = await _chat(
+          provider, workingMessages,
           config: config,
           tools: [], // Plan 模式下不返回工具调用，只返回纯文本计划
+          cancellationToken: cancellationToken,
         );
         
         // 从 LLM 的规划响应中提取任务步骤
@@ -224,7 +283,7 @@ class AgentLoop {
           'content': '【系统提示】检测到你连续多轮调用完全相同的工具，请停止重复，直接基于已有结果回复。',
         });
         try {
-          final stopResp = await provider.chat(workingMessages, config: config);
+          final stopResp = await _chat(provider, workingMessages, config: config, cancellationToken: cancellationToken);
           final result = AgentLoopResult(
             text: stopResp.text,
             apiMessages: allApiMessages,
@@ -265,6 +324,9 @@ class AgentLoop {
 
       // ── 逐个执行工具 ──
       int roundResultLength = 0;
+      // 缓冲 hook 注入的 user 消息，避免插入在 assistant(tool_calls) 和 tool 之间
+      // 所有 tool 响应添加完之后再统一追加
+      final deferredHookMessages = <Map<String, dynamic>>[];
       for (final toolCall in response.toolCalls) {
         // ── 取消检查（每个工具执行前） ──
         cancellationToken?.throwIfCancelled();
@@ -298,11 +360,13 @@ class AgentLoop {
               if (retryHookResult.shouldBlock) {
                 debugPrint('🪝 [Hook] 阻止重试: ${toolCall.name}');
                 _addStep(steps, '⚠️ Hook 阻止重试', retryHookResult.userMessage ?? '重试被阻止', onStepUpdate);
+                // 被阻止的 tool_call 需要一个空响应，否则 API 会报错
+                workingMessages.add({'role': 'tool', 'tool_call_id': toolCall.id, 'content': '工具调用被阻止'});
                 continue;
               }
               if (retryHookResult.shouldInject && retryHookResult.injectedMessage != null) {
-                // 注入反思消息
-                workingMessages.add({
+                // 缓冲反思消息（不直接插入 workingMessages，避免打断 tool_calls → tool 连续性）
+                deferredHookMessages.add({
                   'role': 'user',
                   'content': retryHookResult.injectedMessage!,
                 });
@@ -331,11 +395,13 @@ class AgentLoop {
             // 阻止执行
             debugPrint('🪝 [Hook] 阻止工具调用: ${toolCall.name}');
             _addStep(steps, '⚠️ Hook 阻止', hookResult.userMessage ?? '工具调用被阻止', onStepUpdate);
+            // 被阻止的 tool_call 需要一个空响应
+            workingMessages.add({'role': 'tool', 'tool_call_id': toolCall.id, 'content': '工具调用被阻止'});
             continue;
           }
           if (hookResult.shouldInject && hookResult.injectedMessage != null) {
-            // 注入消息
-            workingMessages.add({
+            // 缓冲注入消息
+            deferredHookMessages.add({
               'role': 'user',
               'content': hookResult.injectedMessage!,
             });
@@ -343,6 +409,8 @@ class AgentLoop {
           if (hookResult.shouldSkip) {
             // 跳过当前工具
             debugPrint('🪝 [Hook] 跳过工具: ${toolCall.name}');
+            // 跳过的 tool_call 也需要一个空响应
+            workingMessages.add({'role': 'tool', 'tool_call_id': toolCall.id, 'content': '工具调用被跳过'});
             continue;
           }
           // ── 自动应用 Hook 建议的参数修改 ──
@@ -372,8 +440,37 @@ class AgentLoop {
         } else if (toolCall.name == 'read_file') {
           stepTitle = '📂 读取文件';
           stepDesc = toolCall.arguments['path'] as String? ?? '';
+        } else if (toolCall.name == 'cua') {
+          final action = toolCall.arguments['action'] as String? ?? '';
+          final cuaDescMap = {
+            'screenshot': '🖥️ 截取屏幕',
+            'mouse_click': '🖱️ 鼠标点击',
+            'mouse_move': '🖱️ 移动鼠标',
+            'mouse_scroll': '🖱️ 滚动',
+            'mouse_drag': '🖱️ 拖拽',
+            'key_type': '⌨️ 输入文本',
+            'key_combo': '⌨️ 快捷键',
+            'open_app': '🚀 打开应用',
+          };
+          stepTitle = cuaDescMap[action] ?? '🖥️ CUA';
+          if (action == 'screenshot') {
+            stepDesc = '截取屏幕截图...';
+          } else if (action.startsWith('mouse')) {
+            final x = toolCall.arguments['x'];
+            final y = toolCall.arguments['y'];
+            stepDesc = '($x, $y)';
+          } else if (action == 'key_type') {
+            final text = toolCall.arguments['text'] as String? ?? '';
+            stepDesc = text.length > 50 ? '${text.substring(0, 50)}...' : text;
+          } else if (action == 'key_combo') {
+            stepDesc = toolCall.arguments['keys'] as String? ?? '';
+          } else if (action == 'open_app') {
+            stepDesc = toolCall.arguments['app_name'] as String? ?? '';
+          } else {
+            stepDesc = action;
+          }
         } else {
-          stepTitle = '⚙️ 执行';
+          stepTitle = '⚙️ ${toolCall.name}';
           final cmd = toolCall.arguments['command'] as String? ?? '';
           final script = toolCall.arguments['script'] as String? ?? '';
           stepDesc = cmd.isNotEmpty ? cmd : script;
@@ -422,13 +519,96 @@ class AgentLoop {
         }
 
         // 追加工具结果消息
+        var toolContent = result.content;
+
+        // ── CUA 截图处理 ──
+        // 支持两种模式：
+        // 1. embedScreenshotImages=true：将截图直接作为图片嵌入对话（主模型直接看图）
+        // 2. embedScreenshotImages=false：调用视觉模型分析截图，返回文字描述追加到 tool 结果
+        // 两种模式都同时处理 screenshot 和 confirm_screenshot
+        final imageType = result.data?['imageType'];
+        final isScreenshot = !result.isError &&
+            (imageType == 'screenshot' || imageType == 'confirm_screenshot');
+
+        if (isScreenshot) {
+          final b64 = result.data!['base64'] as String?;
+          final mime = result.data!['mimeType'] as String? ?? 'image/jpeg';
+
+          if (embedScreenshotImages && b64 != null && b64.isNotEmpty) {
+            // ── 模式 1：直接嵌入图片到对话（主模型多模态） ──
+            // 截图作为 image_url 类型的 user 消息注入，主模型可以直接看到
+            step.content = '$stepDesc\n📸 已嵌入截图到对话';
+            step.isLoading = false;
+            onStepUpdate?.call(step);
+          } else if (analyzeScreenshot != null && b64 != null && b64.isNotEmpty) {
+            // ── 模式 2：调用视觉模型分析截图，返回文字描述 ──
+            step.content = '$stepDesc\n🔍 正在分析截图...';
+            step.isLoading = true;
+            onStepUpdate?.call(step);
+
+            // 提取屏幕元信息，传给视觉分析
+            final screenInfo = <String, dynamic>{
+              'width': result.data!['width'] ?? 1920,
+              'height': result.data!['height'] ?? 1080,
+            };
+
+            try {
+              debugPrint('🔍 开始视觉分析: ${b64.length} 字符 base64');
+              final analysis = await analyzeScreenshot(b64, mime, screenInfo);
+              if (analysis != null && analysis.isNotEmpty) {
+                debugPrint('🔍 视觉分析结果: ${analysis.length} 字符');
+                toolContent = '$toolContent\n\n📊 屏幕分析:\n$analysis';
+              } else {
+                debugPrint('⚠️ 视觉分析返回 null/空 — 可能是视觉模型未配置或调用失败');
+              }
+            } catch (e) {
+              debugPrint('⚠️ 视觉分析失败: $e');
+            }
+          } else if (analyzeScreenshot == null) {
+            debugPrint('⚠️ 截图完成但 analyzeScreenshot 回调为空 — 视觉分析未启用');
+          }
+        }
+
         final toolMsg = {
           'role': 'tool',
           'tool_call_id': toolCall.id,
-          'content': result.content,
+          'content': toolContent,
         };
         workingMessages.add(toolMsg);
         allApiMessages.add(Map<String, dynamic>.from(toolMsg));
+
+        // ── 多模态截图嵌入：将截图作为图片直接注入对话 ──
+        if (embedScreenshotImages && isScreenshot) {
+          final b64 = result.data!['base64'] as String?;
+          final mime = result.data!['mimeType'] as String? ?? 'image/jpeg';
+          if (b64 != null && b64.isNotEmpty) {
+            final frontmostApp = result.data!['frontmostApp'] as String? ?? '';
+            final somCount = result.data!['somMarkerCount'] as int? ?? 0;
+            // 构建截图上下文提示：告诉模型前台 app 名称、SOM 标记数量
+            final appHint = frontmostApp.isNotEmpty
+                ? '前台应用: $frontmostApp' : '';
+            final somHint = somCount > 0
+                ? '图上已用编号圆圈标记了 $somCount 个可交互元素' : '';
+            final contextHint = [appHint, somHint]
+                .where((s) => s.isNotEmpty).join('，');
+
+            final imageHint = imageType == 'confirm_screenshot'
+                ? '这是操作后的屏幕截图，请确认操作结果。${contextHint.isNotEmpty ? '($contextHint)' : ''}'
+                : '这是当前屏幕截图（坐标已归一化到 0~1000，左上角 (0,0)，右下角 (1000,1000)）。${contextHint.isNotEmpty ? '$contextHint。' : ''}如果前台应用不是你要操作的，请先调用 open_app 切换。';
+            final imageMsg = {
+              'role': 'user',
+              'content': [
+                {'type': 'text', 'text': imageHint},
+                {
+                  'type': 'image_url',
+                  'image_url': {'url': 'data:$mime;base64,$b64'},
+                },
+              ],
+            };
+            workingMessages.add(imageMsg);
+            debugPrint('📸 已将 ${imageType ?? 'screenshot'} 嵌入对话消息（${b64.length} 字符 base64）');
+          }
+        }
 
         // 记录技能名
         if (toolCall.name != 'think' && toolCall.name != 'save_memory') {
@@ -438,6 +618,13 @@ class AgentLoop {
         // 更新步骤状态（UI 展示用，已在可折叠面板中，不截断）
         if (toolCall.name == 'think') {
           step.content = stepDesc;
+        } else if (!result.isError
+            && (result.data?['imageType'] == 'screenshot'
+                || result.data?['imageType'] == 'confirm_screenshot')) {
+          // CUA 截图/确认截图：用特殊标记嵌入图片路径（UI 端从路径加载图片渲染）
+          final imgPath = result.data!['filePath'] as String? ?? '';
+          final imgTag = imgPath.isNotEmpty ? '\n\n__IMG__:$imgPath' : '';
+          step.content = '$stepDesc\n${result.content}$imgTag';
         } else {
           step.content = result.isError
               ? '$stepDesc\n❌ ${result.content}'
@@ -470,6 +657,26 @@ class AgentLoop {
         }
       }
 
+      // ── 追加缓冲的 hook 注入消息（在所有 tool 响应之后，避免打断 tool_calls 连续性） ──
+      for (final hookMsg in deferredHookMessages) {
+        workingMessages.add(hookMsg);
+      }
+      deferredHookMessages.clear();
+
+      // ── CUA 模式防护：只思考不操作时强制提醒 ──
+      if (mode == AgentMode.cua) {
+        final hasCua = response.toolCalls.any((tc) => tc.name == 'cua');
+        if (!hasCua) {
+          debugPrint('⚠️ [Agent] CUA 模式本轮只有 think，无 cua 操作 → 注入强制提醒');
+          workingMessages.add({
+            'role': 'user',
+            'content': '【系统强制提醒】你处于 CUA 模式，必须通过 cua(action=...) 工具执行实际操作。'
+                '思考（think）只是准备阶段，不能代替操作。请立即调用 cua 工具执行你的下一步操作。'
+                '可选 action: screenshot(截图)、mouse_click(点击)、key_type(输入)、key_combo(快捷键)、open_app(打开应用)、get_ui_tree(获取UI树)。',
+          });
+        }
+      }
+
       // ── 循环防护：同类工具连续失败检测 ──
       if (recentFailedToolNames.length >= maxFailedCalls) {
         final lastN = recentFailedToolNames.sublist(recentFailedToolNames.length - maxFailedCalls);
@@ -482,7 +689,7 @@ class AgentLoop {
             'content': '【系统提示】$toolName 已经连续失败了 $maxFailedCalls 次。请停止重试，换一种完全不同的方法来完成任务，或者直接告诉用户当前方法不可行。',
           });
           try {
-            final stopResp = await provider.chat(workingMessages, config: config);
+            final stopResp = await _chat(provider, workingMessages, config: config, cancellationToken: cancellationToken);
             final result = AgentLoopResult(
               text: stopResp.text,
               apiMessages: allApiMessages,
@@ -506,7 +713,9 @@ class AgentLoop {
         }
       }
 
-      // ── 循环防护：无进展检测 ──
+      // ── 循环防护：无进展检测（CUA 模式跳过，因为 CUA 操作结果长度天然相近） ──
+      final isCuaMode = mode == AgentMode.cua;
+      if (!isCuaMode) {
       recentResultLengths.add(roundResultLength);
       if (recentResultLengths.length > maxStagnantRounds) recentResultLengths.removeAt(0);
       if (recentResultLengths.length >= maxStagnantRounds) {
@@ -520,7 +729,7 @@ class AgentLoop {
             'content': '【系统提示】工具调用连续多轮没有产生新进展，请停止调用工具，直接回复用户。',
           });
           try {
-            final stopResp = await provider.chat(workingMessages, config: config);
+            final stopResp = await _chat(provider, workingMessages, config: config, cancellationToken: cancellationToken);
             final result = AgentLoopResult(
               text: stopResp.text,
               apiMessages: allApiMessages,
@@ -543,6 +752,7 @@ class AgentLoop {
           }
         }
       }
+      } // end if (!isCuaMode) — 无进展检测
 
       debugPrint('🔧 [Agent 第${turn + 1}轮结束] 共执行 ${response.toolCalls.length} 个工具，结果 ${roundResultLength} 字符');
     }
@@ -556,7 +766,7 @@ class AgentLoop {
     });
 
     try {
-      final finalResp = await provider.chat(workingMessages, config: config);
+      final finalResp = await _chat(provider, workingMessages, config: config, cancellationToken: cancellationToken);
       final result = AgentLoopResult(
         text: finalResp.text,
         apiMessages: allApiMessages,
@@ -599,6 +809,63 @@ class AgentLoop {
       }
     }
     return '';
+  }
+
+  /// 包装 provider.chat 调用，自动处理 CancellationToken、Dio 取消和 429 重试
+  static int _chatCallCount = 0;
+  static DateTime? _lastChatTime;
+  static const _maxRetries = 3;
+
+  static Future<AgentResponse> _chat(
+    LLMProvider provider,
+    List<Map<String, dynamic>> messages, {
+    LLMConfig? config,
+    List<Map<String, dynamic>>? tools,
+    CancellationToken? cancellationToken,
+  }) async {
+    // 轮间间隔：防止连续请求触发 429
+    if (_lastChatTime != null && _chatCallCount > 0) {
+      final elapsed = DateTime.now().difference(_lastChatTime!);
+      if (elapsed.inMilliseconds < 1000) {
+        final wait = 1000 - elapsed.inMilliseconds;
+        await Future.delayed(Duration(milliseconds: wait));
+      }
+    }
+    _chatCallCount++;
+    _lastChatTime = DateTime.now();
+
+    final dioToken = cancellationToken?.newDioCancelToken();
+
+    for (int attempt = 0; attempt <= _maxRetries; attempt++) {
+      try {
+        return await provider.chat(
+          messages,
+          config: config,
+          tools: tools,
+          cancelToken: dioToken,
+        );
+      } on DioException catch (e) {
+        if (e.type == DioExceptionType.cancel) throw CancelledException();
+
+        final statusCode = e.response?.statusCode;
+        // 打印 4xx/5xx 错误详情，便于排查参数问题
+        if (statusCode != null && statusCode >= 400) {
+          debugPrint('❌ [Agent] LLM API 错误 [$statusCode]: ${e.response?.data}');
+        }
+        if (statusCode == 429 && attempt < _maxRetries) {
+          // 读取 Retry-After 头，否则指数退避（2s, 4s, 8s）
+          final retryAfter = e.response?.headers.value('retry-after');
+          final waitSeconds = (retryAfter != null && int.tryParse(retryAfter) != null)
+              ? int.parse(retryAfter)
+              : (2 << attempt); // 2, 4, 8
+          debugPrint('⏳ [Agent] 429 限流，${attempt + 1}/$_maxRetries 次重试，等待 ${waitSeconds}s...');
+          await Future.delayed(Duration(seconds: waitSeconds));
+          continue;
+        }
+        rethrow;
+      }
+    }
+    throw Exception('超过最大重试次数');
   }
 
   static void _addStep(List<ToolStep> steps, String title, String content, void Function(ToolStep)? onStepUpdate) {
@@ -785,5 +1052,155 @@ $toolsInfo
   /// 从纯文本响应构建计划（无工具调用时使用）
   static PendingPlan _buildPlanFromTextResponse(String responseText, String userRequest) {
     return _parsePlanFromResponse(responseText, userRequest);
+  }
+
+  // ═══════════════════════════════════════════
+  // 截图滑动窗口（优化3：记忆压缩/上下文窗口管理）
+  // ═══════════════════════════════════════════
+
+  /// 截图滑动窗口：保留最近 N 张截图，旧截图压缩为带上下文的文字摘要
+  ///
+  /// CUA 模式下每张截图约 100-300KB（JPEG 85%），base64 后约 130-400KB。
+  /// 多轮操作后对话会迅速膨胀（maxTurns=30，每轮 2 张截图 = 60 张截图）。
+  /// 此方法在每轮 LLM 调用前执行，将超出窗口的旧截图替换为摘要文本。
+  /// 改进：保留截图前后的操作上下文（tool call + tool result），让模型知道
+  /// 之前做了什么操作、得到了什么结果，而不只是丢弃视觉信息。
+  static void _applyScreenshotSlidingWindow(
+    List<Map<String, dynamic>> messages,
+    int maxScreenshots,
+  ) {
+    // 找出所有包含截图的 user 消息（image_url 类型）
+    final screenshotIndices = <int>[];
+    for (var i = 0; i < messages.length; i++) {
+      final msg = messages[i];
+      if (msg['role'] != 'user') continue;
+      final content = msg['content'];
+      if (content is! List) continue;
+
+      final hasImage = content.any((item) =>
+          item is Map && item['type'] == 'image_url');
+      if (hasImage) {
+        screenshotIndices.add(i);
+      }
+    }
+
+    if (screenshotIndices.length <= maxScreenshots) return;
+
+    // 需要压缩的截图数量
+    final toCompressCount = screenshotIndices.length - maxScreenshots;
+
+    for (var i = 0; i < toCompressCount; i++) {
+      final msgIdx = screenshotIndices[i];
+      final msg = messages[msgIdx];
+      final content = msg['content'] as List;
+
+      // 提取截图文本提示（"这是操作后的屏幕截图" 等）
+      final imageHint = content
+          .where((item) => item is Map && item['type'] == 'text')
+          .map((item) => (item as Map)['text'] as String? ?? '')
+          .join(' ')
+          .trim();
+
+      // 提取上下文：查找截图前后的 tool 消息来获取操作信息
+      final context = _extractScreenshotContext(messages, msgIdx);
+
+      // 构建压缩后的摘要，包含操作上下文
+      final summaryBuffer = StringBuffer();
+      if (context.isNotEmpty) {
+        summaryBuffer.write('[📷 早期截图已压缩] ');
+        summaryBuffer.write(context);
+      } else if (imageHint.isNotEmpty) {
+        summaryBuffer.write('[📷 早期截图已压缩] $imageHint');
+      } else {
+        summaryBuffer.write('[📷 早期截图已压缩以节省 token，仅保留最近 $maxScreenshots 张截图上下文]');
+      }
+
+      messages[msgIdx] = {
+        'role': 'user',
+        'content': summaryBuffer.toString(),
+      };
+    }
+
+    if (toCompressCount > 0) {
+      debugPrint('📷 截图滑动窗口: 压缩了 $toCompressCount 张旧截图，保留最近 $maxScreenshots 张');
+    }
+  }
+
+  /// 提取截图消息附近的操作上下文
+  ///
+  /// 查找截图前后的 tool call 和 tool result，生成简要操作摘要。
+  /// 例如: "点击(500,300) → 成功; 输入'hello' → 成功"
+  static String _extractScreenshotContext(List<Map<String, dynamic>> messages, int screenshotIdx) {
+    final parts = <String>[];
+
+    // 向前查找最近的 tool call（assistant 消息含 tool_calls）
+    for (var i = screenshotIdx - 1; i >= 0 && i >= screenshotIdx - 4; i--) {
+      final msg = messages[i];
+      if (msg['role'] == 'assistant' && msg['tool_calls'] != null) {
+        final toolCalls = msg['tool_calls'] as List;
+        for (final tc in toolCalls) {
+          final func = tc['function'] as Map<String, dynamic>?;
+          if (func == null) continue;
+          final name = func['name'] as String? ?? '';
+          final argsStr = func['arguments'] as String? ?? '{}';
+
+          // 只提取 CUA 操作上下文
+          if (name == 'cua') {
+            try {
+              final args = jsonDecode(argsStr) as Map<String, dynamic>;
+              final action = args['action'] as String? ?? '';
+              if (action == 'screenshot') continue; // 跳过截图操作本身
+              final desc = _briefCuaAction(action, args);
+              if (desc.isNotEmpty) parts.add(desc);
+            } catch (_) {}
+          }
+        }
+        break; // 只查最近一个 assistant 消息
+      }
+    }
+
+    // 向后查找最近的 tool result
+    for (var i = screenshotIdx + 1; i < messages.length && i <= screenshotIdx + 4; i++) {
+      final msg = messages[i];
+      if (msg['role'] == 'tool') {
+        final content = msg['content'] as String? ?? '';
+        if (content.length > 200) {
+          // 提取第一行作为结果摘要
+          final firstLine = content.split('\n').first;
+          parts.add('结果: ${firstLine.length > 80 ? '${firstLine.substring(0, 80)}...' : firstLine}');
+        } else if (content.isNotEmpty) {
+          parts.add('结果: $content');
+        }
+        break;
+      }
+    }
+
+    return parts.isEmpty ? '' : parts.join(' → ');
+  }
+
+  /// 生成 CUA 操作的简要描述
+  static String _briefCuaAction(String action, Map<String, dynamic> args) {
+    switch (action) {
+      case 'mouse_click':
+        final x = args['x'];
+        final y = args['y'];
+        final btn = args['button'] ?? 'left';
+        return '点击($x,$y) $btn';
+      case 'key_type':
+        final text = args['text'] as String? ?? '';
+        return '输入"${text.length > 20 ? '${text.substring(0, 20)}...' : text}"';
+      case 'key_combo':
+        return '快捷键 ${args['keys'] ?? ''}';
+      case 'mouse_scroll':
+        return '滚动(${args['scroll_x']}, ${args['scroll_y']})';
+      case 'mouse_drag':
+        return '拖拽(${args['x']},${args['y']})→(${args['target_x']},${args['target_y']})';
+      case 'open_app':
+        return '打开${args['app_name'] ?? ''}';
+      case 'get_ui_tree':
+        return 'UI树';
+      default:
+        return action;
+    }
   }
 }

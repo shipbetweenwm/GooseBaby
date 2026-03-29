@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'package:dio/dio.dart';
 import '../../models/models.dart';
+import '../../utils/http_client.dart';
 import '../../utils/type_utils.dart';
 import '../agent/agent_types.dart';
 import 'llm_provider.dart';
@@ -10,7 +11,7 @@ import 'llm_provider.dart';
 /// 支持运行本地千问、Llama 等开源模型
 class OllamaProvider extends LLMProvider {
   static const _defaultBaseUrl = 'http://localhost:11434';
-  final Dio _dio = Dio();
+  final Dio _dio = createRetryDio();
 
   /// 规范化 baseUrl：去掉末尾斜杠，确保格式统一
   String _fixBaseUrl(String? baseUrl) {
@@ -41,6 +42,7 @@ class OllamaProvider extends LLMProvider {
     List<Map<String, dynamic>> messages, {
     LLMConfig? config,
     List<Map<String, dynamic>>? tools,
+    CancelToken? cancelToken,
   }) async {
     final cfg = config ?? const LLMConfig(provider: 'ollama', model: 'qwen2.5:7b');
     final baseUrl = _fixBaseUrl(cfg.baseUrl);
@@ -61,6 +63,7 @@ class OllamaProvider extends LLMProvider {
     final response = await _dio.post(
       url,
       data: jsonEncode(body),
+      cancelToken: cancelToken,
       options: Options(
         headers: {'Content-Type': 'application/json'},
       ),

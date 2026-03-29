@@ -7,9 +7,10 @@ import 'package:path_provider/path_provider.dart';
 import 'skill_base.dart';
 import 'skill_file_utils.dart';
 
-/// 浏览器自动化技能（统一版）
+/// 浏览器自动化技能（持久进程版）
 /// 
-/// 整合了基础 Web 交互和高级浏览器自动化功能
+/// 使用长期运行的 Playwright Node.js 进程，浏览器保持打开状态，
+/// 多次调用之间复用同一个浏览器实例。
 /// 
 /// 【基础操作】
 /// - open/navigate: 打开网页
@@ -44,19 +45,37 @@ import 'skill_file_utils.dart';
 /// - position: 坐标位置
 /// 
 /// 【高级特性】
-/// - 持久化会话：跨多个操作保持浏览器状态
-/// - 网络拦截：监控/阻止请求
-/// - 用户代理/时区/语言设置
+/// - 持久进程：浏览器跨多次调用保持打开
+/// - close action: 可手动关闭浏览器
+/// - 空闲 30 分钟自动关闭浏览器（进程保留，下次自动重启）
 /// 
 /// 【前提条件】
 /// - 安装 Node.js: https://nodejs.org/
 /// - 安装 Playwright: npx playwright install chromium
 class BrowserSkill extends GooseSkill {
-  /// 浏览器会话管理器
-  static final BrowserSessionManager _sessionManager = BrowserSessionManager();
+  /// Playwright 持久进程
+  Process? _serverProcess;
   
-  /// Playwright 脚本目录
+  /// 服务器脚本路径
+  String? _serverScriptPath;
+  
+  /// Node modules 目录
   String? _scriptDir;
+  
+  /// 本地 node_modules 是否已初始化
+  bool _npmInitialized = false;
+  
+  /// 命令计数器（用于匹配请求/响应）
+  int _cmdId = 0;
+  
+  /// stdin 输出的行缓冲
+  final StringBuffer _stdoutBuffer = StringBuffer();
+  
+  /// 指令响应的 Completer，key 为 cmdId
+  final Map<int, Completer<Map<String, dynamic>>> _pendingCommands = {};
+  
+  /// 是否正在启动中（防止并发启动）
+  bool _starting = false;
   
   /// 检测 Playwright 是否可用
   Future<(bool, String)> _checkPlaywrightAvailable() async {
@@ -92,816 +111,267 @@ class BrowserSkill extends GooseSkill {
     }
   }
   
-  /// 确保脚本目录存在
+  /// 确保脚本目录存在，并初始化 Playwright npm 依赖
   Future<String> _ensureScriptDir() async {
-    if (_scriptDir != null) return _scriptDir!;
+    if (_scriptDir == null) {
+      final appDir = await getApplicationDocumentsDirectory();
+      _scriptDir = p.join(appDir.path, 'goose_baby', 'browser_scripts');
+      await Directory(_scriptDir!).create(recursive: true);
+    }
     
-    final appDir = await getApplicationDocumentsDirectory();
-    _scriptDir = p.join(appDir.path, 'goose_baby', 'browser_scripts');
-    await Directory(_scriptDir!).create(recursive: true);
+    if (!_npmInitialized) {
+      final nodeModulesDir = Directory(p.join(_scriptDir!, 'node_modules', 'playwright'));
+      if (!nodeModulesDir.existsSync()) {
+        debugPrint('🌐 首次使用，正在安装 Playwright npm 包...');
+        try {
+          final result = await Process.run(
+            'npm',
+            ['install', 'playwright', '--no-save', '--no-audit', '--no-fund'],
+            workingDirectory: _scriptDir,
+            stdoutEncoding: utf8,
+            stderrEncoding: utf8,
+          ).timeout(const Duration(minutes: 3));
+          
+          if (result.exitCode == 0) {
+            _npmInitialized = true;
+            debugPrint('🌐 Playwright npm 包安装成功');
+          } else {
+            debugPrint('🌐 Playwright npm 包安装失败: ${result.stderr}');
+          }
+        } catch (e) {
+          debugPrint('🌐 Playwright npm 包安装异常: $e');
+        }
+      } else {
+        _npmInitialized = true;
+      }
+    }
+    
     return _scriptDir!;
   }
   
-  /// 执行 Playwright 脚本
-  Future<Map<String, dynamic>> _executeScript(String script, {Duration timeout = const Duration(minutes: 5)}) async {
-    final scriptDir = await _ensureScriptDir();
-    final scriptPath = p.join(scriptDir, 'browser_${DateTime.now().millisecondsSinceEpoch}.js');
+  /// 确保 Playwright 持久进程已启动
+  Future<void> _ensureServer() async {
+    // 如果进程已存在且 stdin 可写，直接复用
+    if (_serverProcess != null) {
+      try {
+        // 通过 kill(pid, 0) 检查进程是否还活着
+        final result = Process.runSync('kill', ['-0', '${_serverProcess!.pid}']);
+        if (result.exitCode == 0) {
+          // 进程还活着，检查 stdin 是否可写
+          try {
+            _serverProcess!.stdin.write('');
+            return; // 进程还活着，直接复用
+          } catch (_) {
+            // stdin 已关闭
+          }
+        }
+      } catch (_) {
+        // 进程已死，需要重启
+      }
+      _serverProcess = null;
+    }
+    
+    if (_starting) {
+      // 等待另一个启动完成
+      while (_starting) {
+        await Future.delayed(const Duration(milliseconds: 100));
+      }
+      return;
+    }
+    
+    _starting = true;
+    try {
+      final scriptDir = await _ensureScriptDir();
+      
+      // 复制 playwright_server.js 到脚本目录（仅首次或文件不存在时）
+      _serverScriptPath ??= p.join(scriptDir, 'playwright_server.js');
+      if (!File(_serverScriptPath!).existsSync()) {
+        // 从应用资源或脚本目录复制
+        final sourcePath = p.join(Directory.current.path, 'scripts', 'playwright_server.js');
+        final sourceFile = File(sourcePath);
+        if (sourceFile.existsSync()) {
+          await sourceFile.copy(_serverScriptPath!);
+        } else {
+          // 内嵌备用脚本
+          await File(_serverScriptPath!).writeAsString(_fallbackServerScript);
+        }
+      }
+      
+      debugPrint('🌐 启动 Playwright 持久进程...');
+      
+      _serverProcess = await Process.start(
+        'node',
+        [_serverScriptPath!],
+        workingDirectory: scriptDir,
+      );
+      
+      // 监听 stderr（日志输出）
+      _serverProcess!.stderr.transform(utf8.decoder).listen(
+        (data) => debugPrint('🌐 [PW] $data'),
+        onError: (e) => debugPrint('🌐 [PW] stderr error: $e'),
+      );
+      
+      // 监听 stdout（JSON 协议）
+      _serverProcess!.stdout.transform(utf8.decoder).listen(
+        (data) => _handleServerOutput(data),
+        onError: (e) => debugPrint('🌐 [PW] stdout error: $e'),
+        onDone: () {
+          debugPrint('🌐 Playwright 持久进程已退出');
+          // 所有等待中的指令返回失败
+          for (final completer in _pendingCommands.values) {
+            if (!completer.isCompleted) {
+              completer.complete({'success': false, 'error': '服务进程已退出'});
+            }
+          }
+          _pendingCommands.clear();
+          _serverProcess = null;
+        },
+      );
+      
+      // 监听进程退出
+      _serverProcess!.exitCode.then((code) {
+        debugPrint('🌐 Playwright 持久进程退出，exitCode: $code');
+        _serverProcess = null;
+      });
+      
+      // 等待进程启动完成（给一点时间初始化）
+      await Future.delayed(const Duration(milliseconds: 500));
+      debugPrint('🌐 Playwright 持久进程已启动 (PID: ${_serverProcess!.pid})');
+    } finally {
+      _starting = false;
+    }
+  }
+  
+  /// 处理服务器输出，解析 JSON 并分发到对应的 Completer
+  void _handleServerOutput(String data) {
+    _stdoutBuffer.write(data);
+    
+    // 按行分割
+    final lines = _stdoutBuffer.toString().split('\n');
+    _stdoutBuffer.clear();
+    
+    // 最后一行可能不完整，保留到下次
+    for (int i = 0; i < lines.length; i++) {
+      final line = lines[i].trim();
+      if (i == lines.length - 1 && !data.endsWith('\n') && line.isNotEmpty) {
+        _stdoutBuffer.write(line);
+        continue;
+      }
+      if (line.isEmpty) continue;
+      
+      try {
+        final response = jsonDecode(line) as Map<String, dynamic>;
+        final id = response['id'] as int?;
+        if (id != null && _pendingCommands.containsKey(id)) {
+          final completer = _pendingCommands.remove(id)!;
+          if (!completer.isCompleted) {
+            completer.complete(response);
+          }
+        }
+      } catch (_) {
+        // 非 JSON 行，忽略（可能是日志输出）
+      }
+    }
+  }
+  
+  /// 向持久进程发送指令并等待响应
+  Future<Map<String, dynamic>> _sendCommand(
+    String action,
+    Map<String, dynamic> args, {
+    Duration timeout = const Duration(minutes: 5),
+  }) async {
+    await _ensureServer();
+    
+    if (_serverProcess == null) {
+      return {'success': false, 'error': 'Playwright 服务进程未运行'};
+    }
+    
+    final id = _cmdId++;
+    final completer = Completer<Map<String, dynamic>>();
+    _pendingCommands[id] = completer;
+    
+    final cmd = jsonEncode({'action': action, 'args': args, 'id': id});
+    _serverProcess!.stdin.writeln(cmd);
+    
+    // 等待响应，带超时
+    try {
+      return await completer.future.timeout(timeout);
+    } on TimeoutException {
+      _pendingCommands.remove(id);
+      return {'success': false, 'error': '操作超时（${timeout.inMinutes}分钟）'};
+    }
+  }
+  
+  /// 关闭持久进程（含浏览器）
+  // 暂时保留，供未来清理使用
+  // ignore: unused_element
+  Future<void> _shutdownServer() async {
+    if (_serverProcess == null) return;
     
     try {
-      await File(scriptPath).writeAsString(script);
-      debugPrint('🌐 执行浏览器脚本: ${p.basename(scriptPath)}');
+      // 发送 exit 指令
+      final id = _cmdId++;
+      final completer = Completer<Map<String, dynamic>>();
+      _pendingCommands[id] = completer;
       
-      final result = await Process.run(
-        'node',
-        [scriptPath],
-        workingDirectory: scriptDir,
-        stdoutEncoding: utf8,
-        stderrEncoding: utf8,
-      ).timeout(timeout);
+      _serverProcess!.stdin.writeln(jsonEncode({'action': 'exit', 'args': {}, 'id': id}));
       
-      final stdout = (result.stdout as String).trim();
-      final stderr = (result.stderr as String).trim();
-      
-      if (stdout.isNotEmpty) {
-        try {
-          final jsonMatch = RegExp(r'\{[\s\S]*\}').firstMatch(stdout);
-          if (jsonMatch != null) {
-            return jsonDecode(jsonMatch.group(0)!);
-          }
-          return {'success': true, 'output': stdout};
-        } catch (_) {
-          return {'success': true, 'output': stdout};
-        }
+      // 等待响应或超时
+      await completer.future.timeout(const Duration(seconds: 3));
+    } catch (_) {}
+    
+    // 强制杀死
+    try {
+      if (_serverProcess != null) {
+        _killProcess(_serverProcess!.pid);
+        _serverProcess = null;
       }
-      
-      return {
-        'success': result.exitCode == 0,
-        'error': stderr.isNotEmpty ? stderr : 'No output',
-        'exitCode': result.exitCode,
-      };
-    } on TimeoutException {
-      return {'success': false, 'error': '操作超时（${timeout.inMinutes}分钟）'};
+    } catch (_) {}
+    
+    _pendingCommands.clear();
+  }
+  
+  /// 杀死进程树
+  void _killProcess(int pid) {
+    try {
+      if (Platform.isMacOS || Platform.isLinux) {
+        Process.runSync('pkill', ['-P', '$pid']);
+        Process.killPid(pid, ProcessSignal.sigkill);
+      } else if (Platform.isWindows) {
+        Process.killPid(pid, ProcessSignal.sigkill);
+        Process.runSync('taskkill', ['/F', '/T', '/PID', '$pid']);
+      }
+    } catch (_) {}
+  }
+  
+  /// 清理可能残留的僵尸 chromium/headless 浏览器进程
+  Future<void> _cleanupZombieProcesses() async {
+    try {
+      if (Platform.isMacOS || Platform.isLinux) {
+        const cmd = [
+          '-c',
+          r'pgrep -f "chromium.*--headless" | while read pid; do elapsed=$(ps -o etimes= -p $pid 2>/dev/null || echo 0); if [ "$elapsed" -gt 600 ]; then kill -9 $pid 2>/dev/null; fi; done',
+        ];
+        await Process.run(
+          'bash',
+          cmd,
+          stdoutEncoding: utf8,
+          stderrEncoding: utf8,
+        ).timeout(const Duration(seconds: 5));
+      } else if (Platform.isWindows) {
+        final psCmd = r'Get-Process -Name chrome,chromium -ErrorAction SilentlyContinue | '
+            r'Where-Object { $_.StartTime -and (Get-Date) - $_.StartTime -gt [TimeSpan]::FromMinutes(10) } '
+            r'| Stop-Process -Force';
+        await Process.run(
+          'powershell',
+          ['-Command', psCmd],
+          stdoutEncoding: utf8,
+          stderrEncoding: utf8,
+        ).timeout(const Duration(seconds: 5));
+      }
     } catch (e) {
-      return {'success': false, 'error': e.toString()};
-    } finally {
-      try {
-        await File(scriptPath).delete();
-      } catch (_) {}
+      debugPrint('🌐 清理僵尸进程异常: $e');
     }
-  }
-
-  // ==================== 脚本生成 ====================
-  
-  String _generateScript(String action, Map<String, dynamic> args) {
-    final buffer = StringBuffer();
-    final sessionId = args['session_id'] as String?;
-    
-    // 标准头部
-    buffer.writeln("const { chromium } = require('playwright');");
-    buffer.writeln("const path = require('path');");
-    buffer.writeln('');
-    buffer.writeln('(async () => {');
-    buffer.writeln('  let browser, context, page;');
-    buffer.writeln('  try {');
-    
-    // 会话恢复或新会话
-    if (sessionId != null && _sessionManager.hasSession(sessionId)) {
-      final session = _sessionManager.getSession(sessionId)!;
-      buffer.writeln("    // 恢复会话: $sessionId");
-      buffer.writeln("    const userDataDir = '${session.userDataDir.replaceAll('\\', '\\\\')}';");
-      buffer.writeln("    browser = await chromium.launchPersistentContext(userDataDir, {");
-      buffer.writeln("      headless: ${args['headless'] ?? false},");
-      buffer.writeln("      viewport: { width: ${args['viewport_width'] ?? 1920}, height: ${args['viewport_height'] ?? 1080} },");
-      if (args['user_agent'] != null) {
-        buffer.writeln("      userAgent: '${args['user_agent']}',");
-      }
-      buffer.writeln("    });");
-      buffer.writeln("    const pages = browser.pages();");
-      buffer.writeln("    page = pages.length > 0 ? pages[0] : await browser.newPage();");
-    } else {
-      buffer.writeln("    // 新建浏览器实例");
-      buffer.writeln("    browser = await chromium.launch({");
-      buffer.writeln("      headless: ${args['headless'] ?? true},");
-      if (args['slow_mo'] != null) {
-        buffer.writeln("      slowMo: ${args['slow_mo']},");
-      }
-      buffer.writeln("    });");
-      buffer.writeln("    context = await browser.newContext({");
-      buffer.writeln("      viewport: { width: ${args['viewport_width'] ?? 1920}, height: ${args['viewport_height'] ?? 1080} },");
-      if (args['user_agent'] != null) {
-        buffer.writeln("      userAgent: '${args['user_agent']}',");
-      }
-      if (args['ignore_https_errors'] == true) {
-        buffer.writeln("      ignoreHTTPSErrors: true,");
-      }
-      buffer.writeln("    });");
-      
-      // 设置网络拦截
-      if (args['block_resources'] != null) {
-        _generateNetworkInterception(buffer, args);
-      }
-      
-      // 设置 Cookie
-      if (args['cookies'] != null) {
-        _generateSetCookies(buffer, args['cookies']);
-      }
-      
-      buffer.writeln("    page = await context.newPage();");
-    }
-    
-    buffer.writeln("    page.setDefaultTimeout(${args['timeout'] ?? 30000});");
-    
-    // 根据操作类型生成脚本
-    switch (action) {
-      case 'open':
-      case 'navigate':
-        _generateNavigateAction(buffer, args);
-        break;
-      case 'click':
-        _generateClickAction(buffer, args);
-        break;
-      case 'fill':
-        _generateFillAction(buffer, args);
-        break;
-      case 'type':
-        _generateTypeAction(buffer, args);
-        break;
-      case 'hover':
-        _generateHoverAction(buffer, args);
-        break;
-      case 'scroll':
-        _generateScrollAction(buffer, args);
-        break;
-      case 'screenshot':
-        _generateScreenshotAction(buffer, args);
-        break;
-      case 'scrape':
-        _generateScrapeAction(buffer, args);
-        break;
-      case 'select':
-        _generateSelectAction(buffer, args);
-        break;
-      case 'upload':
-        _generateUploadAction(buffer, args);
-        break;
-      case 'download':
-        _generateDownloadAction(buffer, args);
-        break;
-      case 'wait':
-        _generateWaitAction(buffer, args);
-        break;
-      case 'keyboard':
-        _generateKeyboardAction(buffer, args);
-        break;
-      case 'mouse':
-        _generateMouseAction(buffer, args);
-        break;
-      case 'drag':
-        _generateDragAction(buffer, args);
-        break;
-      case 'iframe':
-        _generateIframeAction(buffer, args);
-        break;
-      case 'cookies':
-        _generateCookiesAction(buffer, args);
-        break;
-      case 'evaluate':
-        _generateEvaluateAction(buffer, args);
-        break;
-      case 'pdf':
-        _generatePdfAction(buffer, args);
-        break;
-      case 'multi':
-        _generateMultiStepAction(buffer, args);
-        break;
-      case 'close':
-        _generateCloseAction(buffer, args);
-        break;
-      default:
-        buffer.writeln("    console.log(JSON.stringify({ success: false, error: 'Unknown action: $action' }));");
-    }
-    
-    // 会话保存或关闭
-    buffer.writeln('  } catch (error) {');
-    buffer.writeln("    console.log(JSON.stringify({ success: false, error: error.message }));");
-    buffer.writeln('  } finally {');
-    if (args['keep_alive'] != true) {
-      buffer.writeln("    if (browser) await browser.close();");
-    }
-    buffer.writeln('  }');
-    buffer.writeln('})();');
-    
-    return buffer.toString();
-  }
-  
-  // ==================== 网络拦截 ====================
-  
-  void _generateNetworkInterception(StringBuffer buffer, Map<String, dynamic> args) {
-    buffer.writeln("    await context.route('**', async route => {");
-    if (args['block_resources'] != null) {
-      final resources = (args['block_resources'] as List).map((r) => "'$r'").join(', ');
-      buffer.writeln("      const blockedTypes = [$resources];");
-      buffer.writeln("      if (blockedTypes.includes(route.request().resourceType())) {");
-      buffer.writeln("        await route.abort();");
-      buffer.writeln("        return;");
-      buffer.writeln("      }");
-    }
-    buffer.writeln("      await route.continue();");
-    buffer.writeln("    });");
-  }
-  
-  void _generateSetCookies(StringBuffer buffer, dynamic cookies) {
-    if (cookies is String) {
-      try {
-        cookies = jsonDecode(cookies);
-      } catch (_) {
-        return;
-      }
-    }
-    if (cookies is List) {
-      buffer.writeln("    await context.addCookies(${jsonEncode(cookies)});");
-    }
-  }
-  
-  // ==================== 导航操作 ====================
-  
-  void _generateNavigateAction(StringBuffer buffer, Map<String, dynamic> args) {
-    final url = args['url'] as String? ?? '';
-    final waitUntil = args['wait_until'] as String? ?? 'domcontentloaded';
-    
-    buffer.writeln("    await page.goto('$url', {");
-    buffer.writeln("      waitUntil: '$waitUntil',");
-    buffer.writeln("      timeout: ${args['timeout'] ?? 60000},");
-    buffer.writeln("    });");
-    
-    if (args['wait_for'] != null) {
-      buffer.writeln("    await page.waitForSelector('${args['wait_for']}', { timeout: ${args['timeout'] ?? 30000} });");
-    }
-    
-    buffer.writeln("    const title = await page.title();");
-    buffer.writeln("    const pageUrl = page.url();");
-    buffer.writeln("    console.log(JSON.stringify({ success: true, title, url: pageUrl }));");
-  }
-  
-  // ==================== 点击操作 ====================
-  
-  void _generateClickAction(StringBuffer buffer, Map<String, dynamic> args) {
-    final selector = args['selector'] as String?;
-    final text = args['text'] as String?;
-    final role = args['role'] as String?;
-    final label = args['label'] as String?;
-    final position = args['position'] as Map<String, dynamic>?;
-    
-    if (text != null) {
-      buffer.writeln("    await page.getByText('${_escapeJs(text)}').first().click();");
-    } else if (role != null) {
-      buffer.writeln("    await page.getByRole('$role'");
-      if (args['name'] != null) {
-        buffer.writeln(", { name: '${_escapeJs(args['name'] as String)}' }");
-      }
-      buffer.writeln(").first().click();");
-    } else if (label != null) {
-      buffer.writeln("    await page.getByLabel('${_escapeJs(label)}').first().click();");
-    } else if (position != null) {
-      buffer.writeln("    await page.mouse.click(${position['x']}, ${position['y']});");
-    } else if (selector != null) {
-      buffer.writeln("    await page.click('${_escapeJs(selector)}');");
-    } else {
-      buffer.writeln("    console.log(JSON.stringify({ success: false, error: '需要 selector、text、role、label 或 position 参数' }));");
-      return;
-    }
-    
-    if (args['wait_for_navigation'] == true) {
-      buffer.writeln("    await page.waitForLoadState('domcontentloaded');");
-    } else if (args['wait_for'] != null) {
-      buffer.writeln("    await page.waitForSelector('${args['wait_for']}', { timeout: ${args['timeout'] ?? 30000} });");
-    }
-    
-    buffer.writeln("    const pageUrl = page.url();");
-    buffer.writeln("    const title = await page.title();");
-    buffer.writeln("    console.log(JSON.stringify({ success: true, url: pageUrl, title, message: '已点击元素' }));");
-  }
-  
-  // ==================== 填写表单 ====================
-  
-  void _generateFillAction(StringBuffer buffer, Map<String, dynamic> args) {
-    final selector = args['selector'] as String?;
-    final label = args['label'] as String?;
-    final placeholder = args['placeholder'] as String?;
-    final value = args['value'] as String? ?? '';
-    final escapedValue = _escapeJs(value);
-    
-    if (label != null) {
-      buffer.writeln("    await page.getByLabel('${_escapeJs(label)}').fill('$escapedValue');");
-    } else if (placeholder != null) {
-      buffer.writeln("    await page.getByPlaceholder('${_escapeJs(placeholder)}').fill('$escapedValue');");
-    } else if (selector != null) {
-      buffer.writeln("    await page.fill('${_escapeJs(selector)}', '$escapedValue');");
-    } else {
-      buffer.writeln("    console.log(JSON.stringify({ success: false, error: '需要 selector、label 或 placeholder 参数' }));");
-      return;
-    }
-    
-    if (args['press_enter'] == true) {
-      buffer.writeln("    await page.keyboard.press('Enter');");
-      buffer.writeln("    await page.waitForLoadState('domcontentloaded');");
-    } else if (args['submit'] == true) {
-      if (args['submit_selector'] != null) {
-        buffer.writeln("    await page.click('${_escapeJs(args['submit_selector'] as String)}');");
-      } else {
-        buffer.writeln("    await page.keyboard.press('Enter');");
-      }
-      buffer.writeln("    await page.waitForLoadState('domcontentloaded');");
-    }
-    
-    buffer.writeln("    const pageUrl = page.url();");
-    buffer.writeln("    const title = await page.title();");
-    buffer.writeln("    console.log(JSON.stringify({ success: true, url: pageUrl, title, message: '已填写表单' }));");
-  }
-  
-  // ==================== 模拟打字 ====================
-  
-  void _generateTypeAction(StringBuffer buffer, Map<String, dynamic> args) {
-    final selector = args['selector'] as String?;
-    final text = args['text'] as String? ?? '';
-    final delay = args['delay'] as int? ?? 50;
-    final escapedText = _escapeJs(text);
-    
-    if (selector != null) {
-      buffer.writeln("    await page.type('${_escapeJs(selector)}', '$escapedText', { delay: $delay });");
-    } else {
-      buffer.writeln("    await page.keyboard.type('$escapedText', { delay: $delay });");
-    }
-    
-    buffer.writeln("    console.log(JSON.stringify({ success: true, message: '已输入文本' }));");
-  }
-  
-  // ==================== 悬停操作 ====================
-  
-  void _generateHoverAction(StringBuffer buffer, Map<String, dynamic> args) {
-    final selector = args['selector'] as String?;
-    final position = args['position'] as Map<String, dynamic>?;
-    
-    if (position != null) {
-      buffer.writeln("    await page.mouse.move(${position['x']}, ${position['y']});");
-    } else if (selector != null) {
-      buffer.writeln("    await page.hover('${_escapeJs(selector)}');");
-    } else {
-      buffer.writeln("    console.log(JSON.stringify({ success: false, error: '需要 selector 或 position 参数' }));");
-      return;
-    }
-    
-    buffer.writeln("    console.log(JSON.stringify({ success: true, message: '已悬停' }));");
-  }
-  
-  // ==================== 滚动操作 ====================
-  
-  void _generateScrollAction(StringBuffer buffer, Map<String, dynamic> args) {
-    final direction = args['direction'] as String? ?? 'down';
-    final distance = args['distance'] as int? ?? 500;
-    final selector = args['selector'] as String?;
-    final toBottom = args['to_bottom'] as bool? ?? false;
-    
-    if (selector != null) {
-      buffer.writeln("    await page.locator('${_escapeJs(selector)}').scrollIntoViewIfNeeded();");
-    } else if (toBottom == true) {
-      buffer.writeln("    await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));");
-    } else {
-      final scrollY = direction == 'up' ? '-$distance' : '$distance';
-      buffer.writeln("    await page.evaluate(() => window.scrollBy(0, $scrollY));");
-    }
-    
-    buffer.writeln("    await page.waitForTimeout(300);");
-    buffer.writeln("    const scrollY = await page.evaluate(() => window.scrollY);");
-    buffer.writeln("    console.log(JSON.stringify({ success: true, scroll_position: scrollY }));");
-  }
-  
-  // ==================== 截图操作 ====================
-  
-  void _generateScreenshotAction(StringBuffer buffer, Map<String, dynamic> args) {
-    final outputPath = args['output_path'] as String?;
-    final selector = args['selector'] as String?;
-    final fullPage = args['full_page'] as bool? ?? true;
-    
-    buffer.writeln("    const screenshotPath = '$outputPath' || path.join(process.cwd(), 'screenshot_${DateTime.now().millisecondsSinceEpoch}.png');");
-    
-    if (selector != null) {
-      buffer.writeln("    const element = await page.\$('${_escapeJs(selector)}');");
-      buffer.writeln("    if (element) {");
-      buffer.writeln("      await element.screenshot({ path: screenshotPath });");
-      buffer.writeln("    } else {");
-      buffer.writeln("      console.log(JSON.stringify({ success: false, error: '元素未找到' }));");
-      buffer.writeln("      return;");
-      buffer.writeln("    }");
-    } else {
-      buffer.writeln("    await page.screenshot({");
-      buffer.writeln("      path: screenshotPath,");
-      buffer.writeln("      fullPage: $fullPage,");
-      buffer.writeln("    });");
-    }
-    
-    buffer.writeln("    console.log(JSON.stringify({ success: true, screenshot_path: screenshotPath, message: '截图已保存' }));");
-  }
-  
-  // ==================== 数据抓取 ====================
-  
-  void _generateScrapeAction(StringBuffer buffer, Map<String, dynamic> args) {
-    final selectors = args['selectors'] as List<dynamic>?;
-    final selector = args['selector'] as String?;
-    final attribute = args['attribute'] as String?;
-    final multiple = args['multiple'] as bool? ?? false;
-    final extractLinks = args['extract_links'] as bool? ?? false;
-    final extractText = args['extract_text'] as bool? ?? false;
-    
-    if (selectors != null && selectors.isNotEmpty) {
-      buffer.writeln("    const results = {};");
-      for (final sel in selectors) {
-        final selStr = sel.toString();
-        buffer.writeln("    results['$selStr'] = await page.\$\$('${_escapeJs(selStr)}').then(els => Promise.all(els.map(el => el.textContent())));");
-      }
-      buffer.writeln("    console.log(JSON.stringify({ success: true, data: results }));");
-    } else if (selector != null) {
-      if (multiple == true) {
-        if (attribute != null) {
-          buffer.writeln("    const elements = await page.\$\$('${_escapeJs(selector)}');");
-          buffer.writeln("    const results = await Promise.all(elements.map(el => el.getAttribute('$attribute')));");
-        } else {
-          buffer.writeln("    const elements = await page.\$\$('${_escapeJs(selector)}');");
-          buffer.writeln("    const results = await Promise.all(elements.map(el => el.textContent()));");
-        }
-        buffer.writeln("    console.log(JSON.stringify({ success: true, data: results.filter(r => r) }));");
-      } else {
-        if (attribute != null) {
-          buffer.writeln("    const element = await page.\$('${_escapeJs(selector)}');");
-          buffer.writeln("    const result = element ? await element.getAttribute('$attribute') : null;");
-        } else {
-          buffer.writeln("    const element = await page.\$('${_escapeJs(selector)}');");
-          buffer.writeln("    const result = element ? await element.textContent() : null;");
-        }
-        buffer.writeln("    console.log(JSON.stringify({ success: true, data: result }));");
-      }
-    } else if (extractText == true) {
-      buffer.writeln("    const text = await page.evaluate(() => document.body.innerText);");
-      buffer.writeln("    const title = await page.title();");
-      buffer.writeln("    console.log(JSON.stringify({ success: true, title, text }));");
-    } else if (extractLinks == true) {
-      buffer.writeln("    const links = await page.evaluate(() => {");
-      buffer.writeln("      return Array.from(document.querySelectorAll('a')).map(a => ({");
-      buffer.writeln("        text: a.textContent?.trim(),");
-      buffer.writeln("        href: a.href,");
-      buffer.writeln("      })).filter(l => l.text && l.href);");
-      buffer.writeln("    });");
-      buffer.writeln("    console.log(JSON.stringify({ success: true, links }));");
-    } else {
-      buffer.writeln("    const content = await page.content();");
-      buffer.writeln("    const title = await page.title();");
-      buffer.writeln("    console.log(JSON.stringify({ success: true, title, html_length: content.length }));");
-    }
-  }
-  
-  // ==================== 下拉选择 ====================
-  
-  void _generateSelectAction(StringBuffer buffer, Map<String, dynamic> args) {
-    final selector = args['selector'] as String? ?? '';
-    final value = args['value'] as String?;
-    final label = args['label'] as String?;
-    final index = args['index'] as int?;
-    
-    if (value != null) {
-      buffer.writeln("    await page.selectOption('${_escapeJs(selector)}', '$value');");
-    } else if (label != null) {
-      buffer.writeln("    await page.selectOption('${_escapeJs(selector)}', { label: '${_escapeJs(label)}' });");
-    } else if (index != null) {
-      buffer.writeln("    await page.selectOption('${_escapeJs(selector)}', { index: $index });");
-    } else {
-      buffer.writeln("    console.log(JSON.stringify({ success: false, error: '需要 value、label 或 index 参数' }));");
-      return;
-    }
-    
-    buffer.writeln("    console.log(JSON.stringify({ success: true, message: '已选择选项' }));");
-  }
-  
-  // ==================== 文件上传 ====================
-  
-  void _generateUploadAction(StringBuffer buffer, Map<String, dynamic> args) {
-    final selector = args['selector'] as String? ?? '';
-    final files = args['files'] as List<dynamic>?;
-    
-    if (files == null || files.isEmpty) {
-      buffer.writeln("    console.log(JSON.stringify({ success: false, error: '需要 files 参数' }));");
-      return;
-    }
-    
-    final filePaths = files.map((f) => "'${_escapeJs(f.toString())}'").join(', ');
-    buffer.writeln("    await page.setInputFiles('${_escapeJs(selector)}', [$filePaths]);");
-    buffer.writeln("    console.log(JSON.stringify({ success: true, message: '已上传 ${files.length} 个文件' }));");
-  }
-  
-  // ==================== 文件下载 ====================
-  
-  void _generateDownloadAction(StringBuffer buffer, Map<String, dynamic> args) {
-    final downloadSelector = args['download_selector'] as String?;
-    final url = args['url'] as String?;
-    final savePath = args['save_path'] as String?;
-    
-    if (downloadSelector != null) {
-      buffer.writeln("    const [ download ] = await Promise.all([");
-      buffer.writeln("      page.waitForEvent('download'),");
-      buffer.writeln("      page.click('${_escapeJs(downloadSelector)}'),");
-      buffer.writeln("    ]);");
-      buffer.writeln("    const downloadPath = '$savePath' || path.join(process.cwd(), download.suggestedFilename());");
-      buffer.writeln("    await download.saveAs(downloadPath);");
-      buffer.writeln("    console.log(JSON.stringify({ success: true, download_path: downloadPath }));");
-    } else if (url != null) {
-      buffer.writeln("    const response = await page.request.get('$url');");
-      buffer.writeln("    const downloadPath = '$savePath' || path.join(process.cwd(), 'download_${DateTime.now().millisecondsSinceEpoch}');");
-      buffer.writeln("    await response.body().then(body => require('fs').writeFileSync(downloadPath, body));");
-      buffer.writeln("    console.log(JSON.stringify({ success: true, download_path: downloadPath }));");
-    } else {
-      buffer.writeln("    console.log(JSON.stringify({ success: false, error: '需要 download_selector 或 url 参数' }));");
-    }
-  }
-  
-  // ==================== 等待操作 ====================
-  
-  void _generateWaitAction(StringBuffer buffer, Map<String, dynamic> args) {
-    final selector = args['selector'] as String?;
-    final waitTime = args['time'] as int?;
-    final waitUntil = args['until'] as String?;
-    final waitForUrl = args['url'] as String?;
-    final text = args['text'] as String?;
-    
-    if (waitTime != null) {
-      buffer.writeln("    await page.waitForTimeout($waitTime);");
-      buffer.writeln("    console.log(JSON.stringify({ success: true, message: '等待完成' }));");
-    } else if (selector != null) {
-      final state = args['state'] as String? ?? 'visible';
-      buffer.writeln("    await page.waitForSelector('${_escapeJs(selector)}', { state: '$state', timeout: ${args['timeout'] ?? 30000} });");
-      buffer.writeln("    console.log(JSON.stringify({ success: true, message: '元素已出现' }));");
-    } else if (text != null) {
-      buffer.writeln("    await page.waitForSelector('text=${_escapeJs(text)}', { timeout: ${args['timeout'] ?? 30000} });");
-      buffer.writeln("    console.log(JSON.stringify({ success: true, message: '文本已出现' }));");
-    } else if (waitForUrl != null) {
-      buffer.writeln("    await page.waitForURL('$waitForUrl', { timeout: ${args['timeout'] ?? 30000} });");
-      buffer.writeln("    console.log(JSON.stringify({ success: true, message: 'URL 已匹配' }));");
-    } else if (waitUntil != null) {
-      buffer.writeln("    await page.waitForLoadState('$waitUntil');");
-      buffer.writeln("    console.log(JSON.stringify({ success: true, message: '页面状态已就绪' }));");
-    } else {
-      buffer.writeln("    await page.waitForLoadState('networkidle');");
-      buffer.writeln("    console.log(JSON.stringify({ success: true, message: '网络空闲' }));");
-    }
-  }
-  
-  // ==================== 键盘操作 ====================
-  
-  void _generateKeyboardAction(StringBuffer buffer, Map<String, dynamic> args) {
-    final key = args['key'] as String?;
-    final keys = args['keys'] as String?;
-    final modifier = args['modifier'] as String?;
-    final text = args['text'] as String?;
-    final delay = args['delay'] as int? ?? 50;
-    
-    if (key != null) {
-      if (modifier != null) {
-        buffer.writeln("    await page.keyboard.press('$modifier+$key');");
-      } else {
-        buffer.writeln("    await page.keyboard.press('$key');");
-      }
-    } else if (keys != null) {
-      final keyList = (keys as String).split(',');
-      for (final k in keyList) {
-        buffer.writeln("    await page.keyboard.press('${k.trim()}');");
-      }
-    } else if (text != null) {
-      buffer.writeln("    await page.keyboard.type('${_escapeJs(text)}', { delay: $delay });");
-    } else {
-      buffer.writeln("    console.log(JSON.stringify({ success: false, error: '需要 key、keys 或 text 参数' }));");
-      return;
-    }
-    
-    buffer.writeln("    console.log(JSON.stringify({ success: true, message: '键盘操作完成' }));");
-  }
-  
-  // ==================== 鼠标操作 ====================
-  
-  void _generateMouseAction(StringBuffer buffer, Map<String, dynamic> args) {
-    final action = args['mouse_action'] as String?;
-    final x = args['x'] as int?;
-    final y = args['y'] as int?;
-    final button = args['button'] as String? ?? 'left';
-    final clickCount = args['click_count'] as int? ?? 1;
-    
-    if (action == 'move' && x != null && y != null) {
-      buffer.writeln("    await page.mouse.move($x, $y);");
-    } else if (action == 'click' && x != null && y != null) {
-      buffer.writeln("    await page.mouse.click($x, $y, { button: '$button', clickCount: $clickCount });");
-    } else if (action == 'down') {
-      buffer.writeln("    await page.mouse.down({ button: '$button' });");
-    } else if (action == 'up') {
-      buffer.writeln("    await page.mouse.up({ button: '$button' });");
-    } else if (action == 'wheel' && x != null && y != null) {
-      buffer.writeln("    await page.mouse.wheel($x, $y);");
-    } else {
-      buffer.writeln("    console.log(JSON.stringify({ success: false, error: '需要有效的鼠标操作' }));");
-      return;
-    }
-    
-    buffer.writeln("    console.log(JSON.stringify({ success: true, message: '鼠标操作完成' }));");
-  }
-  
-  // ==================== 拖拽操作 ====================
-  
-  void _generateDragAction(StringBuffer buffer, Map<String, dynamic> args) {
-    final sourceSelector = args['source'] as String?;
-    final targetSelector = args['target'] as String?;
-    final sourcePos = args['source_position'] as Map<String, dynamic>?;
-    final targetPos = args['target_position'] as Map<String, dynamic>?;
-    
-    if (sourceSelector != null && targetSelector != null) {
-      buffer.writeln("    await page.dragAndDrop('${_escapeJs(sourceSelector)}', '${_escapeJs(targetSelector)}');");
-    } else if (sourcePos != null && targetPos != null) {
-      buffer.writeln("    await page.mouse.move(${sourcePos['x']}, ${sourcePos['y']});");
-      buffer.writeln("    await page.mouse.down();");
-      buffer.writeln("    await page.mouse.move(${targetPos['x']}, ${targetPos['y']});");
-      buffer.writeln("    await page.mouse.up();");
-    } else {
-      buffer.writeln("    console.log(JSON.stringify({ success: false, error: '需要 source 和 target 参数' }));");
-      return;
-    }
-    
-    buffer.writeln("    console.log(JSON.stringify({ success: true, message: '拖拽完成' }));");
-  }
-  
-  // ==================== iframe 操作 ====================
-  
-  void _generateIframeAction(StringBuffer buffer, Map<String, dynamic> args) {
-    final iframeSelector = args['iframe_selector'] as String?;
-    final subAction = args['sub_action'] as String?;
-    final subArgs = args['sub_args'] as Map<String, dynamic>?;
-    
-    if (iframeSelector == null) {
-      buffer.writeln("    console.log(JSON.stringify({ success: false, error: '需要 iframe_selector 参数' }));");
-      return;
-    }
-    
-    buffer.writeln("    const frame = page.frameLocator('${_escapeJs(iframeSelector)}');");
-    
-    if (subAction != null && subArgs != null) {
-      switch (subAction) {
-        case 'click':
-          buffer.writeln("    await frame.locator('${_escapeJs(subArgs['selector'] as String)}').click();");
-          break;
-        case 'fill':
-          buffer.writeln("    await frame.locator('${_escapeJs(subArgs['selector'] as String)}').fill('${_escapeJs(subArgs['value'] as String? ?? '')}');");
-          break;
-        case 'scrape':
-          buffer.writeln("    const content = await frame.locator('${_escapeJs(subArgs['selector'] as String? ?? 'body')}').textContent();");
-          buffer.writeln("    console.log(JSON.stringify({ success: true, data: content }));");
-          break;
-        default:
-          buffer.writeln("    console.log(JSON.stringify({ success: false, error: '不支持的 iframe 子操作' }));");
-      }
-    } else {
-      buffer.writeln("    console.log(JSON.stringify({ success: true, message: '已定位到 iframe' }));");
-    }
-  }
-  
-  // ==================== Cookie 操作 ====================
-  
-  void _generateCookiesAction(StringBuffer buffer, Map<String, dynamic> args) {
-    final action = args['cookie_action'] as String?;
-    
-    switch (action) {
-      case 'get':
-        buffer.writeln("    const cookies = await context.cookies();");
-        buffer.writeln("    console.log(JSON.stringify({ success: true, cookies }));");
-        break;
-      case 'set':
-        final cookies = args['cookies'];
-        if (cookies != null) {
-          _generateSetCookies(buffer, cookies);
-          buffer.writeln("    console.log(JSON.stringify({ success: true, message: '已设置 Cookie' }));");
-        } else {
-          buffer.writeln("    console.log(JSON.stringify({ success: false, error: '需要 cookies 参数' }));");
-        }
-        break;
-      case 'clear':
-        buffer.writeln("    await context.clearCookies();");
-        buffer.writeln("    console.log(JSON.stringify({ success: true, message: '已清除所有 Cookie' }));");
-        break;
-      default:
-        buffer.writeln("    const cookies = await context.cookies();");
-        buffer.writeln("    console.log(JSON.stringify({ success: true, cookies }));");
-    }
-  }
-  
-  // ==================== JavaScript 执行 ====================
-  
-  void _generateEvaluateAction(StringBuffer buffer, Map<String, dynamic> args) {
-    final script = args['script'] as String? ?? '';
-    
-    buffer.writeln("    const result = await page.evaluate(() => {");
-    buffer.writeln("      $script");
-    buffer.writeln("    });");
-    buffer.writeln("    console.log(JSON.stringify({ success: true, result }));");
-  }
-  
-  // ==================== PDF 生成 ====================
-  
-  void _generatePdfAction(StringBuffer buffer, Map<String, dynamic> args) {
-    final outputPath = args['output_path'] as String?;
-    final format = args['format'] as String? ?? 'A4';
-    
-    buffer.writeln("    const pdfPath = '$outputPath' || path.join(process.cwd(), 'page_${DateTime.now().millisecondsSinceEpoch}.pdf');");
-    buffer.writeln("    await page.pdf({");
-    buffer.writeln("      path: pdfPath,");
-    buffer.writeln("      format: '$format',");
-    buffer.writeln("      printBackground: true,");
-    buffer.writeln("    });");
-    buffer.writeln("    console.log(JSON.stringify({ success: true, pdf_path: pdfPath, message: 'PDF 已生成' }));");
-  }
-  
-  // ==================== 多步骤操作 ====================
-  
-  void _generateMultiStepAction(StringBuffer buffer, Map<String, dynamic> args) {
-    final steps = args['steps'] as List<dynamic>?;
-    
-    if (steps == null || steps.isEmpty) {
-      buffer.writeln("    console.log(JSON.stringify({ success: false, error: '需要 steps 参数' }));");
-      return;
-    }
-    
-    buffer.writeln("    const results = [];");
-    
-    for (int i = 0; i < steps.length; i++) {
-      final step = steps[i] as Map<String, dynamic>;
-      final stepAction = step['action'] as String?;
-      buffer.writeln("    // 步骤 ${i + 1}: $stepAction");
-      
-      switch (stepAction) {
-        case 'navigate':
-          buffer.writeln("    await page.goto('${step['url']}', { waitUntil: '${step['wait_until'] ?? 'domcontentloaded'}' });");
-          break;
-        case 'click':
-          buffer.writeln("    await page.click('${_escapeJs(step['selector'] as String)}');");
-          if (step['wait_for'] != null) {
-            buffer.writeln("    await page.waitForSelector('${_escapeJs(step['wait_for'] as String)}');");
-          }
-          break;
-        case 'fill':
-          buffer.writeln("    await page.fill('${_escapeJs(step['selector'] as String)}', '${_escapeJs(step['value'] as String? ?? '')}');");
-          break;
-        case 'type':
-          buffer.writeln("    await page.type('${_escapeJs(step['selector'] as String? ?? '')}', '${_escapeJs(step['text'] as String? ?? '')}');");
-          break;
-        case 'wait':
-          if (step['time'] != null) {
-            buffer.writeln("    await page.waitForTimeout(${step['time']});");
-          } else if (step['selector'] != null) {
-            buffer.writeln("    await page.waitForSelector('${_escapeJs(step['selector'] as String)}');");
-          }
-          break;
-        case 'hover':
-          buffer.writeln("    await page.hover('${_escapeJs(step['selector'] as String)}');");
-          break;
-        case 'scroll':
-          buffer.writeln("    await page.evaluate(() => window.scrollBy(0, ${step['distance'] ?? 500}));");
-          break;
-        case 'screenshot':
-          buffer.writeln("    await page.screenshot({ path: '${step['output_path'] ?? 'step_${i + 1}.png'}' });");
-          break;
-        case 'keyboard':
-          buffer.writeln("    await page.keyboard.press('${step['key']}');");
-          break;
-        default:
-          buffer.writeln("    // 未知步骤: $stepAction");
-      }
-      
-      buffer.writeln("    results.push({ step: ${i + 1}, action: '$stepAction', status: 'completed' });");
-    }
-    
-    buffer.writeln("    const pageUrl = page.url();");
-    buffer.writeln("    const title = await page.title();");
-    buffer.writeln("    console.log(JSON.stringify({ success: true, title, url: pageUrl, steps_completed: results.length, results }));");
-  }
-  
-  // ==================== 关闭会话 ====================
-  
-  void _generateCloseAction(StringBuffer buffer, Map<String, dynamic> args) {
-    buffer.writeln("    if (browser) await browser.close();");
-    buffer.writeln("    console.log(JSON.stringify({ success: true, message: '浏览器已关闭' }));");
-  }
-  
-  // ==================== 工具方法 ====================
-  
-  String _escapeJs(String input) {
-    return input
-        .replaceAll('\\', '\\\\')
-        .replaceAll("'", "\\'")
-        .replaceAll('\n', '\\n')
-        .replaceAll('\r', '\\r')
-        .replaceAll('\t', '\\t');
   }
 
   // ==================== Skill 接口实现 ====================
@@ -914,7 +384,7 @@ class BrowserSkill extends GooseSkill {
 
   @override
   String get description =>
-      '统一的浏览器自动化技能，基于 Playwright。\n\n'
+      '浏览器自动化技能（持久进程版）。浏览器打开后保持运行，多次调用之间复用同一个浏览器实例，不会自动关闭。\n\n'
       '【基础操作】\n'
       '- open/navigate: 打开网页\n'
       '- screenshot: 截图（整页/元素）\n'
@@ -935,6 +405,10 @@ class BrowserSkill extends GooseSkill {
       '- evaluate: 执行 JavaScript\n'
       '- pdf: 生成 PDF\n'
       '- multi: 多步骤链式操作\n\n'
+      '【生命周期】\n'
+      '- close: 关闭浏览器（进程保留，下次操作自动重启）\n'
+      '- 浏览器打开后不会自动关闭，可连续执行多次操作\n'
+      '- 空闲 30 分钟自动关闭浏览器（进程保留）\n\n'
       '【智能定位】支持 selector、text、role、label、placeholder、position\n'
       '【前提条件】npx playwright install chromium';
 
@@ -961,8 +435,7 @@ class BrowserSkill extends GooseSkill {
     const SkillParam(name: 'placeholder', description: '占位符文本', type: 'string', required: false),
     const SkillParam(name: 'output_path', description: '输出文件路径', type: 'string', required: false),
     const SkillParam(name: 'timeout', description: '超时时间（毫秒），默认 30000', type: 'int', required: false, defaultValue: 30000),
-    const SkillParam(name: 'headless', description: '无头模式，默认 true', type: 'bool', required: false, defaultValue: true),
-    const SkillParam(name: 'keep_alive', description: '保持浏览器打开', type: 'bool', required: false, defaultValue: false),
+    const SkillParam(name: 'headless', description: '无头模式，默认 false（有界面）', type: 'bool', required: false, defaultValue: false),
     const SkillParam(name: 'wait_for', description: '操作后等待的选择器', type: 'string', required: false),
     const SkillParam(name: 'full_page', description: '整页截图', type: 'bool', required: false, defaultValue: true),
     const SkillParam(name: 'attribute', description: '要获取的元素属性', type: 'string', required: false),
@@ -1011,15 +484,23 @@ class BrowserSkill extends GooseSkill {
     
     debugPrint('🌐 $message');
     
+    // 启动前清理可能残留的僵尸 chromium 进程（仅 headless 模式）
+    await _cleanupZombieProcesses();
+    
     // 处理特殊参数
     _processSpecialArgs(args);
     
-    // 生成并执行脚本
-    final script = _generateScript(action, args);
-    debugPrint('🌐 生成 Playwright 脚本 (${script.length} 字符)');
-    
+    // 通过持久进程发送指令
     final timeout = Duration(minutes: (args['timeout_minutes'] as int?) ?? 5);
-    final result = await _executeScript(script, timeout: timeout);
+    onOutput?.call('🌐 正在执行浏览器操作: $action...');
+    
+    Map<String, dynamic> result;
+    
+    if (action == 'close') {
+      result = await _sendCommand('close', args, timeout: const Duration(seconds: 10));
+    } else {
+      result = await _sendCommand(action, args, timeout: timeout);
+    }
     
     return _formatResult(result, action);
   }
@@ -1077,7 +558,6 @@ class BrowserSkill extends GooseSkill {
         parts.add('📜 滚动位置: ${result['scroll_position']}');
       }
       
-      // 数据结果
       if (result['data'] != null) {
         final data = result['data'];
         if (data is List) {
@@ -1095,7 +575,6 @@ class BrowserSkill extends GooseSkill {
         }
       }
       
-      // 链接结果
       if (result['links'] != null) {
         final links = result['links'] as List;
         parts.add('🔗 链接 (${links.length} 个):');
@@ -1105,18 +584,15 @@ class BrowserSkill extends GooseSkill {
         }
       }
       
-      // Cookie 结果
       if (result['cookies'] != null) {
         final cookies = result['cookies'] as List;
         parts.add('🍪 Cookie (${cookies.length} 个)');
       }
       
-      // 多步骤结果
       if (result['steps_completed'] != null) {
         parts.add('📋 完成 ${result['steps_completed']} 个步骤');
       }
       
-      // 页面文本
       if (result['text'] != null) {
         final text = result['text'].toString();
         parts.add('📝 文本 (${text.length} 字符):');
@@ -1128,40 +604,58 @@ class BrowserSkill extends GooseSkill {
       return SkillResult.fail('❌ 浏览器操作失败: ${result['error'] ?? "未知错误"}');
     }
   }
+  
+  /// 备用内嵌服务器脚本（当外部文件不存在时使用）
+  static const String _fallbackServerScript = r'''
+const { chromium } = require('playwright');
+let browser = null, context = null, page = null;
+
+async function ensureBrowser(args = {}) {
+  if (!browser) {
+    browser = await chromium.launch({ headless: args.headless !== undefined ? args.headless : false, slowMo: args.slow_mo || 0 });
+    context = await browser.newContext({ viewport: { width: args.viewport_width || 1920, height: args.viewport_height || 1080 } });
+    page = await context.newPage();
+    page.setDefaultTimeout(args.timeout || 30000);
+  }
+  return page;
 }
 
-/// 浏览器会话管理器
-class BrowserSessionManager {
-  final Map<String, BrowserSession> _sessions = {};
-  
-  bool hasSession(String sessionId) => _sessions.containsKey(sessionId);
-  
-  BrowserSession? getSession(String sessionId) => _sessions[sessionId];
-  
-  String createSession({String? userDataDir}) {
-    final sessionId = 'session_${DateTime.now().millisecondsSinceEpoch}';
-    _sessions[sessionId] = BrowserSession(
-      id: sessionId,
-      userDataDir: userDataDir ?? '/tmp/playwright_$sessionId',
-      createdAt: DateTime.now(),
-    );
-    return sessionId;
-  }
-  
-  void closeSession(String sessionId) {
-    _sessions.remove(sessionId);
-  }
+function escapeJs(s) { return String(s).replace(/\\/g,'\\\\').replace(/'/g,"\\'").replace(/\n/g,'\\n').replace(/\r/g,'\\r').replace(/\t/g,'\\t'); }
+
+async function handle(cmd) {
+  const { action, args = {}, id } = cmd;
+  try {
+    switch (action) {
+      case 'launch': {
+        if (browser) { const ps = context ? context.pages() : browser.pages(); page = ps.length > 0 ? ps[0] : (context ? await context.newPage() : await browser.newPage()); return { id, success: true, message: '浏览器已在运行' }; }
+        browser = await chromium.launch({ headless: args.headless !== undefined ? args.headless : false });
+        context = await browser.newContext({ viewport: { width: args.viewport_width || 1920, height: args.viewport_height || 1080 } });
+        page = await context.newPage(); page.setDefaultTimeout(args.timeout || 30000);
+        return { id, success: true, message: '浏览器已启动' };
+      }
+      case 'close': { if (browser) { try { await Promise.race([browser.close(), new Promise(r => setTimeout(r, 5000))]); } catch(_){} browser = null; context = null; page = null; } return { id, success: true, message: '浏览器已关闭' }; }
+      case 'exit': { if (browser) { try { await Promise.race([browser.close(), new Promise(r => setTimeout(r, 3000))]); } catch(_){} } setTimeout(() => process.exit(0), 200); return { id, success: true }; }
+      case 'navigate': case 'open': { await ensureBrowser(args); await page.goto(args.url || '', { waitUntil: args.wait_until || 'domcontentloaded', timeout: args.timeout || 60000 }); if (args.wait_for) await page.waitForSelector(args.wait_for, { timeout: args.timeout || 30000 }); return { id, success: true, title: await page.title(), url: page.url() }; }
+      case 'click': { await ensureBrowser(args); if (args.text) await page.getByText(args.text).first().click(); else if (args.role) await page.getByRole(args.role, args.name ? {name: args.name} : {}).first().click(); else if (args.label) await page.getByLabel(args.label).first().click(); else if (args.position) await page.mouse.click(args.position.x, args.position.y); else if (args.selector) await page.click(args.selector); else return { id, success: false, error: '需要 selector/text/role/label/position' }; if (args.wait_for) await page.waitForSelector(args.wait_for); return { id, success: true, url: page.url(), title: await page.title(), message: '已点击' }; }
+      case 'fill': { await ensureBrowser(args); const v = escapeJs(args.value || ''); if (args.label) await page.getByLabel(args.label).fill(v); else if (args.placeholder) await page.getByPlaceholder(args.placeholder).fill(v); else if (args.selector) await page.fill(args.selector, v); else return { id, success: false, error: '需要 selector/label/placeholder' }; if (args.press_enter || args.submit) { await page.keyboard.press('Enter'); await page.waitForLoadState('domcontentloaded'); } return { id, success: true, url: page.url(), title: await page.title(), message: '已填写' }; }
+      case 'type': { await ensureBrowser(args); if (args.selector) await page.type(args.selector, escapeJs(args.text || ''), { delay: args.delay || 50 }); else await page.keyboard.type(escapeJs(args.text || ''), { delay: args.delay || 50 }); return { id, success: true }; }
+      case 'hover': { await ensureBrowser(args); if (args.position) await page.mouse.move(args.position.x, args.position.y); else if (args.selector) await page.hover(args.selector); return { id, success: true }; }
+      case 'scroll': { await ensureBrowser(args); if (args.selector) await page.locator(args.selector).scrollIntoViewIfNeeded(); else if (args.to_bottom) await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight)); else await page.evaluate(() => window.scrollBy(0, args.direction === 'up' ? -(args.distance||500) : (args.distance||500))); return { id, success: true }; }
+      case 'screenshot': { await ensureBrowser(args); const sp = args.output_path || 'screenshot.png'; if (args.selector) { const el = await page.$(args.selector); if (!el) return { id, success: false, error: '元素未找到' }; await el.screenshot({path:sp}); } else await page.screenshot({path:sp, fullPage: args.full_page !== false}); return { id, success: true, screenshot_path: sp }; }
+      case 'scrape': { await ensureBrowser(args); if (args.extract_text) { const t = await page.evaluate(() => document.body.innerText); return { id, success: true, title: await page.title(), text: t }; } if (args.extract_links) { const links = await page.evaluate(() => Array.from(document.querySelectorAll('a')).map(a=>({text:a.textContent?.trim(),href:a.href})).filter(l=>l.text&&l.href)); return { id, success: true, links }; } const c = await page.content(); return { id, success: true, title: await page.title(), html_length: c.length }; }
+      case 'wait': { await ensureBrowser(args); if (args.time) await page.waitForTimeout(args.time); else if (args.selector) await page.waitForSelector(args.selector, {state: args.state || 'visible', timeout: args.timeout || 30000}); else if (args.until) await page.waitForLoadState(args.until); else await page.waitForLoadState('networkidle'); return { id, success: true }; }
+      case 'keyboard': { await ensureBrowser(args); if (args.key) await page.keyboard.press(args.modifier ? args.modifier+'+'+args.key : args.key); else if (args.keys) { for (const k of args.keys.split(',')) await page.keyboard.press(k.trim()); } else if (args.text) await page.keyboard.type(args.text, {delay: args.delay||50}); return { id, success: true }; }
+      case 'mouse': { await ensureBrowser(args); const a = args.mouse_action; if (a==='move') await page.mouse.move(args.x, args.y); else if (a==='click') await page.mouse.click(args.x, args.y); else if (a==='down') await page.mouse.down(); else if (a==='up') await page.mouse.up(); else if (a==='wheel') await page.mouse.wheel(args.x, args.y); return { id, success: true }; }
+      case 'evaluate': { await ensureBrowser(args); const r = await page.evaluate(new Function('return '+args.script)()); return { id, success: true, result: r }; }
+      case 'multi': { await ensureBrowser(args); const steps = args.steps||[]; for (const s of steps) { switch(s.action) { case 'navigate': await page.goto(s.url,{waitUntil:s.wait_until||'domcontentloaded'}); break; case 'click': await page.click(s.selector); break; case 'fill': await page.fill(s.selector,s.value||''); break; case 'wait': s.time ? await page.waitForTimeout(s.time) : s.selector && await page.waitForSelector(s.selector); break; case 'hover': await page.hover(s.selector); break; case 'scroll': await page.evaluate(()=>window.scrollBy(0,s.distance||500)); break; case 'screenshot': await page.screenshot({path:s.output_path||'step.png'}); break; } } return { id, success: true, title: await page.title(), url: page.url() }; }
+      default: return { id, success: false, error: '未知操作: '+action };
+    }
+  } catch(e) { return { id, success: false, error: e.message }; }
 }
 
-/// 浏览器会话
-class BrowserSession {
-  final String id;
-  final String userDataDir;
-  final DateTime createdAt;
-  
-  BrowserSession({
-    required this.id,
-    required this.userDataDir,
-    required this.createdAt,
-  });
+let buf = '';
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', async (chunk) => { buf += chunk; const lines = buf.split('\n'); buf = lines.pop(); for (const line of lines) { const t = line.trim(); if (!t) continue; try { const cmd = JSON.parse(t); process.stdout.write(JSON.stringify(await handle(cmd))+'\n'); } catch(e) { process.stdout.write(JSON.stringify({success:false,error:e.message})+'\n'); } } });
+process.stdin.on('end', () => { if (browser) browser.close().catch(()=>{}).then(()=>process.exit(0)); else process.exit(0); });
+''';
 }

@@ -299,6 +299,11 @@ class _EnhancedInputBarState extends State<EnhancedInputBar> {
                   if (event is KeyDownEvent &&
                       event.logicalKey == LogicalKeyboardKey.enter &&
                       !HardwareKeyboard.instance.isShiftPressed) {
+                    // IME 合成中（中文输入法选字阶段）—— 透传给输入法，不发送
+                    // composing != TextRange.empty 表示输入法尚未上屏
+                    if (widget.controller.value.composing != TextRange.empty) {
+                      return KeyEventResult.ignored;
+                    }
                     // Enter 发送消息，消费事件阻止换行
                     _handleSend();
                     return KeyEventResult.handled;

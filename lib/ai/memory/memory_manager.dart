@@ -152,9 +152,67 @@ class MemoryManager extends ChangeNotifier {
     _saveMemories();
     notifyListeners();
   }
-  
+
+  // ── API Key 相关的记忆能力 ──
+
+  /// 判断文本是否含 API key 信息（用于自动标记为永久重要记忆）
+  static bool isApiKeyContent(String content) {
+    final lower = content.toLowerCase();
+    // 服务名关键词
+    const serviceNames = [
+      'tavily', 'brave', 'exa', 'gnews', 'openai', 'anthropic',
+      'gemini', 'qwen', 'deepseek', 'kimi', 'minimax',
+    ];
+    // key 关键词
+    const keyWords = ['api key', 'apikey', 'api_key', 'token', 'secret key', '密钥', '接口密钥'];
+
+    final hasService = serviceNames.any((s) => lower.contains(s));
+    final hasKeyWord = keyWords.any((k) => lower.contains(k));
+
+    // 含典型 key 格式（sk-xxx、tvly-xxx、BSAxxx 等）
+    final hasKeyPattern = RegExp(
+      r'(sk-[a-zA-Z0-9]{10,}|tvly-[a-zA-Z0-9]{10,}|BSA[a-zA-Z0-9]{10,}|[a-zA-Z0-9]{30,})',
+    ).hasMatch(content);
+
+    return hasKeyWord || (hasService && hasKeyPattern);
+  }
+
+  /// 从永久记忆中提取指定搜索引擎的 API key
+  ///
+  /// 扫描所有长期记忆，找出明确提到 [providerName] 的 API key 记录，
+  /// 返回第一个匹配的 key 字符串（裸 key），找不到则返回 null。
+  String? searchApiKeyFromMemory(String providerName) {
+    final lowerProvider = providerName.toLowerCase();
+    // 用于捕获 key 值的正则：常见 key 格式
+    final keyExtract = RegExp(
+      r'(?:key|token|secret)[^\S\n]*[：:=\s]+([A-Za-z0-9\-_]{10,})',
+      caseSensitive: false,
+    );
+
+    for (final mem in _longTermMemories.reversed) {
+      final content = (mem['content'] as String? ?? '').toLowerCase();
+      if (!content.contains(lowerProvider)) continue;
+      if (!isApiKeyContent(content)) continue;
+
+      // 尝试提取 key 值
+      final m = keyExtract.firstMatch(mem['content'] as String);
+      if (m != null) {
+        final candidate = m.group(1)!.trim();
+        if (candidate.length >= 10) return candidate;
+      }
+
+      // 备用：找第一个连续的长 token（>=20字符的字母数字串）
+      final tokenMatch = RegExp(r'[A-Za-z0-9\-_]{20,}').firstMatch(mem['content'] as String);
+      if (tokenMatch != null) return tokenMatch.group(0);
+    }
+    return null;
+  }
+
   /// 判断内容是否为重要记忆
   bool _isImportantContent(String content) {
+    // API key 自动标为重要
+    if (isApiKeyContent(content)) return true;
+
     final lower = content.toLowerCase();
     // 检查是否包含重要标签
     for (final tag in importantMemoryTags) {
@@ -163,7 +221,7 @@ class MemoryManager extends ChangeNotifier {
       }
     }
     // 检查特定模式
-    if (lower.contains('我叫') || lower.contains('名字是') || 
+    if (lower.contains('我叫') || lower.contains('名字是') ||
         lower.contains('生日是') || lower.contains('喜欢吃') ||
         lower.contains('不喜欢') || lower.contains('住址') ||
         lower.contains('电话') || lower.contains('记得') ||

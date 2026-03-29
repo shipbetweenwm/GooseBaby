@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'package:dio/dio.dart';
 import '../../models/models.dart';
+import '../../utils/http_client.dart';
 import '../../utils/type_utils.dart';
 import '../agent/agent_types.dart';
 import 'llm_provider.dart';
@@ -9,13 +10,38 @@ import 'llm_provider.dart';
 /// OpenAI GPT 大模型适配器
 class OpenAIProvider extends LLMProvider {
   static const _defaultBaseUrl = 'https://api.openai.com/v1';
-  final Dio _dio = Dio();
+  final Dio _dio = createRetryDio(receiveTimeout: const Duration(seconds: 120));
 
   /// 规范化 baseUrl：去掉末尾斜杠，确保格式统一
   String _fixBaseUrl(String? baseUrl) {
     if (baseUrl == null || baseUrl.isEmpty) return _defaultBaseUrl;
     var url = baseUrl.endsWith('/') ? baseUrl.substring(0, baseUrl.length - 1) : baseUrl;
     return url;
+  }
+
+  /// 各模型最大输出 token（来源：OpenAI 官方文档）
+  /// https://platform.openai.com/docs/models
+  static int _getMaxOutputTokens(String model) {
+    final m = model.toLowerCase();
+    // GPT-5.4 系列（最新旗舰）
+    if (m.contains('gpt-5.4')) return 131072;
+    // GPT-5 系列
+    if (m.contains('gpt-5') && !m.contains('gpt-5.4')) return 131072;
+    // o 系列推理模型
+    if (m.startsWith('o3') || m.startsWith('o4')) return 100000;
+    if (m.startsWith('o1')) return 100000;
+    // GPT-4.1 系列
+    if (m.contains('gpt-4.1')) return 32768;
+    // GPT-4o 系列（含 4o-mini）
+    if (m.contains('gpt-4o')) return 16384;
+    // GPT-4.5 系列
+    if (m.contains('gpt-4.5')) return 16384;
+    // GPT-4 Turbo
+    if (m.contains('gpt-4-turbo')) return 4096;
+    // GPT-3.5
+    if (m.contains('gpt-3.5')) return 4096;
+    // 其他/自定义模型保守值
+    return 16384;
   }
 
   @override
@@ -37,8 +63,10 @@ class OpenAIProvider extends LLMProvider {
     List<Map<String, dynamic>> messages, {
     LLMConfig? config,
     List<Map<String, dynamic>>? tools,
+    CancelToken? cancelToken,
   }) async {
     final cfg = config ?? const LLMConfig(provider: 'openai', model: 'gpt-4o-mini');
+    final maxTokens = cfg.maxTokens.clamp(1, _getMaxOutputTokens(cfg.model));
     final baseUrl = _fixBaseUrl(cfg.baseUrl);
     final url = '$baseUrl/chat/completions';
 
@@ -46,7 +74,7 @@ class OpenAIProvider extends LLMProvider {
       'model': cfg.model,
       'messages': messages,
       'temperature': cfg.temperature,
-      'max_tokens': cfg.maxTokens,
+      'max_tokens': maxTokens,
     };
 
     if (tools != null && tools.isNotEmpty) {
@@ -56,6 +84,7 @@ class OpenAIProvider extends LLMProvider {
     final response = await _dio.post(
       url,
       data: jsonEncode(body),
+      cancelToken: cancelToken,
       options: Options(
         headers: {
           'Content-Type': 'application/json',
@@ -84,6 +113,7 @@ class OpenAIProvider extends LLMProvider {
     List<Map<String, dynamic>>? tools,
   }) async* {
     final cfg = config ?? const LLMConfig(provider: 'openai', model: 'gpt-4o-mini');
+    final maxTokens = cfg.maxTokens.clamp(1, _getMaxOutputTokens(cfg.model));
     final baseUrl = _fixBaseUrl(cfg.baseUrl);
     final url = '$baseUrl/chat/completions';
 
@@ -91,7 +121,7 @@ class OpenAIProvider extends LLMProvider {
       'model': cfg.model,
       'messages': messages,
       'temperature': cfg.temperature,
-      'max_tokens': cfg.maxTokens,
+      'max_tokens': maxTokens,
       'stream': true,
     };
 
@@ -101,12 +131,10 @@ class OpenAIProvider extends LLMProvider {
     }
 
     // 合并 tools
+    // web_search_preview 只有 OpenAI 官方支持，DeepSeek/Kimi 等继承者不支持，跳过
     final allTools = <Map<String, dynamic>>[];
-    if (cfg.enableWebSearch) {
-      allTools.add({
-        'type': 'web_search',
-        'web_search': {},
-      });
+    if (cfg.enableWebSearch && cfg.provider == 'openai') {
+      allTools.add({'type': 'web_search_preview'});
     }
     if (tools != null && tools.isNotEmpty) {
       allTools.addAll(tools.cast<Map<String, dynamic>>());
@@ -159,6 +187,7 @@ class OpenAIProvider extends LLMProvider {
     List<Map<String, dynamic>>? tools,
   }) async* {
     final cfg = config ?? const LLMConfig(provider: 'openai', model: 'gpt-4o-mini');
+    final maxTokens = cfg.maxTokens.clamp(1, _getMaxOutputTokens(cfg.model));
     final baseUrl = _fixBaseUrl(cfg.baseUrl);
     final url = '$baseUrl/chat/completions';
 
@@ -166,17 +195,15 @@ class OpenAIProvider extends LLMProvider {
       'model': cfg.model,
       'messages': messages,
       'temperature': cfg.temperature,
-      'max_tokens': cfg.maxTokens,
+      'max_tokens': maxTokens,
       'stream': true,
     };
 
     // 合并 tools
+    // web_search_preview 只有 OpenAI 官方支持，DeepSeek/Kimi 等继承者不支持，跳过
     final allTools = <Map<String, dynamic>>[];
-    if (cfg.enableWebSearch) {
-      allTools.add({
-        'type': 'web_search',
-        'web_search': {},
-      });
+    if (cfg.enableWebSearch && cfg.provider == 'openai') {
+      allTools.add({'type': 'web_search_preview'});
     }
     if (tools != null && tools.isNotEmpty) {
       allTools.addAll(tools.cast<Map<String, dynamic>>());

@@ -120,13 +120,26 @@ class FileCardState extends State<FileCard> {
     final path = widget.attachment.filePath;
     if (path == null) return;
     try {
-      final winPath = path.replaceAll('/', '\\');
-      final file = File(winPath);
+      final file = File(path);
       if (file.existsSync()) {
-        Process.run('explorer', ['/select,', winPath]);
+        if (Platform.isMacOS) {
+          Process.run('open', ['-R', path]); // 在 Finder 中显示
+        } else if (Platform.isWindows) {
+          final winPath = path.replaceAll('/', '\\');
+          Process.run('explorer', ['/select,', winPath]);
+        } else if (Platform.isLinux) {
+          Process.run('xdg-open', [file.parent.path]);
+        }
       } else {
+        // 文件不存在，尝试打开父目录
         final dir = file.parent.path;
-        Process.run('explorer', [dir]);
+        if (Platform.isMacOS) {
+          Process.run('open', [dir]);
+        } else if (Platform.isWindows) {
+          Process.run('explorer', [dir.replaceAll('/', '\\')]);
+        } else if (Platform.isLinux) {
+          Process.run('xdg-open', [dir]);
+        }
       }
     } catch (_) {}
   }

@@ -1,3 +1,4 @@
+import 'package:dio/dio.dart';
 import '../../models/models.dart';
 import '../agent/agent_types.dart';
 import '../agent/stream_types.dart';
@@ -20,10 +21,12 @@ abstract class LLMProvider {
   ///
   /// 之前返回 String，通过 startsWith('{') 判断是否为 tool_calls。
   /// 现在直接返回 AgentResponse，调用方无需字符串解析。
+  /// [cancelToken] 可选的 Dio CancelToken，用于即时中断 HTTP 请求
   Future<AgentResponse> chat(
     List<Map<String, dynamic>> messages, {
     LLMConfig? config,
     List<Map<String, dynamic>>? tools,
+    CancelToken? cancelToken,
   });
 
   /// 流式对话（仅用于纯文本回复的流式展示，不处理 tool_calls）
@@ -65,6 +68,22 @@ abstract class LLMProvider {
 
   /// 检测是否可用
   Future<bool> isAvailable(LLMConfig config);
+
+  /// 视觉分析：发送一张图片 + 提示词，返回文本描述
+  /// 用于 CUA 截图分析等场景
+  /// [base64Image] 图片的 base64 编码（不含 data:xxx;base64, 前缀）
+  /// [mimeType] 图片 MIME 类型（如 image/jpeg）
+  /// [prompt] 提示词
+  /// [config] 视觉模型配置（model 字段应指向视觉模型）
+  Future<String> chatWithVision({
+    required String base64Image,
+    required String mimeType,
+    required String prompt,
+    required LLMConfig config,
+  }) async {
+    // 默认实现：不支持视觉分析的 provider 抛异常
+    throw UnsupportedError('${name} 不支持视觉分析');
+  }
 
   /// Token 计数（估算）
   /// 用于上下文管理，避免超出模型上下文窗口

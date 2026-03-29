@@ -140,6 +140,14 @@ class TrayManager {
     _updateTooltipForHidden();
   }
 
+  /// 外部通知：窗口已恢复显示（如 CUA 操作结束后）
+  static Future<void> notifyShown() async {
+    if (!_isVisible) {
+      _isVisible = true;
+      await _rebuildMenu();
+    }
+  }
+
   /// 确保窗口可见
   static Future<void> _ensureVisible() async {
     try {

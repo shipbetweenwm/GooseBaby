@@ -92,6 +92,36 @@ class StorageManager {
     await box.put('messages', history);
   }
 
+  // ══════════════════════════════════════════
+  // 搜索 / 新闻 API Key 管理
+  // key 前缀 "search_key_" 统一存储在 settings box
+  // ══════════════════════════════════════════
+
+  /// 保存某个搜索引擎的 API key（key 为空字符串时视为清除）
+  static Future<void> saveSearchApiKey(String provider, String apiKey) async {
+    final box = Hive.box('settings');
+    await box.put('search_key_$provider', apiKey.trim());
+  }
+
+  /// 读取某个搜索引擎的 API key，不存在时返回 null
+  static String? getSearchApiKey(String provider) {
+    final box = Hive.box('settings');
+    final val = box.get('search_key_$provider') as String?;
+    return (val == null || val.isEmpty) ? null : val;
+  }
+
+  /// 读取全部已保存的搜索/新闻 API key
+  /// 返回 {provider: apiKey} map
+  static Map<String, String> getAllSearchApiKeys() {
+    const providers = ['tavily', 'brave', 'exa', 'gnews'];
+    final result = <String, String>{};
+    for (final p in providers) {
+      final v = getSearchApiKey(p);
+      if (v != null) result[p] = v;
+    }
+    return result;
+  }
+
   /// 清除所有数据
   static Future<void> clearAll() async {
     await Hive.box('settings').clear();

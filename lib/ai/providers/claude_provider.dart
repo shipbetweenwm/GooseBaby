@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'package:dio/dio.dart';
 import '../../models/models.dart';
+import '../../utils/http_client.dart';
 import '../../utils/type_utils.dart';
 import '../agent/agent_types.dart';
 import 'llm_provider.dart';
@@ -9,13 +10,45 @@ import 'llm_provider.dart';
 /// Claude (Anthropic) 大模型适配器
 class ClaudeProvider extends LLMProvider {
   static const _defaultBaseUrl = 'https://api.anthropic.com';
-  final Dio _dio = Dio();
+  final Dio _dio = createRetryDio(receiveTimeout: const Duration(seconds: 120));
 
   /// 规范化 baseUrl：去掉末尾斜杠，确保格式统一
   String _fixBaseUrl(String? baseUrl) {
     if (baseUrl == null || baseUrl.isEmpty) return _defaultBaseUrl;
     var url = baseUrl.endsWith('/') ? baseUrl.substring(0, baseUrl.length - 1) : baseUrl;
     return url;
+  }
+
+  /// 各模型最大输出 token（来源：Anthropic 官方文档）
+  /// https://platform.claude.com/docs/en/about-claude/models/overview
+  static int _getMaxOutputTokens(String model) {
+    final m = model.toLowerCase();
+    // Claude Opus 4.6（最新旗舰，128K 输出）
+    if (m.contains('opus-4.6') || m.contains('opus-4-6')) return 131072;
+    // Claude Sonnet 4.6（64K 输出）
+    if (m.contains('sonnet-4.6') || m.contains('sonnet-4-6')) return 65536;
+    // Claude Haiku 4.5（64K 输出）
+    if (m.contains('haiku-4.5') || m.contains('haiku-4-5')) return 65536;
+    // Claude Opus 4.5
+    if (m.contains('opus-4.5') || m.contains('opus-4-5')) return 32000;
+    // Claude Sonnet 4.5
+    if (m.contains('sonnet-4.5') || m.contains('sonnet-4-5')) return 65536;
+    // Claude Opus 4
+    if (m.contains('opus-4')) return 32000;
+    // Claude Sonnet 4（64K 输出）
+    if (m.contains('sonnet-4')) return 65536;
+    // Claude Haiku 4
+    if (m.contains('haiku-4')) return 8192;
+    // Claude 3.7 Sonnet（支持 extended thinking，最大 64K）
+    if (m.contains('3-7') || m.contains('3.7')) return 65536;
+    // Claude 3.5 Sonnet / Haiku
+    if (m.contains('3-5-sonnet') || m.contains('3.5-sonnet')) return 8192;
+    if (m.contains('3-5-haiku') || m.contains('3.5-haiku')) return 8192;
+    // Claude 3 Opus / Sonnet / Haiku
+    if (m.contains('opus')) return 4096;
+    if (m.contains('sonnet')) return 4096;
+    if (m.contains('haiku')) return 4096;
+    return 8192;
   }
 
   @override
@@ -37,8 +70,10 @@ class ClaudeProvider extends LLMProvider {
     List<Map<String, dynamic>> messages, {
     LLMConfig? config,
     List<Map<String, dynamic>>? tools,
+    CancelToken? cancelToken,
   }) async {
     final cfg = config ?? const LLMConfig(provider: 'claude', model: 'claude-sonnet-4-20250514');
+    final maxTokens = cfg.maxTokens.clamp(1, _getMaxOutputTokens(cfg.model));
     final baseUrl = _fixBaseUrl(cfg.baseUrl);
     final url = '$baseUrl/v1/messages';
 
@@ -106,7 +141,7 @@ class ClaudeProvider extends LLMProvider {
     final body = <String, dynamic>{
       'model': cfg.model,
       'messages': chatMessages,
-      'max_tokens': cfg.maxTokens,
+      'max_tokens': maxTokens,
       'temperature': cfg.temperature,
     };
 
@@ -128,6 +163,7 @@ class ClaudeProvider extends LLMProvider {
     final response = await _dio.post(
       url,
       data: jsonEncode(body),
+      cancelToken: cancelToken,
       options: Options(
         headers: {
           'Content-Type': 'application/json',
@@ -169,6 +205,7 @@ class ClaudeProvider extends LLMProvider {
     List<Map<String, dynamic>>? tools,
   }) async* {
     final cfg = config ?? const LLMConfig(provider: 'claude', model: 'claude-sonnet-4-20250514');
+    final maxTokens = cfg.maxTokens.clamp(1, _getMaxOutputTokens(cfg.model));
     final baseUrl = _fixBaseUrl(cfg.baseUrl);
     final url = '$baseUrl/v1/messages';
 
@@ -227,7 +264,7 @@ class ClaudeProvider extends LLMProvider {
     final body = <String, dynamic>{
       'model': cfg.model,
       'messages': chatMessages,
-      'max_tokens': cfg.maxTokens,
+      'max_tokens': maxTokens,
       'temperature': cfg.temperature,
       'stream': true,
     };
@@ -240,7 +277,7 @@ class ClaudeProvider extends LLMProvider {
         'type': 'enabled',
         'budget_tokens': 10000,
       };
-      body['max_tokens'] = (cfg.maxTokens < 10000) ? 16000 : cfg.maxTokens;
+      body['max_tokens'] = (maxTokens < 10000) ? 16000 : maxTokens;
     }
 
     // 合并 tools（联网搜索 + Function Calling），避免后者覆盖前者

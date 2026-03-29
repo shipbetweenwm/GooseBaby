@@ -2,16 +2,46 @@
 /// 参考 Claude Code 的设计：结构化响应 + 工具调用 + 停止原因
 
 import 'dart:convert';
+import 'package:dio/dio.dart';
 import '../../utils/type_utils.dart';
 import 'agent_mode.dart';
 
 /// 取消令牌 — 用于从外部中断 AgentLoop
+///
+/// 支持两种取消机制：
+/// 1. 布尔标志（isCancelled）— 用于 Agent 循环轮间检查
+/// 2. Dio CancelToken（dioCancelToken）— 用于立即中断进行中的 HTTP 请求
+///
+/// 使用方式：在每次发起 HTTP 请求前调用 `newDioCancelToken()` 获取新 token，
+/// 并传给 Dio 请求。用户点击停止时 `cancel()` 会同时取消 Dio 请求。
 class CancellationToken {
   bool _isCancelled = false;
+  CancelToken? _dioCancelToken;
 
   bool get isCancelled => _isCancelled;
 
-  void cancel() => _isCancelled = true;
+  /// 获取当前绑定的 Dio CancelToken（传给 Dio 请求以支持即时中断）
+  CancelToken? get dioCancelToken => _dioCancelToken;
+
+  /// 创建新的 Dio CancelToken 并绑定到此 CancellationToken
+  ///
+  /// 每次发起 HTTP 请求前调用，获取新 token 传给 Dio。
+  /// 如果 CancellationToken 已被取消，新 token 也会立即取消。
+  CancelToken newDioCancelToken() {
+    _dioCancelToken?.cancel('用户取消');
+    final token = CancelToken();
+    _dioCancelToken = token;
+    if (_isCancelled) {
+      token.cancel('用户取消');
+    }
+    return token;
+  }
+
+  void cancel() {
+    _isCancelled = true;
+    // 同时取消进行中的 Dio 请求
+    _dioCancelToken?.cancel('用户取消');
+  }
 
   /// 如果已取消，抛出 [CancelledException]
   void throwIfCancelled() {

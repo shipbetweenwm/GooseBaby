@@ -1,7 +1,9 @@
 import 'dart:async';
 import 'dart:convert';
 import 'package:dio/dio.dart';
+import 'package:flutter/foundation.dart';
 import '../../models/models.dart';
+import '../../utils/http_client.dart';
 import '../../utils/type_utils.dart';
 import '../agent/agent_types.dart';
 import 'llm_provider.dart';
@@ -10,7 +12,7 @@ import 'llm_provider.dart';
 /// 使用 OpenAI 兼容接口（更简单、更稳定）
 class HunyuanProvider extends LLMProvider {
   static const _defaultBaseUrl = 'https://api.hunyuan.cloud.tencent.com/v1';
-  final Dio _dio = Dio();
+  final Dio _dio = createRetryDio(receiveTimeout: const Duration(seconds: 120));
 
   /// 修正旧版URL或无效URL，确保使用新的OpenAI兼容端点
   String _fixBaseUrl(String? baseUrl) {
@@ -42,13 +44,22 @@ class HunyuanProvider extends LLMProvider {
   ];
 
   /// 根据模型名返回最大输出 token 数
+  /// 来源: 腾讯云混元官方文档
   static int _getMaxOutputTokens(String model) {
     final m = model.toLowerCase();
-    if (m.contains('t1') || m.contains('hunyuan-t1')) return 65536;
-    if (m.contains('a13b') || m.contains('large')) return 32768;
-    if (m.contains('turbos') || m.contains('pro')) return 16384;
-    if (m.contains('turbo') || m.contains('standard')) return 16384;
-    // hunyuan-lite 等保守值
+    // hunyuan-t1 旗舰推理模型（32K 输出）
+    if (m.contains('hunyuan-t1') || (m.contains('t1') && !m.contains('vision'))) return 32768;
+    // hunyuan-a13b MoE 均衡模型（16K 输出）
+    if (m.contains('a13b')) return 16384;
+    // hunyuan-large（32K 输出）
+    if (m.contains('large')) return 32768;
+    // hunyuan-turbos 快速思考（16K 输出）
+    if (m.contains('turbos')) return 16384;
+    // hunyuan-turbo（16K 输出）
+    if (m.contains('turbo')) return 16384;
+    // hunyuan-standard-256k（16K 输出，但支持超长上下文输入）
+    if (m.contains('standard')) return 16384;
+    // hunyuan-lite 轻量版（4K 输出）
     return 4096;
   }
 
@@ -57,6 +68,7 @@ class HunyuanProvider extends LLMProvider {
     List<Map<String, dynamic>> messages, {
     LLMConfig? config,
     List<Map<String, dynamic>>? tools,
+    CancelToken? cancelToken,
   }) async {
     final cfg = config ?? const LLMConfig(provider: 'hunyuan', model: 'hunyuan-turbo');
     final modelMaxTokens = _getMaxOutputTokens(cfg.model);
@@ -72,18 +84,25 @@ class HunyuanProvider extends LLMProvider {
       'stream': false,
     };
 
-    // 联网搜索（AI 搜索增强）
+    // 联网搜索（混元 OpenAI 兼容接口通过 tools 传入）
+    final allTools = <Map<String, dynamic>>[];
     if (cfg.enableWebSearch) {
-      body['enable_enhancement'] = true;
+      allTools.add({
+        'type': 'web_search',
+        'web_search': {'enable': true},
+      });
     }
-
     if (tools != null && tools.isNotEmpty) {
-      body['tools'] = tools;
+      allTools.addAll(tools.cast<Map<String, dynamic>>());
+    }
+    if (allTools.isNotEmpty) {
+      body['tools'] = allTools;
     }
 
     final response = await _dio.post(
       url,
       data: jsonEncode(body),
+      cancelToken: cancelToken,
       options: Options(
         headers: {
           'Content-Type': 'application/json',
@@ -134,13 +153,19 @@ class HunyuanProvider extends LLMProvider {
       'stream': true,
     };
 
-    // 联网搜索（AI 搜索增强）
+    // 联网搜索（混元 OpenAI 兼容接口通过 tools 传入）
+    final allTools = <Map<String, dynamic>>[];
     if (cfg.enableWebSearch) {
-      body['enable_enhancement'] = true;
+      allTools.add({
+        'type': 'web_search',
+        'web_search': {'enable': true},
+      });
     }
-
     if (tools != null && tools.isNotEmpty) {
-      body['tools'] = tools;
+      allTools.addAll(tools.cast<Map<String, dynamic>>());
+    }
+    if (allTools.isNotEmpty) {
+      body['tools'] = allTools;
     }
 
     final response = await _dio.post(
@@ -178,6 +203,67 @@ class HunyuanProvider extends LLMProvider {
           } catch (_) {}
         }
       }
+    }
+  }
+
+  @override
+  Future<String> chatWithVision({
+    required String base64Image,
+    required String mimeType,
+    required String prompt,
+    required LLMConfig config,
+  }) async {
+    final baseUrl = _fixBaseUrl(config.baseUrl);
+    final url = '$baseUrl/chat/completions';
+
+    final messages = [
+      {
+        'role': 'user',
+        'content': [
+          {'type': 'text', 'text': prompt},
+          {
+            'type': 'image_url',
+            'image_url': {
+              'url': 'data:$mimeType;base64,$base64Image',
+            },
+          },
+        ],
+      },
+    ];
+
+    final body = <String, dynamic>{
+      'model': config.model,
+      'messages': messages,
+      'max_tokens': 2048,
+      'temperature': 0.3,
+    };
+
+    try {
+      final response = await _dio.post(
+        url,
+        data: jsonEncode(body),
+        options: Options(
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': 'Bearer ${config.apiKey}',
+          },
+          validateStatus: (status) => status != null && status < 500,
+        ),
+      );
+
+      if (response.statusCode != 200) {
+        throw Exception('混元视觉模型 API 错误 [${response.statusCode}]: ${response.data}');
+      }
+
+      final data = response.data;
+      if (data['error'] != null) {
+        throw Exception('混元视觉模型错误: ${data['error']['message']}');
+      }
+
+      return data['choices'][0]['message']['content'] as String? ?? '';
+    } on DioException catch (e) {
+      debugPrint('❌ 混元视觉模型 DioException: ${e.response?.statusCode}, body: ${e.response?.data}');
+      rethrow;
     }
   }
 

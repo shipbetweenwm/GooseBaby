@@ -1,5 +1,7 @@
 import Cocoa
 import FlutterMacOS
+import CoreGraphics
+import ImageIO
 
 class MainFlutterWindow: NSWindow {
   /// Flutter 层传来的可点击矩形区域列表
@@ -64,6 +66,25 @@ class MainFlutterWindow: NSWindow {
       }
     }
 
+    // 截图 MethodChannel：使用原生 CoreGraphics 截取屏幕，无需外部命令
+    let screenshotChannel = FlutterMethodChannel(
+      name: "goose_baby/screenshot",
+      binaryMessenger: engine.registrar(forPlugin: "MainFlutterWindow").messenger
+    )
+    screenshotChannel.setMethodCallHandler { [weak self] (call, result) in
+      guard let _ = self else { result(FlutterError(code: "NO_WINDOW", message: "Window not available", details: nil)); return }
+      if call.method == "captureScreen" {
+        guard let args = call.arguments as? [String: Any],
+              let filePath = args["filePath"] as? String else {
+          result(FlutterError(code: "INVALID_ARGS", message: "Missing filePath", details: nil))
+          return
+        }
+        self?.captureScreen(to: filePath, result: result)
+      } else {
+        result(FlutterMethodNotImplemented)
+      }
+    }
+
     // 启动鼠标位置轮询（~60fps）
     mouseTrackingTimer = Timer.scheduledTimer(withTimeInterval: 1.0/60.0, repeats: true) { [weak self] _ in
       self?.updateClickThrough()
@@ -100,6 +121,73 @@ class MainFlutterWindow: NSWindow {
     // 在 hit rect 内：不穿透（可点击）
     // 在 hit rect 外：穿透（点击到桌面）
     self.ignoresMouseEvents = !insideHitRect
+  }
+
+  /// 原生截图：使用 CoreGraphics 捕获屏幕内容
+  /// CGWindowListCreateImage 在应用进程内调用，继承应用的屏幕录制权限
+  private func captureScreen(to filePath: String, result: @escaping FlutterResult) {
+    // 截取整个屏幕（排除自身窗口），使用 .bestResolution 获取原始 Retina 像素
+    let windowID = CGWindowID(self.windowNumber)
+    guard let cgImage = CGWindowListCreateImage(
+      .infinite,
+      .optionOnScreenOnly,
+      windowID,  // 排除自身窗口，不截到鹅宝
+      .bestResolution
+    ) else {
+      result(FlutterError(code: "CAPTURE_FAILED", message: "CGWindowListCreateImage returned null (Screen Recording permission required)", details: nil))
+      return
+    }
+
+    // 获取主屏幕的**逻辑分辨率**（points，非物理像素）
+    let mainScreen = NSScreen.main
+    let logicalWidth = mainScreen?.frame.width ?? CGFloat(cgImage.width)
+    let logicalHeight = mainScreen?.frame.height ?? CGFloat(cgImage.height)
+    let physicalWidth = CGFloat(cgImage.width)
+    let physicalHeight = CGFloat(cgImage.height)
+    let scaleFactor = physicalWidth / logicalWidth
+
+    // 关键：将 Retina 物理像素截图缩放到逻辑分辨率
+    // 这样视觉模型看到的图片尺寸与鼠标坐标范围完全一致，
+    // 模型报告的坐标可以直接用于 mouse_click，无需手动除以 scaleFactor
+    let scaledImage: CGImage
+    if scaleFactor > 1.0 {
+      let colorSpace = cgImage.colorSpace ?? CGColorSpaceCreateDeviceRGB()
+      let ctx = CGContext(
+        data: nil,
+        width: Int(logicalWidth),
+        height: Int(logicalHeight),
+        bitsPerComponent: 8,
+        bytesPerRow: 0,
+        space: colorSpace,
+        bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+      )!
+      ctx.interpolationQuality = .high
+      ctx.draw(cgImage, in: CGRect(x: 0, y: 0, width: logicalWidth, height: logicalHeight))
+      scaledImage = ctx.makeImage()!
+    } else {
+      scaledImage = cgImage
+    }
+
+    // 转换为 PNG 并写入文件
+    let url = URL(fileURLWithPath: filePath)
+    guard let dest = CGImageDestinationCreateWithURL(url as CFURL, "public.png" as CFString, 1, nil) else {
+      result(FlutterError(code: "WRITE_FAILED", message: "Failed to create image destination", details: nil))
+      return
+    }
+    CGImageDestinationAddImage(dest, scaledImage, nil)
+    let success = CGImageDestinationFinalize(dest)
+
+    if success {
+      result([
+        "logicalWidth": Int(logicalWidth),
+        "logicalHeight": Int(logicalHeight),
+        "physicalWidth": Int(physicalWidth),
+        "physicalHeight": Int(physicalHeight),
+        "scaleFactor": Double(scaleFactor),
+      ])
+    } else {
+      result(FlutterError(code: "WRITE_FAILED", message: "Failed to write PNG file", details: nil))
+    }
   }
 
   deinit {
