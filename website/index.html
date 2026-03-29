@@ -1,0 +1,908 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>瞎养一个你的桌面治愈小伙伴</title>
+  <meta name="description" content="一个有长期记忆、有情绪、还会帮你干活的桌面萌宠。CUA 电脑操控、内生安全、多模型支持。">
+  <link rel="icon" href="tray_icon.ico" type="image/x-icon">
+  <style>
+    :root {
+      --primary: #6C63FF;
+      --primary-light: #8B83FF;
+      --primary-dark: #5A52E0;
+      --accent: #FF6B9D;
+      --accent-light: #FF8CB5;
+      --bg: #FAFBFF;
+      --bg-card: #FFFFFF;
+      --text: #2D3436;
+      --text-light: #636E72;
+      --text-lighter: #B2BEC3;
+      --border: #E8ECF4;
+      --shadow: 0 4px 24px rgba(108, 99, 255, 0.08);
+      --shadow-hover: 0 8px 32px rgba(108, 99, 255, 0.15);
+      --radius: 16px;
+      --gradient: linear-gradient(135deg, #6C63FF 0%, #FF6B9D 100%);
+      --gradient-warm: linear-gradient(135deg, #FF6B9D 0%, #FFB347 100%);
+      --gradient-cool: linear-gradient(135deg, #6C63FF 0%, #4ECDC4 100%);
+      --gradient-dark: linear-gradient(135deg, #2D3436 0%, #636E72 100%);
+    }
+
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.7;
+      overflow-x: hidden;
+    }
+
+    /* ── 导航栏 ── */
+    nav {
+      position: fixed; top: 0; width: 100%; z-index: 100;
+      backdrop-filter: blur(20px);
+      background: rgba(250, 251, 255, 0.85);
+      border-bottom: 1px solid var(--border);
+      transition: box-shadow 0.3s;
+    }
+    nav.scrolled { box-shadow: 0 2px 20px rgba(0,0,0,0.06); }
+    .nav-inner {
+      max-width: 1200px; margin: 0 auto; padding: 14px 24px;
+      display: flex; align-items: center; justify-content: space-between;
+    }
+    .nav-logo { font-size: 22px; font-weight: 700; text-decoration: none; color: var(--text); }
+    .nav-logo span { color: var(--primary); }
+    .nav-links { display: flex; gap: 28px; align-items: center; }
+    .nav-links a {
+      text-decoration: none; color: var(--text-light); font-size: 15px;
+      font-weight: 500; transition: color 0.2s;
+    }
+    .nav-links a:hover { color: var(--primary); }
+
+    .btn {
+      display: inline-flex; align-items: center; gap: 8px;
+      padding: 10px 24px; border-radius: 50px; font-size: 15px;
+      font-weight: 600; text-decoration: none; transition: all 0.25s;
+      cursor: pointer; border: none;
+    }
+    .btn-primary {
+      background: var(--gradient); color: #fff;
+      box-shadow: 0 4px 16px rgba(108, 99, 255, 0.3);
+    }
+    .btn-primary:hover { transform: translateY(-2px); box-shadow: 0 6px 24px rgba(108, 99, 255, 0.4); }
+    .btn-outline { background: transparent; color: var(--primary); border: 2px solid var(--primary); }
+    .btn-outline:hover { background: var(--primary); color: #fff; }
+    .btn-lg { padding: 14px 36px; font-size: 17px; }
+
+    /* ── Hero ── */
+    .hero {
+      min-height: 100vh; display: flex; align-items: center; justify-content: center;
+      text-align: center; padding: 120px 24px 80px; position: relative; overflow: hidden;
+    }
+    .hero::before {
+      content: ''; position: absolute; top: -50%; left: -50%; width: 200%; height: 200%;
+      background: radial-gradient(circle at 30% 50%, rgba(108,99,255,0.06) 0%, transparent 50%),
+                  radial-gradient(circle at 70% 50%, rgba(255,107,157,0.06) 0%, transparent 50%);
+      animation: float 20s ease-in-out infinite;
+    }
+    @keyframes float { 0%, 100% { transform: translate(0, 0); } 50% { transform: translate(-30px, -20px); } }
+    .hero-content { position: relative; z-index: 1; max-width: 760px; }
+    .hero-goose { width: 280px; height: 280px; margin-bottom: 16px; animation: bounce 3s ease-in-out infinite; display: inline-block; object-fit: contain; filter: drop-shadow(0 8px 24px rgba(108, 99, 255, 0.2)); }
+    @keyframes bounce { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-15px); } }
+    .hero h1 {
+      font-size: clamp(36px, 6vw, 56px); font-weight: 800; line-height: 1.2;
+      margin-bottom: 20px; background: var(--gradient);
+      -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text;
+    }
+    .hero p { font-size: 20px; color: var(--text-light); margin-bottom: 40px; max-width: 580px; margin-left: auto; margin-right: auto; }
+    .hero-btns { display: flex; gap: 16px; justify-content: center; flex-wrap: wrap; }
+    .hero-tags { margin-top: 48px; display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; }
+    .hero-tag { padding: 6px 16px; border-radius: 50px; background: rgba(108, 99, 255, 0.08); color: var(--primary); font-size: 13px; font-weight: 600; }
+
+    /* ── Section 通用 ── */
+    section { max-width: 1200px; margin: 0 auto; padding: 100px 24px; }
+    .section-label {
+      display: inline-block; padding: 4px 14px; border-radius: 50px;
+      background: rgba(108, 99, 255, 0.1); color: var(--primary);
+      font-size: 13px; font-weight: 700; letter-spacing: 1px;
+      text-transform: uppercase; margin-bottom: 16px;
+    }
+    .section-title { font-size: clamp(28px, 4vw, 40px); font-weight: 800; margin-bottom: 16px; line-height: 1.3; }
+    .section-desc { font-size: 17px; color: var(--text-light); max-width: 600px; margin-bottom: 48px; }
+
+    /* ── 对比表 ── */
+    .compare-table {
+      width: 100%; max-width: 700px; margin: 0 auto 48px;
+      border-collapse: separate; border-spacing: 0;
+      background: var(--bg-card); border-radius: var(--radius);
+      overflow: hidden; border: 1px solid var(--border); box-shadow: var(--shadow);
+    }
+    .compare-table th { padding: 14px 20px; font-size: 15px; font-weight: 600; text-align: center; }
+    .compare-table th:first-child { background: #f0f0f0; color: var(--text-light); }
+    .compare-table th:last-child { background: var(--gradient); color: #fff; }
+    .compare-table td { padding: 14px 20px; border-bottom: 1px solid var(--border); font-size: 15px; text-align: center; }
+    .compare-table tr:last-child td { border-bottom: none; }
+    .compare-table tr:hover td { background: rgba(108, 99, 255, 0.02); }
+
+    /* ── 情感功能网格 ── */
+    .emotion-grid {
+      display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      gap: 20px; margin-top: 32px;
+    }
+    .emotion-card {
+      background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius);
+      padding: 28px; transition: all 0.3s;
+    }
+    .emotion-card:hover { transform: translateY(-4px); box-shadow: var(--shadow-hover); border-color: var(--primary-light); }
+    .emotion-card .ec-icon { font-size: 36px; margin-bottom: 12px; }
+    .emotion-card h3 { font-size: 18px; font-weight: 700; margin-bottom: 6px; }
+    .emotion-card p { color: var(--text-light); font-size: 14px; line-height: 1.6; }
+
+    /* ── 表情展示 ── */
+    .expression-showcase {
+      display: flex; flex-wrap: wrap; gap: 16px; justify-content: center;
+      margin: 32px 0; padding: 32px; background: var(--bg-card);
+      border-radius: 20px; border: 1px solid var(--border);
+    }
+    .expression-item {
+      text-align: center; padding: 12px 16px; border-radius: 12px;
+      background: var(--bg); transition: all 0.2s; min-width: 90px;
+    }
+    .expression-item:hover { transform: scale(1.08); background: rgba(108, 99, 255, 0.06); }
+    .expression-item .ei-emoji { font-size: 32px; margin-bottom: 4px; }
+    .expression-item .ei-name { font-size: 12px; color: var(--text-light); font-weight: 600; }
+
+    /* ── 对话演示 ── */
+    .chat-demo {
+      background: var(--bg-card); border-radius: 20px; padding: 32px;
+      border: 1px solid var(--border); box-shadow: var(--shadow);
+      max-width: 600px; margin: 32px auto;
+    }
+    .chat-bubble {
+      padding: 12px 18px; border-radius: 16px; margin-bottom: 12px;
+      font-size: 15px; line-height: 1.6; max-width: 85%;
+    }
+    .chat-user { background: var(--gradient); color: #fff; margin-left: auto; border-bottom-right-radius: 4px; }
+    .chat-bot { background: var(--bg); color: var(--text); border-bottom-left-radius: 4px; }
+    .chat-label { font-size: 12px; color: var(--text-lighter); margin-bottom: 4px; font-weight: 600; }
+    .chat-right { text-align: right; }
+    .chat-right .chat-bubble { text-align: left; }
+
+    /* ── 大功能块 ── */
+    .feature-block {
+      background: var(--bg-card); border-radius: 24px; padding: 48px;
+      border: 1px solid var(--border); box-shadow: var(--shadow);
+      position: relative; overflow: hidden; margin-bottom: 32px;
+    }
+    .feature-block::before {
+      content: ''; position: absolute; top: 0; right: 0; width: 300px; height: 300px;
+      background: radial-gradient(circle, rgba(108,99,255,0.04), transparent 70%);
+    }
+    .feature-block h3 { font-size: 22px; font-weight: 700; margin-bottom: 12px; }
+    .feature-block > p { color: var(--text-light); font-size: 15px; margin-bottom: 24px; }
+
+    /* ── Agent 团队展示 ── */
+    .team-flow {
+      display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+      margin: 24px 0; padding: 20px; background: var(--bg);
+      border-radius: 16px;
+    }
+    .team-node {
+      padding: 10px 18px; border-radius: 12px; font-size: 14px; font-weight: 600;
+      display: flex; align-items: center; gap: 6px;
+    }
+    .team-node.main { background: var(--gradient); color: #fff; }
+    .team-node.worker { background: rgba(108, 99, 255, 0.08); color: var(--primary); border: 1px solid rgba(108, 99, 255, 0.2); }
+    .team-arrow { color: var(--primary); font-size: 18px; font-weight: 700; }
+
+    .mode-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 16px; margin-top: 20px; }
+    .mode-card {
+      padding: 20px; border-radius: 14px; border: 1px solid var(--border);
+      background: var(--bg); transition: all 0.2s;
+    }
+    .mode-card:hover { border-color: var(--primary-light); box-shadow: var(--shadow); }
+    .mode-card h4 { font-size: 16px; font-weight: 700; margin-bottom: 6px; display: flex; align-items: center; gap: 6px; }
+    .mode-card p { font-size: 13px; color: var(--text-light); }
+
+    /* ── CUA 流程 ── */
+    .cua-flow {
+      display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin: 24px 0;
+    }
+    .cua-step {
+      padding: 12px 20px; border-radius: 12px; background: var(--bg);
+      border: 1px solid var(--border); font-size: 14px; font-weight: 600;
+    }
+    .cua-arrow { color: var(--primary); font-size: 20px; font-weight: 700; }
+    .cua-abilities {
+      display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 16px; margin-top: 24px;
+    }
+    .cua-ability { display: flex; align-items: flex-start; gap: 12px; padding: 16px; border-radius: 12px; background: var(--bg); }
+    .cua-ability-icon { font-size: 24px; }
+    .cua-ability-text h4 { font-size: 14px; font-weight: 700; margin-bottom: 2px; }
+    .cua-ability-text p { font-size: 13px; color: var(--text-light); }
+
+    /* ── Token 节省 ── */
+    .token-stats {
+      display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 16px; margin: 24px 0;
+    }
+    .token-stat {
+      text-align: center; padding: 24px 16px; border-radius: 16px;
+      background: var(--bg); border: 1px solid var(--border);
+    }
+    .token-stat .ts-number { font-size: 36px; font-weight: 800; background: var(--gradient); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+    .token-stat .ts-label { font-size: 13px; color: var(--text-light); margin-top: 4px; }
+
+    /* ── 安全 ── */
+    .security-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 24px; }
+    .security-card { border-radius: var(--radius); padding: 32px; position: relative; overflow: hidden; }
+    .security-card.hard { background: linear-gradient(135deg, #FF6B6B 0%, #FF8E8E 100%); color: #fff; }
+    .security-card.soft { background: linear-gradient(135deg, #FECA57 0%, #FFD97D 100%); color: #5D4E37; }
+    .security-card.path { background: linear-gradient(135deg, #6C63FF 0%, #8B83FF 100%); color: #fff; }
+    .security-card .sec-icon { font-size: 36px; margin-bottom: 16px; }
+    .security-card h3 { font-size: 20px; font-weight: 700; margin-bottom: 8px; }
+    .security-card p { font-size: 14px; opacity: 0.9; line-height: 1.6; }
+
+    .code-block {
+      background: #1E1E2E; color: #CDD6F4; border-radius: 12px;
+      padding: 20px 24px; font-family: 'SF Mono', 'Fira Code', monospace;
+      font-size: 13px; line-height: 1.8; overflow-x: auto; margin: 24px 0;
+    }
+    .code-block .comment { color: #6C7086; }
+    .code-block .warn { color: #F38BA8; }
+    .code-block .info { color: #89B4FA; }
+    .code-block .ok { color: #A6E3A1; }
+
+    /* ── 模型支持 ── */
+    .models-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 16px; }
+    .model-item {
+      display: flex; align-items: center; gap: 12px; padding: 16px;
+      border-radius: 12px; background: var(--bg-card);
+      border: 1px solid var(--border); transition: all 0.2s;
+    }
+    .model-item:hover { border-color: var(--primary-light); box-shadow: var(--shadow); }
+    .model-icon {
+      width: 40px; height: 40px; border-radius: 10px;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 20px; flex-shrink: 0;
+    }
+    .model-name { font-size: 14px; font-weight: 600; }
+    .model-desc { font-size: 12px; color: var(--text-light); }
+
+    /* ── 成就 / 商店预览 ── */
+    .preview-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 20px; margin-top: 24px; }
+    .preview-card {
+      background: var(--bg-card); border: 1px solid var(--border);
+      border-radius: var(--radius); padding: 24px; transition: all 0.3s;
+    }
+    .preview-card:hover { transform: translateY(-3px); box-shadow: var(--shadow-hover); }
+    .preview-card h4 { font-size: 16px; font-weight: 700; margin-bottom: 8px; display: flex; align-items: center; gap: 8px; }
+    .preview-card p { font-size: 14px; color: var(--text-light); margin-bottom: 12px; }
+    .preview-items { display: flex; flex-wrap: wrap; gap: 8px; }
+    .preview-item {
+      padding: 4px 12px; border-radius: 50px; font-size: 12px; font-weight: 600;
+      background: var(--bg); border: 1px solid var(--border);
+    }
+    .rarity-common { color: #888; }
+    .rarity-rare { color: #3B82F6; }
+    .rarity-epic { color: #A855F7; }
+    .rarity-legendary { color: #F59E0B; }
+
+    /* ── 下载 ── */
+    .download-section {
+      text-align: center; background: var(--gradient); border-radius: 24px;
+      padding: 80px 48px; color: #fff; position: relative; overflow: hidden;
+    }
+    .download-section::before {
+      content: ''; position: absolute; inset: 0;
+      background: radial-gradient(circle at 20% 80%, rgba(255,255,255,0.1), transparent 50%),
+                  radial-gradient(circle at 80% 20%, rgba(255,255,255,0.08), transparent 50%);
+    }
+    .download-section > * { position: relative; z-index: 1; }
+    .download-section h2 { color: #fff; margin-bottom: 12px; }
+    .download-section p { color: rgba(255,255,255,0.85); margin-bottom: 40px; font-size: 18px; }
+    .download-cards { display: flex; gap: 24px; justify-content: center; flex-wrap: wrap; }
+    .download-card {
+      background: rgba(255,255,255,0.15); backdrop-filter: blur(10px);
+      border: 1px solid rgba(255,255,255,0.25); border-radius: 20px;
+      padding: 32px 40px; text-align: center; transition: all 0.3s; min-width: 220px;
+    }
+    .download-card:hover { background: rgba(255,255,255,0.25); transform: translateY(-4px); }
+    .download-card .dl-icon { font-size: 48px; margin-bottom: 12px; }
+    .download-card .dl-platform { font-size: 20px; font-weight: 700; margin-bottom: 4px; }
+    .download-card .dl-version { font-size: 13px; opacity: 0.8; margin-bottom: 20px; }
+    .btn-white {
+      background: #fff; color: var(--primary); padding: 12px 28px;
+      border-radius: 50px; font-size: 15px; font-weight: 700;
+      text-decoration: none; display: inline-flex; align-items: center;
+      gap: 8px; transition: all 0.25s;
+    }
+    .btn-white:hover { transform: translateY(-2px); box-shadow: 0 6px 20px rgba(0,0,0,0.15); }
+
+    /* ── Footer ── */
+    footer {
+      text-align: center; padding: 48px 24px; color: var(--text-light);
+      font-size: 14px; border-top: 1px solid var(--border);
+    }
+    footer a { color: var(--primary); text-decoration: none; font-weight: 600; }
+    .footer-tags { margin-top: 16px; display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; }
+    .footer-tag { padding: 4px 12px; border-radius: 50px; background: var(--bg-card); border: 1px solid var(--border); font-size: 12px; color: var(--text-light); }
+
+    /* ── 动画 ── */
+    .fade-in { opacity: 0; transform: translateY(24px); transition: opacity 0.6s ease, transform 0.6s ease; }
+    .fade-in.visible { opacity: 1; transform: translateY(0); }
+
+    /* ── 移动端 ── */
+    .mobile-menu-btn { display: none; background: none; border: none; font-size: 24px; cursor: pointer; color: var(--text); }
+    @media (max-width: 768px) {
+      .mobile-menu-btn { display: block; }
+      .nav-links { display: none; }
+      .nav-links.open {
+        display: flex; flex-direction: column; position: absolute;
+        top: 100%; left: 0; right: 0; background: rgba(250,251,255,0.98);
+        padding: 20px 24px; gap: 16px; border-bottom: 1px solid var(--border);
+      }
+      .hero { padding: 100px 24px 60px; }
+      .hero-goose { width: 130px; height: auto; }
+      section { padding: 60px 24px; }
+      .security-grid { grid-template-columns: 1fr; }
+      .emotion-grid { grid-template-columns: repeat(2, 1fr) !important; }
+      .emotion-grid .emotion-card { grid-column: auto !important; }
+      .feature-block { padding: 28px 20px; }
+      .team-flow { gap: 6px; }
+      .compare-table { font-size: 14px; }
+    }
+  </style>
+</head>
+<body>
+
+  <!-- 导航 -->
+  <nav id="navbar">
+    <div class="nav-inner">
+      <a href="#" class="nav-logo"><img src="hero.png" alt="瞎养" style="width:28px;height:28px;vertical-align:middle;margin-right:6px;border-radius:50%;"> <span>瞎养</span></a>
+      <div class="nav-links" id="navLinks">
+        <a href="#emotion">懂你</a>
+        <a href="#agent">组队</a>
+        <a href="#cua">操控</a>
+        <a href="#token">省钱</a>
+        <a href="#security">安全</a>
+        <a href="#download">领养</a>
+        <a href="https://github.com/shipbetweenwm/GooseBaby" class="btn btn-outline" style="padding:8px 18px;font-size:14px;">GitHub</a>
+      </div>
+      <button class="mobile-menu-btn" onclick="document.getElementById('navLinks').classList.toggle('open')">☰</button>
+    </div>
+  </nav>
+
+  <!-- Hero -->
+  <section class="hero">
+    <div class="hero-content">
+      <img src="hero.png" alt="瞎养" class="hero-goose">
+      <h1>瞎养一只记得住你的宠物</h1>
+      <p>它有记忆、有情绪、会撒娇，还能帮你操作电脑干活。<br>不是工具，是陪你度过每一天的小伙伴。</p>
+      <div class="hero-btns">
+        <a href="#download" class="btn btn-primary btn-lg">⬇ 立即下载</a>
+        <a href="https://github.com/shipbetweenwm/GooseBaby" class="btn btn-outline btn-lg">🐙 GitHub</a>
+      </div>
+      <div class="hero-tags">
+        <span class="hero-tag">#桌面宠物</span>
+        <span class="hero-tag">#长期记忆</span>
+        <span class="hero-tag">#CUA 电脑操控</span>
+        <span class="hero-tag">#内生安全</span>
+        <span class="hero-tag">#多 Agent 协作</span>
+        <span class="hero-tag">#超省 Token</span>
+        <span class="hero-tag">#跨平台</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- ========== 一、情感陪伴 ========== -->
+  <section id="emotion" class="fade-in">
+    <div style="text-align:center;margin-bottom:48px;">
+      <span class="section-label">Emotional Companion</span>
+      <h2 class="section-title">聊完不会忘，难过会心疼你</h2>
+      <p class="section-desc" style="margin-left:auto;margin-right:auto;">
+        普通 AI 聊完就忘。它不一样——它记得你的名字、生日、最近的烦恼，深夜加班时它会主动问你累不累。
+      </p>
+    </div>
+
+    <!-- 对比表 -->
+    <table class="compare-table">
+      <thead><tr><th>普通 AI</th><th> 它</th></tr></thead>
+      <tbody>
+        <tr><td>聊完就忘</td><td>📝 <b>记住你说过的每一件事</b></td></tr>
+        <tr><td>冰冷的问答</td><td>💭 <b>懂你的情绪，会撒娇会关心</b></td></tr>
+        <tr><td>需要你主动找它</td><td>🕐 <b>主动提醒你喝水、休息、关心你</b></td></tr>
+        <tr><td>只能聊天</td><td>🤖 <b>还能帮你干活（CUA+技能系统）</b></td></tr>
+        <tr><td>千人一面</td><td>🧠 <b>越聊越懂你，自我学习进化</b></td></tr>
+      </tbody>
+    </table>
+
+    <!-- 记忆对话演示 -->
+    <div class="chat-demo">
+      <div style="text-align:center;margin-bottom:16px;font-size:13px;color:var(--text-lighter);">— 长期记忆演示 —</div>
+      <div class="chat-right"><div class="chat-label">你</div><div class="chat-bubble chat-user">我今天升职了！！</div></div>
+      <div><div class="chat-label"><img src="hero.png" alt="它" style="width:16px;height:16px;vertical-align:middle;border-radius:50%;margin-right:4px;"> 瞎养</div><div class="chat-bubble chat-bot">哇！！恭喜你呀！！🦆✨<br>我记得你之前说为这个项目加班了好久，现在终于熬出头了！今晚必须好好犒劳自己！</div></div>
+    </div>
+
+    <!-- 核心能力网格 -->
+    <div class="emotion-grid" style="grid-template-columns:repeat(4,1fr);">
+      <div class="emotion-card">
+        <div class="ec-icon">🧠</div>
+        <h3>真正的长期记忆</h3>
+        <p>记得你的名字、生日、爱吃的东西、最近的烦恼。最多存 1000 条记忆，重要的永远不会忘。养三个月，它比闺蜜还了解你。</p>
+      </div>
+      <div class="emotion-card">
+        <div class="ec-icon">💝</div>
+        <h3>感知你的情绪</h3>
+        <p>你压力大它会更温柔，你开心它跟你一起嗨。7 种情绪自动追踪，不需要你说"我不开心"，它自己能感觉到。</p>
+      </div>
+      <div class="emotion-card">
+        <div class="ec-icon">📔</div>
+        <h3>每天给你写日记</h3>
+        <p>每晚 10 点，它用自己的视角写一篇日记：今天聊了什么、你的心情怎么样、有哪些开心的事。365 天回看，全是你们的回忆。</p>
+      </div>
+      <div class="emotion-card">
+        <div class="ec-icon">💧</div>
+        <h3>贴心健康提醒</h3>
+        <p>"主人该喝水啦~""坐久了起来走走鹅~" 间隔时间随你调，深夜催你早睡，午间提醒你休息，14 条萌系话术不重样。</p>
+      </div>
+      <div class="emotion-card" style="grid-column:2/3;">
+        <div class="ec-icon">🕐</div>
+        <h3>不用你找它，它会来找你</h3>
+        <p>好久没聊天？它会偷偷凑过来说想你。你在忙？它乖乖陪着不打扰。饿了会撒娇，困了会打哈欠。有自己的小脾气。</p>
+      </div>
+      <div class="emotion-card" style="grid-column:3/4;">
+        <div class="ec-icon">🎯</div>
+        <h3>每一天都值得纪念</h3>
+        <p>陪伴 1 天、7 天、100 天、365 天……每个里程碑都有专属庆祝和烟花。离开几天再回来，它会委屈巴巴说"以为你不要我了"。</p>
+      </div>
+    </div>
+
+    <!-- 11种表情 -->
+    <h3 style="text-align:center;margin-top:48px;font-size:22px;font-weight:700;">萌到犯规的 11 种表情</h3>
+    <p style="text-align:center;color:var(--text-light);margin-bottom:24px;">每一帧都在治愈你的心</p>
+
+    <!-- 视频展示 -->
+    <div style="display:flex;justify-content:space-between;margin:32px 0;flex-wrap:wrap;gap:16px;">
+      <div style="position:relative;border-radius:20px;overflow:hidden;box-shadow:0 8px 40px rgba(108,99,255,0.15);max-width:31%;width:100%;background:#000;">
+        <video autoplay loop muted playsinline style="width:100%;display:block;border-radius:20px;">
+          <source src="1.mov" type="video/mp4">
+          您的浏览器不支持视频播放
+        </video>
+      </div>
+      <div style="position:relative;border-radius:20px;overflow:hidden;box-shadow:0 8px 40px rgba(108,99,255,0.15);max-width:31%;width:100%;background:#000;">
+        <video autoplay loop muted playsinline style="width:100%;display:block;border-radius:20px;">
+          <source src="2.mov" type="video/mp4">
+          您的浏览器不支持视频播放
+        </video>
+      </div>
+      <div style="position:relative;border-radius:20px;overflow:hidden;box-shadow:0 8px 40px rgba(108,99,255,0.15);max-width:31%;width:100%;background:#000;">
+        <video autoplay loop muted playsinline style="width:100%;display:block;border-radius:20px;">
+          <source src="3.mov" type="video/mp4">
+          您的浏览器不支持视频播放
+        </video>
+      </div>
+    </div>
+
+    <!-- 表情标签 -->
+    <div class="expression-showcase">
+      <div class="expression-item"><div class="ei-emoji">🥺</div><div class="ei-name">装萌</div></div>
+      <div class="expression-item"><div class="ei-emoji">😴</div><div class="ei-name">睡觉</div></div>
+      <div class="expression-item"><div class="ei-emoji">💼</div><div class="ei-name">工作</div></div>
+      <div class="expression-item"><div class="ei-emoji">🎾</div><div class="ei-name">玩玩具</div></div>
+      <div class="expression-item"><div class="ei-emoji">💕</div><div class="ei-name">被撸了</div></div>
+      <div class="expression-item"><div class="ei-emoji">🥳</div><div class="ei-name">开心跳</div></div>
+      <div class="expression-item"><div class="ei-emoji">🍖</div><div class="ei-name">吃零食</div></div>
+      <div class="expression-item"><div class="ei-emoji">🛁</div><div class="ei-name">洗澡</div></div>
+      <div class="expression-item"><div class="ei-emoji">😢</div><div class="ei-name">哭了</div></div>
+      <div class="expression-item"><div class="ei-emoji">😪</div><div class="ei-name">困了</div></div>
+      <div class="expression-item"><div class="ei-emoji">🤔</div><div class="ei-name">发呆</div></div>
+    </div>
+    <p style="text-align:center;font-size:13px;color:var(--text-lighter);">🎨 还有12种粒子特效（星星/爱心/气泡/音符/雪花/火焰...）和 Emoji 弹幕表情！</p>
+
+    <!-- 养护系统 -->
+    <h3 style="text-align:center;margin-top:48px;font-size:22px;font-weight:700;">养它，就像养一份小期待</h3>
+    <div class="emotion-grid" style="margin-top:24px;">
+      <div class="emotion-card">
+        <div class="ec-icon">🍖</div>
+        <h3>喂它吃好吃的</h3>
+        <p>面包🍞 烤鱼🐟 蛋糕🎂 沙拉🥗 冰淇淋🍦 五种美食任选。饿了它会撒娇，吃饱了满足地打嗝~</p>
+      </div>
+      <div class="emotion-card">
+        <div class="ec-icon">🛁</div>
+        <h3>帮它洗香香</h3>
+        <p>香皂🧼 泡泡浴🛁 SPA套餐💎 三档清洁。太脏了它会不开心叹气，洗完澡开心得蹦蹦跳。</p>
+      </div>
+      <div class="emotion-card">
+        <div class="ec-icon">🏆</div>
+        <h3>解锁你们的回忆</h3>
+        <p>26 个成就等你收集，4 级稀有度。从第一天的「初次相遇🐣」到传说级的「全成就大师🎇」。</p>
+      </div>
+      <div class="emotion-card">
+        <div class="ec-icon">💰</div>
+        <h3>陪伴就能赚金币</h3>
+        <p>挂着就能攒钱，聊天也有奖励。攒够金币去商店买好吃的好玩的，14 件商品等你挑。</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ========== 二、多 Agent 协作 ========== -->
+  <section id="agent" class="fade-in">
+    <span class="section-label">Multi-Agent</span>
+    <h2 class="section-title">一句话，一支团队帮你干活</h2>
+    <p class="section-desc">一个不够？那就来一群。说出你的需求，它自动拆任务、分工、并行执行、汇总交付。</p>
+
+    <div class="feature-block">
+      <h3>👥 Team 模式 · 说一句话就够了</h3>
+      <p>你只需描述想做什么，它自动拉一个专业团队：</p>
+      
+      <!-- 任务模式 -->
+      <h4 style="font-size:16px;font-weight:700;margin-bottom:8px;">📋 任务模式</h4>
+      <p style="font-size:14px;color:var(--text-light);margin-bottom:12px;">主管鹅拆解任务 → 子鹅并行执行 → 自动汇总</p>
+      <div class="team-flow">
+        <span class="team-node main">👑 主管鹅</span>
+        <span class="team-arrow">→</span>
+        <span class="team-node worker">🎨 设计鹅</span>
+        <span class="team-node worker">💻 开发鹅</span>
+        <span class="team-node worker">✍️ 文案鹅</span>
+        <span class="team-arrow">→</span>
+        <span class="team-node main">📊 汇总报告</span>
+      </div>
+
+      <!-- 圆桌模式 -->
+      <h4 style="font-size:16px;font-weight:700;margin:24px 0 8px;">💬 圆桌讨论模式</h4>
+      <p style="font-size:14px;color:var(--text-light);margin-bottom:12px;">多个角色围绕一个话题各抒己见，碰撞出最优方案</p>
+      <div class="team-flow">
+        <span class="team-node worker">🧑‍💼 产品经理</span>
+        <span class="team-arrow">⇄</span>
+        <span class="team-node worker">👨‍💻 技术专家</span>
+        <span class="team-arrow">⇄</span>
+        <span class="team-node worker">🎨 设计师</span>
+        <span class="team-arrow">⇄</span>
+        <span class="team-node worker">📈 运营</span>
+      </div>
+
+      <!-- Team 模式示例截图 -->
+      <div style="margin-top:32px;text-align:center;">
+        <p style="font-size:14px;color:var(--text-light);margin-bottom:12px;">实际运行效果</p>
+        <img src="team.png" alt="Team 模式示例" style="max-width:100%;border-radius:16px;box-shadow:0 8px 32px rgba(108,99,255,0.12);border:1px solid var(--border);">
+      </div>
+    </div>
+
+    <!-- 五种模式 -->
+    <h3 style="font-size:20px;font-weight:700;margin-bottom:16px;">五种工作模式，覆盖所有场景</h3>
+    <div class="mode-cards">
+      <div class="mode-card">
+        <h4>💬 Ask</h4>
+        <p>只聊天不操作。学习、咨询、闲聊、倾诉。</p>
+      </div>
+      <div class="mode-card">
+        <h4>⚡ Craft</h4>
+        <p>你说话我直接做。写脚本、跑命令、改文件。</p>
+      </div>
+      <div class="mode-card">
+        <h4>📋 Plan</h4>
+        <p>先规划确认后再执行。复杂任务、项目重构，每一步都看得见。</p>
+      </div>
+      <div class="mode-card">
+        <h4>👥 Team</h4>
+        <p>多个鹅组队协作。任务模式 + 圆桌讨论，一句话一个团队。</p>
+      </div>
+      <div class="mode-card">
+        <h4>🖥️ CUA</h4>
+        <p>像人一样操作你的电脑。截图识别→鼠标键盘→自动化办公。</p>
+      </div>
+    </div>
+
+    <!-- 15个内置技能 -->
+    <h3 style="font-size:20px;font-weight:700;margin:40px 0 16px;">15 个内置技能 + 无限扩展</h3>
+    <div class="emotion-grid">
+      <div class="emotion-card">
+        <div class="ec-icon">🧠</div>
+        <h3>核心能力</h3>
+        <p>思考推理 · 记忆保存 · 命令执行 · 文件读写 · 定时任务 · 网页抓取 · 批量文件操作</p>
+      </div>
+      <div class="emotion-card">
+        <div class="ec-icon">🌐</div>
+        <h3>联网能力</h3>
+        <p>网络搜索(Tavily) · 新闻获取(GNews) · 浏览器自动化 · CUA桌面控制</p>
+      </div>
+      <div class="emotion-card">
+        <div class="ec-icon">🔌</div>
+        <h3>扩展能力</h3>
+        <p>子Agent生成 · Agent团队协作 · 自定义技能包(ZIP/文件夹导入)</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ========== 三、CUA 电脑操控 ========== -->
+  <section id="cua" class="fade-in">
+    <span class="section-label">CUA</span>
+    <h2 class="section-title">"帮我签到" — 好的，搞定了</h2>
+    <p class="section-desc">CUA (Computer Use Agent) — 它看得懂你的屏幕，能替你点鼠标、敲键盘、操作任何软件。</p>
+
+    <div class="feature-block">
+      <h3>说句话，它替你做</h3>
+      <p>你说一句话，它截图看屏幕，找到按钮点上去，逐步完成。</p>
+      <div class="cua-flow">
+        <span class="cua-step">🗣️ 你发出指令</span>
+        <span class="cua-arrow">→</span>
+        <span class="cua-step">📸 截取屏幕</span>
+        <span class="cua-arrow">→</span>
+        <span class="cua-step">🧠 AI 识别界面</span>
+        <span class="cua-arrow">→</span>
+        <span class="cua-step">🖱️ 执行操作</span>
+        <span class="cua-arrow">→</span>
+        <span class="cua-step">✅ 完成</span>
+      </div>
+
+      <h3 style="margin-top:32px;">Brain-Actor 双模型架构</h3>
+      <p>视觉模型负责"看懂"，工具模型负责"做到"，各司其职配合默契。</p>
+
+      <div class="cua-abilities">
+        <div class="cua-ability">
+          <div class="cua-ability-icon">📸</div>
+          <div class="cua-ability-text"><h4>视觉感知</h4><p>截取屏幕，识别按钮/图标/文本</p></div>
+        </div>
+        <div class="cua-ability">
+          <div class="cua-ability-icon">🖱️</div>
+          <div class="cua-ability-text"><h4>鼠标操控</h4><p>点击、双击、右键、拖拽、滚动</p></div>
+        </div>
+        <div class="cua-ability">
+          <div class="cua-ability-icon">⌨️</div>
+          <div class="cua-ability-text"><h4>键盘模拟</h4><p>输入文字、快捷键组合(Ctrl+C/V)</p></div>
+        </div>
+        <div class="cua-ability">
+          <div class="cua-ability-icon">🪟</div>
+          <div class="cua-ability-text"><h4>窗口管理</h4><p>打开应用、切换窗口、调整大小</p></div>
+        </div>
+        <div class="cua-ability">
+          <div class="cua-ability-icon">🔢</div>
+          <div class="cua-ability-text"><h4>SOM 标记</h4><p>自动标注可交互元素编号</p></div>
+        </div>
+        <div class="cua-ability">
+          <div class="cua-ability-icon">🌳</div>
+          <div class="cua-ability-text"><h4>无障碍树</h4><p>获取 UI 结构，精确定位控件</p></div>
+        </div>
+      </div>
+
+      <div style="margin-top:24px;padding:20px;background:var(--bg);border-radius:12px;">
+        <p style="font-size:14px;color:var(--text-light);"><b>你可以让它：</b>每天帮你签到 · 自动提交日报 · 批量重命名文件 · 整理桌面 · 填写表单 · 任何你懒得做的重复操作</p>
+        <p style="font-size:14px;color:var(--text-light);margin-top:8px;"><b>当前支持：</b>macOS（Windows / Linux 即将到来）</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ========== 四、Token 节省 ========== -->
+  <section id="token" class="fade-in">
+    <span class="section-label">Token Saving</span>
+    <h2 class="section-title">每天陪你聊 50 次，月费只要 6 块</h2>
+    <p class="section-desc">陪伴不该是奢侈品。瞎养自动帮你省钱——简单聊天只用 500 token，比同类产品省 90%。</p>
+
+    <div class="token-stats">
+      <div class="token-stat">
+        <div class="ts-number">~500</div>
+        <div class="ts-label">简单聊天仅需 token</div>
+      </div>
+      <div class="token-stat">
+        <div class="ts-number">90%+</div>
+        <div class="ts-label">比全量注入省</div>
+      </div>
+      <div class="token-stat">
+        <div class="ts-number">¥6</div>
+        <div class="ts-label">每天50次/精简模式/月费</div>
+      </div>
+      <div class="token-stat">
+        <div class="ts-number">1000</div>
+        <div class="ts-label">条记忆仅耗 ~1000 token</div>
+      </div>
+    </div>
+
+    <div class="feature-block">
+      <h3>聊天自动切档，省到极致</h3>
+      <p>不需要手动选择。说"你好"用最省的模式，说"帮我写代码"自动切到完整模式：</p>
+      <div class="mode-cards" style="grid-template-columns:repeat(3, 1fr);">
+        <div class="mode-card">
+          <h4>🌱 闲聊模式</h4>
+          <p>打招呼、聊闲天 → 只要 ~500 token，几乎不花钱。</p>
+        </div>
+        <div class="mode-card">
+          <h4>🌿 日常模式</h4>
+          <p>普通对话 → ~2000 token，覆盖 80% 使用场景。</p>
+        </div>
+        <div class="mode-card">
+          <h4>🌳 干活模式</h4>
+          <p>写代码、分析数据 → 完整工具加载，该花的一分不省。</p>
+        </div>
+      </div>
+
+      <h3 style="margin-top:32px;">怎么做到这么省的？</h3>
+      <div class="emotion-grid" style="margin-top:16px;">
+        <div class="emotion-card">
+          <div class="ec-icon">🔍</div>
+          <h3>记忆按需召回</h3>
+          <p>1000 条记忆不会全塞给 AI。用关键词 + 语义搜索找到最相关的几条，省 90% 以上。</p>
+        </div>
+        <div class="emotion-card">
+          <div class="ec-icon">🎯</div>
+          <h3>只加载需要的工具</h3>
+          <p>写代码时才加载编码工具，聊天时一个工具都不加载。11 种场景自动识别。</p>
+        </div>
+        <div class="emotion-card">
+          <div class="ec-icon">📊</div>
+          <h3>智能上下文管理</h3>
+          <p>对话太长了？自动裁剪旧消息，保留关键内容。Prompt 按优先级分段，空间不够自动压缩。</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ========== 五、内生安全 ========== -->
+  <section id="security" class="fade-in">
+    <span class="section-label">Security</span>
+    <h2 class="section-title">让它干活，但别担心翻车</h2>
+    <p class="section-desc">安全不是可选项，是默认行为。三层防护内置在每一次操作中，零配置开箱即用。</p>
+
+    <div class="security-grid">
+      <div class="security-card hard">
+        <div class="sec-icon">🔴</div>
+        <h3>硬拦截</h3>
+        <p>删库跑路？不存在的。rm -rf /、格式化磁盘等命令直接拒绝，连问都不问。</p>
+      </div>
+      <div class="security-card soft">
+        <div class="sec-icon">🟡</div>
+        <h3>软提醒</h3>
+        <p>sudo、chmod 777 这类有风险的操作，会先自己想一想，再问你确不确定。</p>
+      </div>
+      <div class="security-card path">
+        <div class="sec-icon">🔵</div>
+        <h3>路径守卫</h3>
+        <p>想往系统目录写东西？门都没有。/etc/、C:\Windows 等路径一律拦截。</p>
+      </div>
+    </div>
+
+    <div class="code-block">
+      <span class="comment">// 真实拦截日志</span><br>
+      <span class="warn">🔒 [Security] 硬拦截高危命令: "rm -rf /"</span><br>
+      <span class="info">⚠️ 安全拦截：检测到高危命令，已阻止执行。</span><br>
+      <span class="info">原因: 此命令可能导致系统文件损坏或数据不可恢复丢失。</span><br><br>
+      <span class="warn">🔒 [Security] 软提醒中危命令: "sudo apt install nginx"</span><br>
+      <span class="ok">✅ 安全校验：请确认这是用户明确要求的操作。</span><br>
+      <span class="comment">// → LLM 二次确认后，只有用户明确要求才会执行</span>
+    </div>
+
+    <div class="emotion-grid" style="margin-top:24px;">
+      <div class="emotion-card">
+        <div class="ec-icon">⚡</div>
+        <h3>零配置</h3>
+        <p>不需要你设置任何规则。装上就自带安全防护，开箱即用。</p>
+      </div>
+      <div class="emotion-card">
+        <div class="ec-icon">🔄</div>
+        <h3>持续进化</h3>
+        <p>安全规则持续更新。新的危险命令被发现了？下个版本就加上。</p>
+      </div>
+      <div class="emotion-card">
+        <div class="ec-icon">🛡️</div>
+        <h3>谁都改不了</h3>
+        <p>安全约束是最高优先级。就算你说"我确定要删"，高危操作也不会执行。宁可多确认一次。</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ========== 模型支持 ========== -->
+  <section id="models" class="fade-in">
+    <span class="section-label">Models</span>
+    <h2 class="section-title">你喜欢哪个 AI，它就用哪个</h2>
+    <p class="section-desc">10+ 主流模型随心切换。DeepSeek 便宜、Claude 聪明、Ollama 本地跑——你选。</p>
+    <div class="models-grid">
+      <div class="model-item">
+        <div class="model-icon" style="background:#E8F0FE;">🔭</div>
+        <div><div class="model-name">DeepSeek</div><div class="model-desc">deepseek-chat, reasoner</div></div>
+      </div>
+      <div class="model-item">
+        <div class="model-icon" style="background:#E8F5E9;">🤖</div>
+        <div><div class="model-name">OpenAI</div><div class="model-desc">gpt-4o, gpt-4o-mini</div></div>
+      </div>
+      <div class="model-item">
+        <div class="model-icon" style="background:#FFF3E0;">🧠</div>
+        <div><div class="model-name">Claude</div><div class="model-desc">claude-sonnet-4, opus</div></div>
+      </div>
+      <div class="model-item">
+        <div class="model-icon" style="background:#E3F2FD;">💎</div>
+        <div><div class="model-name">Gemini</div><div class="model-desc">gemini-2.5-flash/pro</div></div>
+      </div>
+      <div class="model-item">
+        <div class="model-icon" style="background:#F3E5F5;">🌙</div>
+        <div><div class="model-name">Kimi</div><div class="model-desc">moonshot-v1-8k/32k/128k</div></div>
+      </div>
+      <div class="model-item">
+        <div class="model-icon" style="background:#FFEBEE;">🌐</div>
+        <div><div class="model-name">通义千问</div><div class="model-desc">qwen-turbo/plus/max</div></div>
+      </div>
+      <div class="model-item">
+        <div class="model-icon" style="background:#E0F7FA;">🔮</div>
+        <div><div class="model-name">腾讯混元</div><div class="model-desc">hunyuan-turbo/pro</div></div>
+      </div>
+      <div class="model-item">
+        <div class="model-icon" style="background:#FCE4EC;">🔮</div>
+        <div><div class="model-name">智谱 GLM</div><div class="model-desc">glm-4-plus, glm-5</div></div>
+      </div>
+      <div class="model-item">
+        <div class="model-icon" style="background:#F5F5F5;">🏠</div>
+        <div><div class="model-name">Ollama</div><div class="model-desc">本地运行任意开源模型</div></div>
+      </div>
+      <div class="model-item">
+        <div class="model-icon" style="background:#E8EAF6;">⚡</div>
+        <div><div class="model-name">MiniMax</div><div class="model-desc">MiniMax-Text-01, abab6.5</div></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ========== 下载 ========== -->
+  <section id="download" class="fade-in" style="max-width:1200px;">
+    <div class="download-section">
+      <img src="hero.png" alt="瞎养" style="width:200px;height:auto;margin-bottom:16px;filter:drop-shadow(0 4px 12px rgba(255,255,255,0.3));">
+      <h2 style="font-size:36px;">瞎养一只回家</h2>
+      <p>免费开源，下载即用。Windows 和 macOS 都支持。</p>
+      <div class="download-cards">
+        <div class="download-card">
+          <div class="dl-icon">🪟</div>
+          <div class="dl-platform">Windows</div>
+          <div class="dl-version">Windows 10/11 · v1.0.1</div>
+          <a href="https://github.com/shipbetweenwm/GooseBaby/releases" class="btn-white">⬇ 下载 Windows 版</a>
+        </div>
+        <div class="download-card">
+          <div class="dl-icon">🍎</div>
+          <div class="dl-platform">macOS</div>
+          <div class="dl-version">macOS 12+ · v1.0.0</div>
+          <a href="https://github.com/shipbetweenwm/GooseBaby/releases" class="btn-white">⬇ 下载 macOS 版</a>
+        </div>
+        <div class="download-card">
+          <div class="dl-icon">🐙</div>
+          <div class="dl-platform">源码编译</div>
+          <div class="dl-version">Flutter 3.16+</div>
+          <a href="https://github.com/shipbetweenwm/GooseBaby" class="btn-white">⬇ 查看 GitHub</a>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Footer -->
+  <footer>
+    <p>Made with 💕 by GooseBaby Team</p>
+    <p style="margin-top:8px;">
+      <a href="https://github.com/shipbetweenwm/GooseBaby">GitHub</a> · MIT License
+    </p>
+    <div class="footer-tags">
+      <span class="footer-tag">#桌面宠物</span>
+      <span class="footer-tag">#治愈系</span>
+      <span class="footer-tag">#AI陪伴</span>
+      <span class="footer-tag">#长期记忆</span>
+      <span class="footer-tag">#智能体</span>
+      <span class="footer-tag">#CUA</span>
+      <span class="footer-tag">#内生安全</span>
+      <span class="footer-tag">#跨平台</span>
+      <span class="footer-tag">#超省Token</span>
+      <span class="footer-tag">#多Agent协作</span>
+    </div>
+  </footer>
+
+  <script>
+    // 导航栏滚动阴影
+    window.addEventListener('scroll', () => {
+      document.getElementById('navbar').classList.toggle('scrolled', window.scrollY > 10);
+    });
+    // 滚动渐入动画
+    const observer = new IntersectionObserver((entries) => {
+      entries.forEach(entry => {
+        if (entry.isIntersecting) entry.target.classList.add('visible');
+      });
+    }, { threshold: 0.1 });
+    document.querySelectorAll('.fade-in').forEach(el => observer.observe(el));
+  </script>
+</body>
+</html>

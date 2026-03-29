@@ -58,6 +58,7 @@ class PetEngine extends ChangeNotifier {
   bool _autoRoam = true;
   bool _soundEnabled = false;
   bool _notificationEnabled = true;
+  int _proactiveChatInterval = 5; // 主动搭话间隔（分钟），默认5分钟
   bool _healthReminderEnabled = true;
   int _healthReminderInterval = 30; // 健康提醒间隔（分钟），默认30分钟
   bool _alwaysOnTop = true;
@@ -67,6 +68,7 @@ class PetEngine extends ChangeNotifier {
   bool get autoRoam => _autoRoam;
   bool get soundEnabled => _soundEnabled;
   bool get notificationEnabled => _notificationEnabled;
+  int get proactiveChatInterval => _proactiveChatInterval;
   bool get healthReminderEnabled => _healthReminderEnabled;
   int get healthReminderInterval => _healthReminderInterval;
   bool get alwaysOnTop => _alwaysOnTop;
@@ -141,6 +143,7 @@ class PetEngine extends ChangeNotifier {
       _autoRoam = box.get('auto_roam', defaultValue: true) as bool;
       _soundEnabled = box.get('sound_enabled', defaultValue: false) as bool;
       _notificationEnabled = box.get('notification_enabled', defaultValue: true) as bool;
+      _proactiveChatInterval = box.get('proactive_chat_interval', defaultValue: 5) as int;
       _healthReminderEnabled = box.get('health_reminder_enabled', defaultValue: true) as bool;
       _healthReminderInterval = box.get('health_reminder_interval', defaultValue: 30) as int;
       _alwaysOnTop = box.get('always_on_top', defaultValue: true) as bool;
@@ -158,6 +161,7 @@ class PetEngine extends ChangeNotifier {
       box.put('auto_roam', _autoRoam);
       box.put('sound_enabled', _soundEnabled);
       box.put('notification_enabled', _notificationEnabled);
+      box.put('proactive_chat_interval', _proactiveChatInterval);
       box.put('health_reminder_enabled', _healthReminderEnabled);
       box.put('health_reminder_interval', _healthReminderInterval);
       box.put('always_on_top', _alwaysOnTop);
@@ -193,6 +197,16 @@ class PetEngine extends ChangeNotifier {
       _proactiveTimer?.cancel();
       _proactiveTimer = null;
     }
+  }
+
+  void setProactiveChatInterval(int minutes) {
+    _proactiveChatInterval = minutes.clamp(3, 60);
+    _saveSettings();
+    // 重启定时器以应用新间隔
+    if (_notificationEnabled) {
+      _startProactiveChat();
+    }
+    notifyListeners();
   }
 
   void setHealthReminderEnabled(bool value) {
@@ -314,8 +328,8 @@ class PetEngine extends ChangeNotifier {
   /// 启动主动搭话定时器
   void _startProactiveChat() {
     _proactiveTimer?.cancel();
-    // 每 5 分钟检查一次是否需要搭话（实际触发取决于陪伴节奏）
-    _proactiveTimer = Timer.periodic(const Duration(minutes: 5), (_) {
+    // 按配置间隔检查是否需要搭话（实际触发取决于陪伴节奏）
+    _proactiveTimer = Timer.periodic(Duration(minutes: _proactiveChatInterval), (_) {
       if (!_notificationEnabled) return;
       if (_isWorking) return; // 工作中不打扰
 

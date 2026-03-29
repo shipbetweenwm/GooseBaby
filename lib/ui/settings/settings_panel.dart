@@ -1969,11 +1969,48 @@ class _PetSettingsState2 extends State<_PetSettings> {
             },
           ),
           _SettingToggle(
-            title: '智能关怀',
-            subtitle: '贴心关心 + 健康/喝水/休息提醒',
-            value: engine.notificationEnabled && engine.healthReminderEnabled,
+            title: '主动搭话',
+            subtitle: '瞎养会主动找你聊天、撒娇、关心你',
+            value: engine.notificationEnabled,
             onChanged: (v) {
               engine.setNotificationEnabled(v);
+            },
+          ),
+          if (engine.notificationEnabled)
+            Padding(
+              padding: const EdgeInsets.only(left: 16, right: 16, top: 4),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      const Text(
+                        '搭话频率',
+                        style: TextStyle(fontSize: 13, color: Colors.black54),
+                      ),
+                      const Spacer(),
+                      Text(
+                        '${engine.proactiveChatInterval}分钟',
+                        style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500),
+                      ),
+                    ],
+                  ),
+                  Slider(
+                    value: engine.proactiveChatInterval.toDouble(),
+                    min: 3,
+                    max: 60,
+                    divisions: 19,
+                    label: '${engine.proactiveChatInterval}分钟',
+                    onChanged: (v) => engine.setProactiveChatInterval(v.round()),
+                  ),
+                ],
+              ),
+            ),
+          _SettingToggle(
+            title: '健康提醒',
+            subtitle: '定时提醒喝水、休息、活动',
+            value: engine.healthReminderEnabled,
+            onChanged: (v) {
               engine.setHealthReminderEnabled(v);
             },
           ),

@@ -3795,8 +3795,8 @@ $skillBuffer
     // 初始化本次任务的输出目录（Web 平台不支持）
     if (!kIsWeb) {
       final timestamp = DateTime.now().toIso8601String().replaceAll(':', '-').replaceAll('.', '-').substring(0, 19);
-      final workDir = Directory.current;
-      _currentOutputDir = '${workDir.path}/goosebaby_outputs/$timestamp';
+      final workDir = SkillFileUtils.effectiveBaseWorkingDir;
+      _currentOutputDir = '$workDir/goosebaby_outputs/$timestamp';
     }
     
     // 设置执行状态
@@ -4237,9 +4237,9 @@ ${skillBuffer}
   Future<void> _saveTaskOutput(TeamTask task, String agentName, String output) async {
     try {
       // 获取或创建输出目录
-      final workDir = Directory.current;
+      final workDir = SkillFileUtils.effectiveBaseWorkingDir;
       final timestamp = DateTime.now().toIso8601String().replaceAll(':', '-').replaceAll('.', '-').substring(0, 19);
-      final outputDir = _currentOutputDir ?? '${workDir.path}/goosebaby_outputs/$timestamp';
+      final outputDir = _currentOutputDir ?? '$workDir/goosebaby_outputs/$timestamp';
       
       // 创建任务子目录
       final taskDir = Directory('$outputDir/tasks');
@@ -4393,7 +4393,7 @@ $allResults
   Future<void> _saveFinalReport(String userTask, String allResults, String finalSummary) async {
     try {
       // 获取工作目录
-      final workDir = Directory.current;
+      final workDir = SkillFileUtils.effectiveBaseWorkingDir;
       
       // 使用已创建的输出目录（如果存在）
       String outputDirPath;
@@ -4401,7 +4401,7 @@ $allResults
         outputDirPath = _currentOutputDir!;
       } else {
         final timestamp = DateTime.now().toIso8601String().replaceAll(':', '-').replaceAll('.', '-').substring(0, 19);
-        outputDirPath = '${workDir.path}/goosebaby_outputs/$timestamp';
+        outputDirPath = '$workDir/goosebaby_outputs/$timestamp';
       }
       
       final outputDir = Directory(outputDirPath);
