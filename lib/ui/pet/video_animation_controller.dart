@@ -536,7 +536,6 @@ class VideoAnimationController extends ChangeNotifier {
     final config = _animations[completedName];
     if (config != null && config.nextAnimation != null) {
       final nextAnimName = config.nextAnimation!;
-      debugPrint('🎬 一次性动画完成: $completedName, 状态机跳转: $nextAnimName');
 
       if (_animations.containsKey(nextAnimName)) {
         _currentAnimation = nextAnimName;
@@ -561,9 +560,7 @@ class VideoAnimationController extends ChangeNotifier {
 
       if (pendingIsIdlePool && completedIsIdlePool) {
         // 跳过，让下面的默认逻辑处理
-        debugPrint('🎬 一次性动画完成: $completedName, 排队动画 $pendingName 属于 idle 池，走默认');
       } else if (_animations.containsKey(pendingName)) {
-        debugPrint('🎬 一次性动画完成: $completedName, 切换到排队动画: $pendingName');
         _currentAnimation = pendingName;
         _animationSequence++;
         final pendingConfig = _animations[pendingName];
@@ -576,7 +573,6 @@ class VideoAnimationController extends ChangeNotifier {
     // 优先级3：回到默认动画（cute 循环播放）
     // 无论刚播完的是什么 one-shot 动画，都回到 cute 循环
     // cute 是循环动画，不会触发 completed，所以不会再卡死
-    debugPrint('🎬 一次性动画完成: $completedName -> 回到默认动画: $_defaultAnimation');
     _currentAnimation = _defaultAnimation;
     _animationSequence++;
     final defaultConfig = _animations[_defaultAnimation];

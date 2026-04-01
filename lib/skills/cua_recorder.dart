@@ -63,16 +63,19 @@ class CuaOperationRecord {
   /// 操作的中文描述
   String get displayTitle {
     const titleMap = {
-      'screenshot': '📸 截图',
-      'mouse_click': '🖱️ 点击',
-      'mouse_move': '🖱️ 移动',
-      'mouse_scroll': '🖱️ 滚动',
-      'mouse_drag': '🖱️ 拖拽',
-      'key_type': '⌨️ 输入',
-      'key_combo': '⌨️ 快捷键',
-      'open_app': '🚀 打开应用',
-      'get_ui_tree': '🌳 UI 树',
-      'cua_plan': '📋 规划',
+      'screenshot': 'A 📸 截图',
+      'cua_observe': 'A 👁️ Brain 分析',
+      'cua_step': '🔄 自动循环',
+      'cua_plan': 'B 📋 任务规划',
+      'find_element': 'C 🔍 定位元素',
+      'mouse_click': 'C ⚡ 点击',
+      'mouse_move': 'C ⚡ 移动',
+      'mouse_scroll': 'C ⚡ 滚动',
+      'mouse_drag': 'C ⚡ 拖拽',
+      'key_type': 'C ⚡ 输入',
+      'key_combo': 'C ⚡ 快捷键',
+      'open_app': 'C 🚀 打开应用',
+      'wait': 'C ⏳ 等待加载',
     };
     return titleMap[action] ?? '⚙️ $action';
   }

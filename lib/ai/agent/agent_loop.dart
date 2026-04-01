@@ -106,6 +106,13 @@ class AgentLoop {
 
     // CUA 模式：连续纯文本轮数跟踪（用于防止 LLM "偷懒"）
     int cuaPlainTextRounds = 0;
+    // CUA 模式：任务完成标记（当 cua_observe 返回 screenStatus=Done 或 cua_step 返回 done=true 时设置）
+    bool cuaTaskDone = false;
+    // CUA 模式：任务进度追踪
+    String cuaTaskProgress = ''; // 当前步骤描述
+    int cuaCompletionPercentage = 0; // 完成百分比
+    // CUA 模式：任务解析完成标记（第一轮必须先 think 完成任务解析）
+    bool cuaTaskParsed = false;
 
     // ── 重试跟踪（用于触发 beforeRetry 钩子） ──
     final lastFailedTools = <String, ToolCall>{}; // 工具名 → 最后失败的调用
@@ -158,28 +165,35 @@ class AgentLoop {
         }
 
         // ── CUA 模式：不允许纯文本退出，强制要求继续操作 ──
+        // 但如果任务已完成（cuaTaskDone=true），允许 LLM 正常退出输出总结
         if (mode == AgentMode.cua) {
-          cuaPlainTextRounds++;
-          if (cuaPlainTextRounds <= 3) {
-            // 追加 LLM 的纯文本到历史（让它知道自己的回复已被"看到"）
-            workingMessages.add({
-              'role': 'assistant',
-              'content': response.text.isEmpty ? null : response.text,
-            });
-            // 注入强制提醒
-            final reminder = cuaPlainTextRounds == 1
-                ? '【系统强制提醒】你处于 CUA 操作模式，不能只输出文字回复。'
-                    '你必须通过 cua(action=...) 工具执行实际桌面操作。'
-                    '请立即调用 cua 工具执行下一步操作。'
-                    '可选 action: screenshot(截图查看屏幕)、mouse_click(点击)、key_type(输入文本)、key_combo(快捷键)、open_app(打开应用)。'
-                : '【系统第${cuaPlainTextRounds}次提醒】CUA 模式下必须调用 cua 工具操作！'
-                    '不要输出文字描述，直接调用 cua 工具。如果你不确定当前屏幕状态，先调用 cua(action="screenshot") 截图查看。';
-            debugPrint('⚠️ [Agent] CUA 模式 LLM 返回纯文本 (第${cuaPlainTextRounds}次)，注入强制提醒');
-            workingMessages.add({'role': 'user', 'content': reminder});
-            continue; // 不退出循环，继续下一轮
+          if (cuaTaskDone) {
+            // 任务已完成，允许 LLM 输出总结并退出
+            debugPrint('✅ [Agent] CUA 任务已完成（screenStatus=Done），允许纯文本退出');
+          } else {
+            cuaPlainTextRounds++;
+            if (cuaPlainTextRounds <= 3) {
+              // 追加 LLM 的纯文本到历史（让它知道自己的回复已被"看到"）
+              workingMessages.add({
+                'role': 'assistant',
+                'content': response.text.isEmpty ? null : response.text,
+              });
+              // 注入强制提醒
+              final reminder = cuaPlainTextRounds == 1
+                  ? '【系统强制提醒】你处于 CUA 操作模式，不能只输出文字回复。'
+                      '你必须通过 cua(action=...) 工具执行实际桌面操作。'
+                      '请先调用 cua(action="cua_observe") 观察屏幕状态，然后根据结果执行操作。'
+                      '⛔ 注意：所有 mouse_click 必须先 find_element 定位，否则会被系统拦截拒绝执行！'
+                  : '【系统第${cuaPlainTextRounds}次提醒】CUA 模式下必须调用 cua 工具操作！'
+                      '不要输出文字描述，先调用 cua(action="cua_observe") 观察屏幕，再执行操作。'
+                      '⛔ mouse_click 坐标必须来自 find_element，否则会被拦截！';
+              debugPrint('⚠️ [Agent] CUA 模式 LLM 返回纯文本 (第${cuaPlainTextRounds}次)，注入强制提醒');
+              workingMessages.add({'role': 'user', 'content': reminder});
+              continue; // 不退出循环，继续下一轮
+            }
+            // 超过 3 次纯文本，允许退出
+            debugPrint('⚠️ [Agent] CUA 模式连续 $cuaPlainTextRounds 轮纯文本，允许退出');
           }
-          // 超过 3 次纯文本，允许退出
-          debugPrint('⚠️ [Agent] CUA 模式连续 $cuaPlainTextRounds 轮纯文本，允许退出');
         }
         
         // LLM 返回纯文本 → 循环结束
@@ -211,6 +225,48 @@ class AgentLoop {
       // 有 tool_calls → 重置 CUA 纯文本计数
       if (mode == AgentMode.cua) {
         cuaPlainTextRounds = 0;
+
+        // ── CUA 第一轮必须先任务解析 ──
+        if (turn == 0 && !cuaTaskParsed) {
+          // 检查是否包含 think
+          final hasThink = response.toolCalls.any((tc) => tc.name == 'think');
+          if (!hasThink) {
+            // 第一轮没有 think，强制要求先任务解析
+            debugPrint('⚠️ [Agent] CUA 第一轮未包含 think，强制要求任务解析');
+
+            // 追加 LLM 的响应到历史
+            workingMessages.add({
+              'role': 'assistant',
+              'content': response.text.isEmpty ? null : response.text,
+              'tool_calls': response.toolCalls.map((tc) => {
+                'id': tc.id,
+                'type': 'function',
+                'function': {
+                  'name': tc.name,
+                  'arguments': jsonEncode(tc.arguments),
+                },
+              }).toList(),
+            });
+
+            // 注入强制提醒
+            workingMessages.add({
+              'role': 'user',
+              'content': '【系统强制要求】这是 CUA 操作模式的第一轮，你必须先调用 think 工具完成任务解析。\n\n'
+                  '请按照任务解析模板完成深度思考：\n'
+                  '1. 用户意图分析\n'
+                  '2. 歧义识别与处理\n'
+                  '3. 边界条件考虑\n'
+                  '4. 验证方法定义\n'
+                  '5. 步骤拆解（每步都要有验证方法）\n\n'
+                  '⛔ 禁止跳过任务解析直接操作！',
+            });
+            continue; // 不执行工具，继续下一轮
+          } else {
+            // 有 think，标记任务解析已完成
+            cuaTaskParsed = true;
+            debugPrint('✅ [Agent] CUA 任务解析已完成');
+          }
+        }
       }
       
       // ── 触发 LLM 响应后 Hook ──
@@ -424,7 +480,8 @@ class AgentLoop {
         String stepTitle;
         String stepDesc;
         if (toolCall.name == 'think') {
-          stepTitle = '🧠 思考';
+          // CUA 模式下 think 表示"决策 & 下一步规划"阶段
+          stepTitle = mode == AgentMode.cua ? '② 🧠 决策 & 规划' : '🧠 思考';
           stepDesc = toolCall.arguments['thought'] as String? ?? '';
         } else if (toolCall.name == 'save_memory') {
           stepTitle = '💾 保存记忆';
@@ -443,18 +500,23 @@ class AgentLoop {
         } else if (toolCall.name == 'cua') {
           final action = toolCall.arguments['action'] as String? ?? '';
           final cuaDescMap = {
-            'screenshot': '🖥️ 截取屏幕',
-            'mouse_click': '🖱️ 鼠标点击',
-            'mouse_move': '🖱️ 移动鼠标',
-            'mouse_scroll': '🖱️ 滚动',
-            'mouse_drag': '🖱️ 拖拽',
-            'key_type': '⌨️ 输入文本',
-            'key_combo': '⌨️ 快捷键',
-            'open_app': '🚀 打开应用',
+            'screenshot': '📸 截图',
+            'cua_observe': '① 👁️ 观察屏幕',
+            'cua_step': '🔄 自动循环（观察→决策→执行）',
+            'cua_plan': '📋 任务规划',
+            'find_element': '③ 🔍 定位元素',
+            'mouse_click': '③ ⚡ 点击',
+            'mouse_move': '③ ⚡ 移动',
+            'mouse_scroll': '③ ⚡ 滚动',
+            'mouse_drag': '③ ⚡ 拖拽',
+            'key_type': '③ ⚡ 输入',
+            'key_combo': '③ ⚡ 快捷键',
+            'open_app': '③ 🚀 打开应用',
+            'wait': '③ ⏳ 等待加载',
           };
           stepTitle = cuaDescMap[action] ?? '🖥️ CUA';
           if (action == 'screenshot') {
-            stepDesc = '截取屏幕截图...';
+            stepDesc = '获取当前屏幕状态...';
           } else if (action.startsWith('mouse')) {
             final x = toolCall.arguments['x'];
             final y = toolCall.arguments['y'];
@@ -466,6 +528,17 @@ class AgentLoop {
             stepDesc = toolCall.arguments['keys'] as String? ?? '';
           } else if (action == 'open_app') {
             stepDesc = toolCall.arguments['app_name'] as String? ?? '';
+          } else if (action == 'find_element') {
+            final query = toolCall.arguments['query'] as String? ?? '';
+            stepDesc = '查找: $query';
+          } else if (action == 'cua_observe') {
+            stepDesc = '分析屏幕内容，识别关键元素...';
+          } else if (action == 'cua_step') {
+            final goal = toolCall.arguments['task_goal'] as String? ?? '';
+            stepDesc = goal.isNotEmpty ? goal : '自动执行下一步操作...';
+          } else if (action == 'cua_plan') {
+            final goal = toolCall.arguments['task_goal'] as String? ?? '';
+            stepDesc = goal.isNotEmpty ? '规划: $goal' : '生成任务执行计划...';
           } else {
             stepDesc = action;
           }
@@ -542,6 +615,8 @@ class AgentLoop {
             onStepUpdate?.call(step);
           } else if (analyzeScreenshot != null && b64 != null && b64.isNotEmpty) {
             // ── 模式 2：调用视觉模型分析截图，返回文字描述 ──
+            // 注意：CUA 模式下 analyzeScreenshot 为 null，不会执行此分支
+            // CUA 模式的视觉分析在 cua_observe 中完成
             step.content = '$stepDesc\n🔍 正在分析截图...';
             step.isLoading = true;
             onStepUpdate?.call(step);
@@ -564,9 +639,8 @@ class AgentLoop {
             } catch (e) {
               debugPrint('⚠️ 视觉分析失败: $e');
             }
-          } else if (analyzeScreenshot == null) {
-            debugPrint('⚠️ 截图完成但 analyzeScreenshot 回调为空 — 视觉分析未启用');
           }
+          // CUA 模式下 analyzeScreenshot 为 null，直接跳过（视觉分析在 cua_observe 中完成）
         }
 
         final toolMsg = {
@@ -576,6 +650,12 @@ class AgentLoop {
         };
         workingMessages.add(toolMsg);
         allApiMessages.add(Map<String, dynamic>.from(toolMsg));
+
+        // ── CUA 模式：think 工具执行后标记任务解析完成 ──
+        if (mode == AgentMode.cua && toolCall.name == 'think') {
+          cuaTaskParsed = true;
+          debugPrint('✅ [Agent] CUA 任务解析已完成（think 工具已执行）');
+        }
 
         // ── 多模态截图嵌入：将截图作为图片直接注入对话 ──
         if (embedScreenshotImages && isScreenshot) {
@@ -607,6 +687,43 @@ class AgentLoop {
             };
             workingMessages.add(imageMsg);
             debugPrint('📸 已将 ${imageType ?? 'screenshot'} 嵌入对话消息（${b64.length} 字符 base64）');
+          }
+        }
+
+        // ── CUA 任务完成信号检测 ──
+        // 完成信号区分：
+        // 【强信号 - 整个任务完成】：
+        //   - data['done'] = true（cua_step 明确返回完成）
+        //   - data['screenStatus'] = 'Done'（VLM 判定整个屏幕状态为完成，全局视角）
+        // 【弱信号 - 子任务完成】：
+        //   - data['suggestion']['action'] = 'done'（VLM 建议下一步是完成，子任务视角）
+        //   - ⚠️ 这只代表当前步骤完成，不代表整个任务完成，不触发 cuaTaskDone
+        if (mode == AgentMode.cua && toolCall.name == 'cua' && !result.isError && result.data != null) {
+          final data = result.data!;
+          final screenStatus = data['screenStatus'] as String?;
+          final isDone = data['done'] as bool?;
+
+          // ── 任务进度追踪 ──
+          final taskProgress = data['taskProgress'] as Map<String, dynamic>?;
+          if (taskProgress != null) {
+            cuaTaskProgress = taskProgress['currentStep'] as String? ?? '';
+            cuaCompletionPercentage = taskProgress['completionPercentage'] as int? ?? 0;
+            debugPrint('📊 [Agent] CUA 任务进度: $cuaTaskProgress (${cuaCompletionPercentage}%)');
+          }
+
+          // 只检测强信号
+          final isTaskDone = screenStatus?.toLowerCase() == 'done' || isDone == true;
+
+          if (isTaskDone) {
+            cuaTaskDone = true;
+            debugPrint('🎯 [Agent] CUA 任务完成（强信号）: screenStatus=$screenStatus, done=$isDone');
+          } else {
+            // 检查弱信号，打印提示
+            final suggestion = data['suggestion'] as Map<String, dynamic>?;
+            final suggestionAction = suggestion?['action'] as String?;
+            if (suggestionAction?.toLowerCase() == 'done') {
+              debugPrint('ℹ️ [Agent] VLM 建议 action=done（子任务完成），但 screenStatus=$screenStatus，继续执行');
+            }
           }
         }
 
@@ -663,17 +780,27 @@ class AgentLoop {
       }
       deferredHookMessages.clear();
 
-      // ── CUA 模式防护：只思考不操作时强制提醒 ──
+      // ── CUA 模式防护：只思考不操作时强制提醒（任务完成除外） ──
       if (mode == AgentMode.cua) {
-        final hasCua = response.toolCalls.any((tc) => tc.name == 'cua');
-        if (!hasCua) {
-          debugPrint('⚠️ [Agent] CUA 模式本轮只有 think，无 cua 操作 → 注入强制提醒');
+        if (cuaTaskDone) {
+          // 任务已完成，注入完成提示引导 LLM 输出总结
+          debugPrint('🎯 [Agent] CUA 任务已完成，注入完成提示');
           workingMessages.add({
             'role': 'user',
-            'content': '【系统强制提醒】你处于 CUA 模式，必须通过 cua(action=...) 工具执行实际操作。'
-                '思考（think）只是准备阶段，不能代替操作。请立即调用 cua 工具执行你的下一步操作。'
-                '可选 action: screenshot(截图)、mouse_click(点击)、key_type(输入)、key_combo(快捷键)、open_app(打开应用)、get_ui_tree(获取UI树)。',
+            'content': '【系统提示】cua_observe 已确认任务目标达成（screenStatus=Done）。'
+                '请直接输出简短的任务完成总结，不要再调用任何工具。',
           });
+        } else {
+          final hasCua = response.toolCalls.any((tc) => tc.name == 'cua');
+          if (!hasCua) {
+            debugPrint('⚠️ [Agent] CUA 模式本轮只有 think，无 cua 操作 → 注入强制提醒');
+            workingMessages.add({
+              'role': 'user',
+              'content': '【系统强制提醒】你处于 CUA 模式，必须通过 cua(action=...) 工具执行实际操作。'
+                  '思考（think）只是决策阶段，不能代替操作。请调用 cua(action="cua_observe") 观察屏幕，然后执行操作。'
+                  '⛔ 需要点击时必须先 find_element 定位，再 mouse_click（坐标不匹配会被系统拦截）。',
+            });
+          }
         }
       }
 
@@ -1197,8 +1324,8 @@ $toolsInfo
         return '拖拽(${args['x']},${args['y']})→(${args['target_x']},${args['target_y']})';
       case 'open_app':
         return '打开${args['app_name'] ?? ''}';
-      case 'get_ui_tree':
-        return 'UI树';
+      case 'find_element':
+        return '查找元素: ${args['query'] ?? ''}';
       default:
         return action;
     }

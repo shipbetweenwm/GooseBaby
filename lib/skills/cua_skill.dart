@@ -12,10 +12,12 @@ library;
 import 'dart:convert';
 import 'dart:ffi';
 import 'dart:io';
+import 'dart:math' show max;
 import 'package:ffi/ffi.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:path/path.dart' as p;
+import '../ai/llm_manager.dart';
 import 'skill_base.dart';
 import 'skill_file_utils.dart';
 import 'cua_accessibility.dart';
@@ -74,13 +76,15 @@ typedef CGEventCreateMouseEventDart = Pointer<Void> Function(Pointer<Void>, int,
 typedef CGEventCreateScrollWheelEventNat = Pointer<Void> Function(Pointer<Void>, Uint32, Int32, Int32, Int32, Int32);
 typedef CGEventCreateScrollWheelEventDart = Pointer<Void> Function(Pointer<Void>, int, int, int, int, int);
 
-typedef CGEventKeyboardSetUnicodeStringNat = Void Function(Pointer<Void>, Uint16, Pointer<Void>);
-typedef CGEventKeyboardSetUnicodeStringDart = void Function(Pointer<Void>, int, Pointer<Void>);
-
 // CGEventSetString — CGEventKeyboardSetUnicodeString 的现代替代 (macOS 10.11+)
 // 接受 CFStringRef (const char*)，比手动构造 UTF-16 buffer 更可靠
 typedef CGEventSetStringNat = Void Function(Pointer<Void>, Pointer<Void>);
 typedef CGEventSetStringDart = void Function(Pointer<Void>, Pointer<Void>);
+
+// CGEventSourceGetLocation — 获取当前鼠标位置
+// CGPoint = (Double x, Double y)
+typedef CGEventSourceGetLocationNat = Void Function(Int32, Pointer<Double>);
+typedef CGEventSourceGetLocationDart = void Function(int, Pointer<Double>);
 
 class _MacOSNative {
   static DynamicLibrary? _lib;
@@ -110,11 +114,11 @@ class _MacOSNative {
   static CGEventCreateScrollWheelEventDart get _cgEventCreateScrollWheelEvent =>
       lib.lookupFunction<CGEventCreateScrollWheelEventNat, CGEventCreateScrollWheelEventDart>('CGEventCreateScrollWheelEvent');
 
-  static CGEventKeyboardSetUnicodeStringDart get _cgEventKeyboardSetUnicodeString =>
-      lib.lookupFunction<CGEventKeyboardSetUnicodeStringNat, CGEventKeyboardSetUnicodeStringDart>('CGEventKeyboardSetUnicodeString');
-
   static CGEventSetStringDart get _cgEventSetString =>
       lib.lookupFunction<CGEventSetStringNat, CGEventSetStringDart>('CGEventSetString');
+
+  static CGEventSourceGetLocationDart get _cgEventSourceGetLocation =>
+      lib.lookupFunction<CGEventSourceGetLocationNat, CGEventSourceGetLocationDart>('CGEventSourceGetLocation');
 
   // AXIsProcessTrusted — 检查应用是否有辅助功能权限
   static final _axIsProcessTrusted = _appKitLib.lookupFunction<
@@ -128,6 +132,21 @@ class _MacOSNative {
   static void ensureTrusted() {
     if (!isTrusted()) {
       throw StateError('缺少辅助功能权限');
+    }
+  }
+
+  /// 获取当前鼠标位置（屏幕逻辑坐标）
+  static (int, int)? getMousePosition() {
+    try {
+      final ptr = calloc<Double>(2);
+      _cgEventSourceGetLocation(_kCGEventSourceStateHIDSystemState, ptr);
+      final x = ptr[0].round();
+      final y = ptr[1].round();
+      calloc.free(ptr);
+      return (x, y);
+    } catch (e) {
+      debugPrint('⚠️ 获取鼠标位置失败: $e');
+      return null;
     }
   }
 
@@ -279,10 +298,114 @@ String _parseMainKey(String keys) {
   return keys.toLowerCase().split('+').last.trim();
 }
 
+/// find_element 坐标缓存项
+class _FindElementCoord {
+  final int cx;
+  final int cy;
+  final String query;
+  final DateTime timestamp;
+  _FindElementCoord({required this.cx, required this.cy, required this.query, required this.timestamp});
+}
+
+/// 根据元素类型智能计算点击位置
+/// 
+/// 不同 UI 组件的最佳点击位置不同：
+/// - 输入框：左侧 20%，方便光标定位
+/// - 下拉框：右侧 75%，点击下拉箭头区域
+/// - 复选框/单选框：左侧 15%，点击实际框体
+/// - 列表项：左侧 15%，避开右侧操作按钮
+/// - 其他：中心点
+Map<String, dynamic> _getSmartClickPosition({
+  required String elemType,
+  required int x1,
+  required int y1,
+  required int x2,
+  required int y2,
+}) {
+  final w = x2 - x1;
+  final h = y2 - y1;
+  
+  // 默认中心点
+  int cx = ((x1 + x2) / 2).round();
+  int cy = ((y1 + y2) / 2).round();
+  String? desc;
+  
+  // 标准化元素类型
+  final type = elemType.toLowerCase();
+  
+  // 根据类型智能调整
+  if (type.contains('input') || type.contains('text') || type.contains('search') || type.contains('field')) {
+    // 输入框、搜索框：左侧 20%
+    cx = (x1 + w * 0.2).round();
+    cy = ((y1 + y2) / 2).round();
+    desc = '[输入框: 左偏20%]';
+    
+  } else if (type.contains('dropdown') || type.contains('select') || type.contains('combo')) {
+    // 下拉框、选择框：右侧 75%（下拉箭头区域）
+    cx = (x1 + w * 0.75).round();
+    cy = ((y1 + y2) / 2).round();
+    desc = '[下拉框: 右偏75%]';
+    
+  } else if (type.contains('check') || type.contains('radio') || type.contains('toggle')) {
+    // 复选框、单选框、开关：左侧 15%（点击实际框体）
+    cx = (x1 + w * 0.15).round();
+    cy = ((y1 + y2) / 2).round();
+    desc = '[复选框: 左偏15%]';
+    
+  } else if (type.contains('list') || type.contains('menu') || type.contains('item')) {
+    // 列表项、菜单项：左侧 15%，避开右侧操作按钮
+    cx = (x1 + w * 0.15).round();
+    cy = ((y1 + y2) / 2).round();
+    desc = '[列表项: 左偏15%]';
+    
+  } else if (type.contains('slider')) {
+    // 滑块：左侧 10%（起点）
+    cx = (x1 + w * 0.1).round();
+    cy = ((y1 + y2) / 2).round();
+    desc = '[滑块: 左偏10%]';
+    
+  } else if (type.contains('tab')) {
+    // 标签页：水平中心 + 垂直偏上 40%
+    cx = ((x1 + x2) / 2).round();
+    cy = (y1 + h * 0.4).round();
+    desc = '[标签页: 中上40%]';
+    
+  } else if (type.contains('icon') || type.contains('button')) {
+    // 图标按钮、按钮：中心点
+    cx = ((x1 + x2) / 2).round();
+    cy = ((y1 + y2) / 2).round();
+    desc = '[按钮: 中心点]';
+    
+  } else {
+    // 默认：中心点
+    desc = '[默认: 中心点]';
+  }
+  
+  return {
+    'cx': cx,
+    'cy': cy,
+    'desc': desc,
+  };
+}
+
 /// CUA 技能 — 视觉感知 + 操作模拟
 class CuaSkill extends GooseSkill {
   /// 缓存 cliclick 可执行文件路径（macOS GUI 应用的 PATH 可能不包含 /opt/homebrew/bin）
   static String? _cliclickPath;
+
+  /// LLM 管理器（运行时注入，用于视觉分析）
+  LLMManager? _llmManager;
+
+  /// 注入 LLM 管理器
+  void setLLMManager(LLMManager manager) => _llmManager = manager;
+
+  // ── find_element 坐标校验缓存 ──
+  // 记录最近一次 find_element 返回的有效坐标，用于校验 mouse_click 是否合法
+  static final List<_FindElementCoord> _recentFindCoords = [];
+  /// find_element 坐标的有效时效（秒）：超过此时间认为坐标过期
+  static const int _findCoordTtlSeconds = 60;
+  /// 坐标容差（屏幕逻辑像素）：mouse_click 坐标与 find_element 坐标偏差在此范围内认为匹配
+  static const int _coordTolerance = 80;
 
   /// 查找 cliclick 路径（仅在首次使用时检测）
   static Future<String?> _findCliclick() async {
@@ -332,18 +455,6 @@ class CuaSkill extends GooseSkill {
 
   CuaSkill();
 
-  /// 将归一化坐标 (0~1000) 转换为屏幕像素坐标
-  /// 自动 clamp 超出范围的值并输出警告
-  static int _normalizedToPixel(int normalized, int screenSize, [String? hint]) {
-    if (normalized < 0 || normalized > 1000) {
-      debugPrint('⚠️ CUA 坐标越界: ${hint != null ? "$hint " : ""}$normalized 超出 0~1000 范围，自动 clamp');
-      normalized = normalized.clamp(0, 1000);
-    }
-    if (normalized <= 0) return 0;
-    if (normalized >= 1000) return screenSize;
-    return (normalized / 1000 * screenSize).round();
-  }
-
   @override
   String get id => 'cua';
 
@@ -352,17 +463,21 @@ class CuaSkill extends GooseSkill {
 
   @override
   String get description =>
-      'Computer Use Agent — 像人一样操作计算机。'
-      '通过截图感知屏幕，通过模拟鼠标/键盘操控 UI。'
-      '【视觉感知】screenshot: 截取屏幕截图（返回 base64 图片，并自动分析屏幕内容，描述可见的 UI 元素和文字）。'
-      '【UI 树解析】get_ui_tree: 通过系统 Accessibility API 读取当前应用的 UI 元素树，基于文本/类型/层级精准定位，无需猜坐标。'
-      '【应用操作】open_app: 直接打开应用程序（推荐，比 Spotlight 更快）。'
-      '【鼠标操作】mouse_click: 点击指定坐标（操作后自动截图确认）; mouse_move: 移动鼠标; '
-      'mouse_scroll: 滚动鼠标（操作后自动截图确认）; mouse_drag: 拖拽操作（操作后自动截图确认）。'
-      '【键盘操作】key_type: 输入文本（操作后自动截图确认）; key_combo: 按下快捷键组合（操作后自动截图确认）。'
-      '【任务管理】get_history: 查看历史操作记录; resume_task: 恢复中断的任务; export_task: 导出操作报告。'
-      '【坐标系统】虚拟坐标 X/Y 0~1000，左上角(0,0)，右下角(1000,1000)。X 对应屏幕宽度，Y 对应屏幕高度，各自独立映射。'
-      '【自适应等待】所有操作后根据操作类型自动等待不同时间（点击500ms、滚动200ms、输入后100ms、打开应用2000ms），并在等待后自动截图确认结果。';
+      'Computer Use Agent — 像人一样操作计算机。\n\n'
+      '【核心工作流】\n'
+      '1. cua_observe: 观察当前屏幕（截图 + 状态分析），返回当前应用、状态描述、关键元素\n'
+      '2. find_element: 根据描述定位 UI 元素，返回屏幕坐标\n'
+      '3. mouse_click/key_type: 执行操作\n'
+      '4. cua_step: 一键循环（自动完成观察→决策→执行）\n\n'
+      '【基础操作】\n'
+      '• screenshot: 截取屏幕\n'
+      '• mouse_click/move/scroll/drag: 鼠标操作\n'
+      '• key_type/key_combo: 键盘操作\n'
+      '• open_app: 打开应用\n\n'
+      '【任务管理】\n'
+      '• cua_plan: 规划任务步骤\n'
+      '• get_history: 查看操作历史\n\n'
+      '【坐标系统】屏幕逻辑坐标，左上角(0,0)';
 
   @override
   String get icon => '🖥️';
@@ -372,42 +487,55 @@ class CuaSkill extends GooseSkill {
 
   @override
   String get bestPractice =>
-      '1. 所有坐标归一化到 0~1000，左上角 (0,0)，右下角 (1000,1000)\n'
-      '2. mouse_click/mouse_move/mouse_drag 操作后自动截图确认，无需手动再调 screenshot\n'
-      '3. mouse_click 支持 left/right/middle 三种按键\n'
-      '4. key_combo 示例: "cmd+c"(复制), "ctrl+shift+i"(开发者工具), "alt+tab"(切换窗口)\n'
-      '5. 输入文本前务必先 mouse_click 点击输入框使其获得焦点\n'
-      '6. 打开应用优先使用 open_app，比通过 Spotlight 操作更可靠\n'
-      '7. get_ui_tree 可补充截图看不清的情况（小文字、低对比度）\n'
-      '8. 操作某个应用前，务必先调用 open_app 确保该应用在前台，然后再截图和操作\n'
-      '9. 截图后会显示前台应用名称和 SOM 标记数量，如果前台应用不是目标应用，先切换\n';
+      '【推荐工作流】\n'
+      '1. 先用 cua_observe 观察当前屏幕状态\n'
+      '2. 用 find_element 定位目标元素\n'
+      '3. 执行 mouse_click 或 key_type 操作\n'
+      '4. 重复以上步骤直到任务完成\n\n'
+      '【坐标注意】\n'
+      '• 所有坐标使用屏幕逻辑坐标\n'
+      '• find_element 返回的坐标可直接用于 mouse_click\n\n'
+      '【操作建议】\n'
+      '• 输入文本前先点击输入框获得焦点\n'
+      '• 输入完成后可用 key_combo "enter" 提交/发送/确认\n'
+      '• 打开应用推荐用 Spotlight（cmd+space → 输入应用名 → 回车），比 open_app 更可靠\n'
+      '• key_combo 支持单独按键: "enter", "tab", "escape", "backspace"\n'
+      '• key_combo 支持组合键: "cmd+c", "ctrl+shift+i", "alt+tab", "cmd+shift+enter"\n';
 
   @override
   List<SkillParam> get params => [
     const SkillParam(
       name: 'action',
       description: '操作类型:\n'
-          '- cua_plan: Planner 子任务分解 — 将复杂任务分解为多个子任务步骤\n'
-          '- set_subtask_status: 更新子任务状态（开始/完成/失败/跳过）\n'
-          '- screenshot: 截取屏幕截图\n'
-          '- get_ui_tree: 读取 UI 元素树（Accessibility API，精准定位）\n'
-          '- mouse_click: 鼠标点击（自动截图确认）\n'
+          '【核心工作流】\n'
+          '- cua_observe: 观察当前屏幕（截图 + 状态分析）\n'
+          '- cua_step: 一键循环（观察→决策→执行）\n'
+          '- find_element: 查找 UI 元素位置\n'
+          '【基础操作】\n'
+          '- screenshot: 截取屏幕\n'
+          '- mouse_click: 鼠标点击\n'
           '- mouse_move: 移动鼠标\n'
-          '- mouse_scroll: 鼠标滚轮滚动（自动截图确认）\n'
-          '- mouse_drag: 鼠标拖拽（自动截图确认）\n'
-          '- key_type: 键盘输入文本（自动截图确认）\n'
-          '- key_combo: 键盘快捷键组合（自动截图确认）\n'
-          '- open_app: 直接打开应用程序（自动截图确认）\n'
-          '- get_history: 查看历史操作记录\n'
-          '- resume_task: 恢复中断的任务（传入 task_id）\n'
-          '- export_task: 导出操作报告（传入 task_id）',
+          '- mouse_scroll: 滚动\n'
+          '- mouse_drag: 拖拽\n'
+          '- key_type: 输入文本\n'
+          '- key_combo: 快捷键\n'
+          '- open_app: 打开应用\n'
+          '- wait: 等待页面/应用加载（等待指定秒数后重新截图）\n'
+          '【任务管理】\n'
+          '- cua_plan: 规划任务步骤\n'
+          '- get_history: 查看操作历史',
       type: 'enum',
       required: true,
-      enumValues: ['cua_plan', 'set_subtask_status', 'screenshot', 'get_ui_tree', 'mouse_click', 'mouse_move', 'mouse_scroll', 'mouse_drag', 'key_type', 'key_combo', 'open_app', 'get_history', 'resume_task', 'export_task'],
+      enumValues: [
+        'cua_observe', 'cua_step', 'find_element',
+        'screenshot', 'mouse_click', 'mouse_move', 'mouse_scroll', 'mouse_drag',
+        'key_type', 'key_combo', 'open_app', 'wait',
+        'cua_plan', 'get_history',
+      ],
     ),
     const SkillParam(
       name: 'x',
-      description: 'X 坐标，0~1000（0=最左，1000=最右）。mouse_click/mouse_move/mouse_drag 时必填。',
+      description: 'X 坐标（屏幕逻辑坐标，和 find_element 返回值一致）。mouse_click/mouse_move/mouse_drag 时必填。',
       type: 'int',
       required: false,
     ),
@@ -464,7 +592,15 @@ class CuaSkill extends GooseSkill {
     ),
     const SkillParam(
       name: 'keys',
-      description: '快捷键组合，用 + 连接。示例: "cmd+c", "ctrl+shift+i", "alt+tab"。仅 key_combo 时必填。',
+      description: '快捷键组合，用 + 连接。仅 key_combo 时必填。\n'
+          '【常用快捷键】\n'
+          '• 输入框操作: "enter"(提交/发送/确认/换行), "tab"(切换焦点/下一个字段), "escape"(取消/关闭)\n'
+          '• 文本编辑: "cmd+a"(全选), "cmd+c"(复制), "cmd+v"(粘贴), "cmd+x"(剪切), "cmd+z"(撤销), "cmd+shift+z"(重做)\n'
+          '• 应用切换: "cmd+tab"(切换应用), "cmd+space"(Spotlight搜索), "alt+tab"(Windows切换窗口)\n'
+          '• 窗口管理: "cmd+w"(关闭标签/窗口), "cmd+q"(退出应用), "cmd+n"(新建窗口), "cmd+t"(新建标签)\n'
+          '• 导航: "cmd+l"(聚焦地址栏), "cmd+f"(查找), "up"/"down"/"left"/"right"(方向键)\n'
+          '• 单独按键也支持: "enter", "tab", "escape", "space", "backspace", "delete", "up", "down", "left", "right", "f1"~"f12"\n'
+          '• 示例: "cmd+c", "ctrl+shift+i", "alt+tab", "enter", "cmd+shift+enter"',
       type: 'string',
       required: false,
     ),
@@ -485,23 +621,32 @@ class CuaSkill extends GooseSkill {
       defaultValue: 1,
     ),
     const SkillParam(
-      name: 'app_filter',
-      description: '应用过滤名称（仅 get_ui_tree 使用）。只返回匹配此名称的应用 UI 树。',
+      name: 'query',
+      description: '要查找的 UI 元素描述（仅 find_element 使用）。示例: "发送按钮", "搜索输入框"。',
       type: 'string',
       required: false,
     ),
     const SkillParam(
-      name: 'max_depth',
-      description: 'UI 树最大解析深度（仅 get_ui_tree 使用，默认 6，最大 10）。',
+      name: 'duration',
+      description: '等待秒数（仅 wait 使用）。默认 2 秒，最大 10 秒。'
+          '等待期间会监测屏幕变化，页面稳定后立即截图返回。',
       type: 'int',
       required: false,
-      defaultValue: 6,
+      defaultValue: 2,
     ),
     const SkillParam(
-      name: 'task_id',
-      description: '任务 ID（仅 resume_task/export_task 使用）。从 get_history 获取。',
+      name: 'task_goal',
+      description: '任务目标描述（仅 cua_observe/cua_step 使用）。用于提供上下文，帮助 VLM 更好地理解当前状态。'
+          '示例: "在微信中发送消息给文件传输助手"',
       type: 'string',
       required: false,
+    ),
+    const SkillParam(
+      name: 'auto_execute',
+      description: '是否自动执行建议的操作（仅 cua_step 使用）。默认 false，只返回建议。',
+      type: 'bool',
+      required: false,
+      defaultValue: false,
     ),
     const SkillParam(
       name: 'subtasks',
@@ -523,53 +668,104 @@ class CuaSkill extends GooseSkill {
       required: false,
       enumValues: ['running', 'completed', 'failed', 'skipped'],
     ),
+    const SkillParam(
+      name: 'query',
+      description: '要查找的 UI 元素描述（仅 find_element 使用）。中英文均可，如 "搜索框"、"登录按钮"、"settings menu"。',
+      type: 'string',
+      required: false,
+    ),
+    const SkillParam(
+      name: 'purpose',
+      description: '操作目的说明。例如：点击搜索框、输入用户名、打开设置页面等。用于生成清晰的意图描述。',
+      type: 'string',
+      required: false,
+    ),
+    const SkillParam(
+      name: 'expected_outcome',
+      description: '期望的操作结果（可选）。用于智能分析操作是否成功。'
+          '示例: "搜索框获得焦点并显示光标"、"微信应用窗口出现在前台"。',
+      type: 'string',
+      required: false,
+    ),
+    const SkillParam(
+      name: 'task_context',
+      description: '当前任务的上下文描述（可选）。用于智能分析下一步操作建议。'
+          '示例: "在微信中搜索文件传输助手并发送消息"、"打开设置并修改主题为深色模式"。',
+      type: 'string',
+      required: false,
+    ),
   ];
 
   @override
   List<SkillExample> get examples => const [
+    // ═══════════════════════════════════════════
+    // 核心工作流程
+    // ═══════════════════════════════════════════
     SkillExample(
-      scenario: '截取屏幕观察当前状态',
+      scenario: '【核心】观察当前屏幕状态（截图+分析）',
+      argsJson: '{"action": "cua_observe", "task_goal": "在微信中发送消息给文件传输助手"}',
+    ),
+    SkillExample(
+      scenario: '【核心】一键执行完整循环（观察+决策+执行）',
+      argsJson: '{"action": "cua_step", "task_goal": "打开微信并发消息", "auto_execute": true}',
+    ),
+    SkillExample(
+      scenario: '【核心】查找 UI 元素位置',
+      argsJson: '{"action": "find_element", "query": "发送按钮"}',
+    ),
+    // ═══════════════════════════════════════════
+    // 基础操作
+    // ═══════════════════════════════════════════
+    SkillExample(
+      scenario: '截取屏幕',
       argsJson: '{"action": "screenshot"}',
     ),
     SkillExample(
-      scenario: '点击屏幕指定位置（归一化坐标）',
+      scenario: '点击屏幕指定位置',
       argsJson: '{"action": "mouse_click", "x": 500, "y": 300}',
     ),
     SkillExample(
-      scenario: '双击打开文件（屏幕右上方）',
+      scenario: '双击打开文件',
       argsJson: '{"action": "mouse_click", "x": 200, "y": 150, "clicks": 2}',
     ),
     SkillExample(
-      scenario: '输入文本到输入框',
+      scenario: '输入文本',
       argsJson: '{"action": "key_type", "text": "Hello World"}',
     ),
     SkillExample(
-      scenario: '按下 Ctrl+C 复制',
-      argsJson: '{"action": "key_combo", "keys": "ctrl+c"}',
+      scenario: '快捷键复制',
+      argsJson: '{"action": "key_combo", "keys": "cmd+c"}',
     ),
     SkillExample(
-      scenario: '直接打开微信应用',
+      scenario: '输入框按回车提交/发送',
+      argsJson: '{"action": "key_combo", "keys": "enter"}',
+    ),
+    SkillExample(
+      scenario: '全选文本',
+      argsJson: '{"action": "key_combo", "keys": "cmd+a"}',
+    ),
+    SkillExample(
+      scenario: '按 Tab 切换到下一个输入框',
+      argsJson: '{"action": "key_combo", "keys": "tab"}',
+    ),
+    SkillExample(
+      scenario: '按 Escape 关闭弹窗/取消',
+      argsJson: '{"action": "key_combo", "keys": "escape"}',
+    ),
+    SkillExample(
+      scenario: '打开应用',
       argsJson: '{"action": "open_app", "app_name": "微信"}',
     ),
+    // ═══════════════════════════════════════════
+    // 任务管理
+    // ═══════════════════════════════════════════
     SkillExample(
-      scenario: '直接打开 Safari 浏览器',
-      argsJson: '{"action": "open_app", "app_name": "Safari"}',
+      scenario: '规划任务步骤',
+      argsJson: '{"action": "cua_plan", "subtasks": "[{\\"description\\": \\"打开微信\\"}, {\\"description\\": \\"搜索联系人\\"}]"}',
     ),
     SkillExample(
-      scenario: '读取当前应用的 UI 元素树（精准定位）',
-      argsJson: '{"action": "get_ui_tree"}',
-    ),
-    SkillExample(
-      scenario: '读取指定应用的 UI 元素树',
-      argsJson: '{"action": "get_ui_tree", "app_filter": "Safari", "max_depth": 8}',
-    ),
-    SkillExample(
-      scenario: '查看历史操作记录',
+      scenario: '查看操作历史',
       argsJson: '{"action": "get_history"}',
-    ),
-    SkillExample(
-      scenario: '恢复中断的任务',
-      argsJson: '{"action": "resume_task", "task_id": "cua_1234567890"}',
     ),
   ];
 
@@ -585,10 +781,14 @@ class CuaSkill extends GooseSkill {
           return await _cuaPlan(args);
         case 'set_subtask_status':
           return await _setSubTaskStatus(args);
+        case 'cua_observe':
+          return await _cuaObserve(args);
+        case 'cua_step':
+          return await _cuaStep(args);
         case 'screenshot':
           result = await _takeScreenshot(args);
-        case 'get_ui_tree':
-          result = await _getUiTree(args);
+        case 'find_element':
+          return await _findElement(args);
         case 'mouse_click':
           result = await _mouseClick(args);
         case 'mouse_move':
@@ -603,6 +803,8 @@ class CuaSkill extends GooseSkill {
           result = await _keyCombo(args);
         case 'open_app':
           result = await _openApp(args);
+        case 'wait':
+          result = await _waitAction(args);
         case 'get_history':
           return await _getHistory();
         case 'resume_task':
@@ -611,8 +813,8 @@ class CuaSkill extends GooseSkill {
           return await _exportTask(args);
         default:
           return SkillResult.fail('未知的 CUA 操作类型: $action。'
-              '支持: cua_plan, set_subtask_status, screenshot, get_ui_tree, mouse_click, '
-              'mouse_move, mouse_scroll, mouse_drag, key_type, key_combo, open_app, '
+              '支持: cua_plan, set_subtask_status, screenshot, mouse_click, '
+              'mouse_move, mouse_scroll, mouse_drag, key_type, key_combo, open_app, wait, '
               'get_history, resume_task, export_task');
       }
 
@@ -650,7 +852,7 @@ class CuaSkill extends GooseSkill {
       case 'mouse_drag':
         return const Duration(milliseconds: 200);
       case 'open_app':
-        return const Duration(milliseconds: 800);
+        return const Duration(milliseconds: 1500);
       default:
         return const Duration(milliseconds: 300);
     }
@@ -672,7 +874,7 @@ class CuaSkill extends GooseSkill {
 
     // 比较头部和尾部数据块（JPEG header + 尾部区域）
     // 完整比较太慢，抽样比较即可
-    final sampleCount = 200;
+    const sampleCount = 200;
     final step = (base64A.length / sampleCount).ceil();
     var matchCount = 0;
 
@@ -684,33 +886,61 @@ class CuaSkill extends GooseSkill {
   }
 
   /// 等待 UI 响应后截图确认（所有操作统一调用）
-  /// 改进：对高延迟操作进行截图变化检测，屏幕稳定后再截图
-  Future<Map<String, dynamic>?> _waitForChangeAndScreenshot(String action) async {
+  /// 双阶段变化检测：① 等屏幕开始变化 → ② 等屏幕稳定（不再变化）再截图
+  /// 解决：应用/页面加载慢时截图过早的问题
+  Future<Map<String, dynamic>?> _waitForChangeAndScreenshot(
+    String action, {
+    String? expectedOutcome,
+    String? taskContext,
+  }) async {
     final baseWait = _adaptiveWaitForAction(action);
     await Future.delayed(baseWait);
 
-    // 对高延迟操作，进行变化检测：等待屏幕稳定
+    // 对高延迟操作，进行双阶段变化检测
     if (_needsChangeDetection(action) && _lastScreenshotBase64 != null) {
-      final maxRetries = 5;
-      final retryInterval = const Duration(milliseconds: 200);
+      // ── 阶段1：等待屏幕开始变化 ──
+      const maxWaitForChange = 8; // 最多等 8 次 × 250ms = 2秒
+      const waitInterval = Duration(milliseconds: 250);
+      String? changedShot;
 
-      for (var attempt = 0; attempt < maxRetries; attempt++) {
-        // 快速截图（不保存文件，只获取 base64）
+      for (var attempt = 0; attempt < maxWaitForChange; attempt++) {
         final quickShot = await _quickScreenshot();
         if (quickShot == null) break;
 
         final similarity = _computeScreenshotSimilarity(_lastScreenshotBase64!, quickShot);
-        debugPrint('🔍 变化检测: attempt=$attempt similarity=${similarity.toStringAsFixed(2)}');
+        debugPrint('🔍 变化检测(等变化): attempt=$attempt similarity=${similarity.toStringAsFixed(2)}');
 
         if (similarity < 0.95) {
-          // 屏幕已变化，等待一小段时间让动画完成
-          await Future.delayed(const Duration(milliseconds: 200));
+          changedShot = quickShot;
+          debugPrint('🔍 检测到屏幕变化，进入稳定等待...');
           break;
         }
 
-        // 屏幕未变化，继续等待
-        if (attempt < maxRetries - 1) {
-          await Future.delayed(retryInterval);
+        if (attempt < maxWaitForChange - 1) {
+          await Future.delayed(waitInterval);
+        }
+      }
+
+      // ── 阶段2：等待屏幕稳定（不再变化） ──
+      if (changedShot != null) {
+        const maxWaitForStable = 10; // 最多等 10 次 × 300ms = 3秒
+        const stableInterval = Duration(milliseconds: 300);
+        var previousShot = changedShot;
+
+        for (var attempt = 0; attempt < maxWaitForStable; attempt++) {
+          await Future.delayed(stableInterval);
+          final quickShot = await _quickScreenshot();
+          if (quickShot == null) break;
+
+          final similarity = _computeScreenshotSimilarity(previousShot, quickShot);
+
+          if (similarity > 0.97) {
+            // 连续两帧相似度很高，认为屏幕已稳定
+            debugPrint('✅ 屏幕已稳定');
+            break;
+          }
+
+          previousShot = quickShot;
         }
       }
     }
@@ -718,8 +948,538 @@ class CuaSkill extends GooseSkill {
     final result = await _takeScreenshotForConfirm();
     if (result != null) {
       _lastScreenshotBase64 = result['base64'] as String?;
+      
+      // 智能分析截图（如果有期望结果或任务上下文）
+      if (expectedOutcome != null || taskContext != null) {
+        final analysis = await _analyzeScreenshotWithVlm(
+          result['base64'] as String,
+          action: action,
+          expectedOutcome: expectedOutcome,
+          taskContext: taskContext,
+        );
+        if (analysis != null) {
+          result['analysis'] = analysis;
+        }
+      }
     }
     return result;
+  }
+
+  /// 使用 VLM 智能分析截图
+  /// 判断操作是否成功，并给出下一步建议
+  Future<Map<String, dynamic>?> _analyzeScreenshotWithVlm(
+    String imageBase64, {
+    required String action,
+    String? expectedOutcome,
+    String? taskContext,
+  }) async {
+    // 检查是否注入了 LLMManager
+    if (_llmManager == null) {
+      debugPrint('⚠️ CUA: LLMManager 未注入，跳过智能分析');
+      return null;
+    }
+
+    // 检查是否配置了视觉模型
+    final visionProvider = _llmManager!.currentConfig.visionProvider;
+    final visionModel = _llmManager!.currentConfig.visionModel;
+    if (visionProvider == null || visionProvider.isEmpty || 
+        visionModel == null || visionModel.isEmpty) {
+      debugPrint('⚠️ CUA: 未配置视觉模型，跳过智能分析');
+      return null;
+    }
+
+    debugPrint('🤖 VLM 智能分析截图 ($visionProvider / $visionModel)...');
+
+    final prompt = '''You are a UI automation analyst. Analyze the screenshot to:
+1. Determine if the last operation was successful
+2. Describe the current screen state
+3. Suggest the next action to accomplish the user's goal
+
+Be concise and practical. Focus on actionable insights.
+
+${taskContext != null ? '任务目标: $taskContext' : ''}
+刚执行的操作: $action
+${expectedOutcome != null ? '期望结果: $expectedOutcome' : ''}
+
+请分析当前截图，返回 JSON 格式:
+{
+  "success": true/false,
+  "successReason": "为什么判断成功/失败",
+  "screenDescription": "当前屏幕状态描述（1-2句话）",
+  "keyElements": ["可见的关键UI元素列表"],
+  "nextAction": {
+    "action": "建议的下一步操作类型 (mouse_click/key_type/key_combo/find_element等)",
+    "reason": "为什么建议这个操作",
+    "params": {操作参数，如 x, y, text 等}
+  },
+  "blockers": ["阻碍任务完成的问题，如弹窗、错误提示等"],
+  "confidence": 0.0-1.0
+}
+
+如果操作成功，直接给出下一步建议。
+如果操作失败，说明失败原因并给出重试或替代方案。
+只返回 JSON，不要其他文字。''';
+
+    try {
+      final response = await _llmManager!.analyzeScreenshot(
+        base64Image: imageBase64,
+        mimeType: 'image/jpeg',
+        prompt: prompt,
+      );
+
+      if (response == null || response.isEmpty) {
+        debugPrint('⚠️ VLM 分析返回空结果');
+        return null;
+      }
+
+      // 解析 JSON
+      final jsonMatch = RegExp(r'\{[\s\S]*\}').firstMatch(response);
+      if (jsonMatch != null) {
+        final analysis = jsonDecode(jsonMatch.group(0)!) as Map<String, dynamic>;
+        debugPrint('🤖 分析结果: success=${analysis['success']}, nextAction=${analysis['nextAction']?['action']}');
+        return analysis;
+      }
+      
+      debugPrint('⚠️ VLM 分析结果无法解析为 JSON: ${response.substring(0, response.length.clamp(0, 200))}');
+      return null;
+    } catch (e) {
+      debugPrint('⚠️ VLM 分析失败: $e');
+      return null;
+    }
+  }
+
+  // ═══════════════════════════════════════════
+  // cua_observe: 观察 - 截图 + 状态分析
+  // ═══════════════════════════════════════════
+
+  /// 观察：截图并分析当前屏幕状态
+  /// 
+  /// 输入：
+  /// - task_goal: 任务目标（可选，用于提供上下文）
+  /// 
+  /// 输出：
+  /// - screenshot: 截图信息
+  /// - state: 当前状态描述
+  /// - elements: 关键 UI 元素列表
+  /// - suggestion: 下一步建议
+  Future<SkillResult> _cuaObserve(Map<String, dynamic> args) async {
+    final taskGoal = args['task_goal'] as String?;
+    debugPrint('👁️ CUA observe: taskGoal=$taskGoal');
+
+    // Step 1: 截图
+    final screenshotResult = await _takeScreenshot({});
+    if (!screenshotResult.success) {
+      return screenshotResult;
+    }
+
+    final screenshotData = screenshotResult.data!;
+    final base64 = screenshotData['base64'] as String;
+    final logicalW = screenshotData['width'] as int;
+    final logicalH = screenshotData['height'] as int;
+
+    // Step 2: 分析截图（需要 LLMManager）
+    if (_llmManager == null) {
+      return SkillResult.ok(
+        '✅ 截图成功（未配置视觉模型，跳过分析）\n'
+        '   分辨率: ${logicalW}x$logicalH',
+        data: {
+          ...screenshotData,
+          'state': '未分析',
+          'elements': [],
+          'suggestion': null,
+        },
+      );
+    }
+
+    final visionProvider = _llmManager!.currentConfig.visionProvider;
+    final visionModel = _llmManager!.currentConfig.visionModel;
+    if (visionProvider == null || visionProvider.isEmpty ||
+        visionModel == null || visionModel.isEmpty) {
+      return SkillResult.ok(
+        '✅ 截图成功（未配置视觉模型，跳过分析）\n'
+        '   分辨率: ${logicalW}x$logicalH',
+        data: {
+          ...screenshotData,
+          'state': '未分析',
+          'elements': [],
+          'suggestion': null,
+        },
+      );
+    }
+
+    debugPrint('🤖 VLM 分析屏幕状态 ($visionProvider / $visionModel)...');
+
+    final prompt = '''你是一个 macOS 桌面操作 Agent 的视觉分析模块。分析当前截图，返回结构化状态信息。
+
+## 观察重点（优先级最高！）
+1. **识别最上层应用**：首先确认当前前台应用是什么（appName）
+2. **验证应用是否正确**：
+   - 如果用户任务需要操作特定应用（如"打开微信..."），必须确认当前前台应用是否是目标应用
+   - ⚠️ 如果当前应用不是目标应用，建议先切换到目标应用（使用 Spotlight 或 open_app）
+   - ⛔ 绝对不要在错误的应用窗口中进行操作！
+3. **示例**：
+   - 任务"打开微信，发送消息" → 如果当前是 Finder/Chrome，必须先建议切换到微信
+   - 任务"打开网易云音乐..." → 如果当前是微信，必须先建议切换到网易云音乐
+
+${taskGoal != null ? '## 用户任务目标\n$taskGoal\n' : ''}
+## 任务进度追踪（重要！）
+分析当前屏幕状态，判断任务进度：
+- **currentStep**：当前正在执行的步骤（如"正在搜索联系人"）
+- **completedSteps**：已完成的步骤列表（如["打开微信", "进入搜索"]）
+- **remainingSteps**：剩余需要完成的步骤（如["输入消息", "发送消息"]）
+- **completionPercentage**：任务完成百分比（0-100）
+
+**示例判断：**
+- 任务"打开微信，搜索安琪，发送消息'今天天气真好'"
+- 当前在微信聊天界面，输入框为空 → currentStep="准备输入消息"，completionPercentage=60
+- 当前在微信聊天界面，右侧绿色气泡显示"今天天气真好" → currentStep="已完成"，completionPercentage=100，screenStatus="Done"
+
+## 坐标系
+所有坐标归一化到 0~1000。左上角 (0,0)，右下角 (1000,1000)。
+
+## 输出要求
+返回 JSON 格式：
+{
+  "appName": "当前前台应用名称",
+  "windowTitle": "窗口标题",
+  "state": "当前状态描述（1-2句话，如：微信聊天界面，正在查看文件传输助手的对话）",
+  "taskProgress": {
+    "currentStep": "当前步骤描述（如：正在搜索联系人）",
+    "completedSteps": ["已完成的步骤1", "已完成的步骤2"],
+    "remainingSteps": ["剩余步骤1", "剩余步骤2"],
+    "completionPercentage": 60
+  },
+  "screenStatus": "Ready / Loading / Error / LoginRequired / Done",
+  "keyElements": [
+    {"type": "button/input/link/text/icon", "label": "元素文本", "description": "功能描述", "approximate_position": "top-left/center/bottom-right 等大致位置"}
+  ],
+  "canProceed": true/false,
+  "blockers": ["阻碍任务的问题，如弹窗、登录要求（二维码/登陆框等）、错误提示等"],
+  "suggestion": {
+    "action": "click/type/scroll/wait/key_combo/open_app/done",
+    "target": "目标元素的文字描述（用于 find_element 查找）",
+    "detail": "具体操作说明（如要输入什么文字、按什么快捷键）",
+    "reason": "为什么建议这个操作"
+  }
+}
+
+## screenStatus 判断标准（最重要！）
+- **Ready**: 页面/应用已完全加载，可以进行操作（但任务可能未完成）
+- **Loading**: 有加载指示器（spinner、进度条）、启动画面、白屏、骨架屏、Dock 图标弹跳中
+  → suggestion.action 应为 "wait"，等待 2~5 秒
+- **Error**: 页面显示错误提示、崩溃信息、网络错误
+- **LoginRequired**: 需要登录才能继续
+- **Done**: ⚠️ **这是任务完成的唯一判定标准！**
+  - 当且仅当**完整任务目标已达成**时，screenStatus 必须设为 'Done'
+  - ⛔ 不要把子任务完成当成整个任务完成（如只打开了微信就判断 Done）
+  - ⛔ 如果任务还有后续步骤，screenStatus 必须是 'Ready'，不能是 'Done'
+  
+  ### 发送消息任务的完成判断（常见场景）：
+  必须同时满足以下条件才能判断为 Done：
+  1. **在正确的聊天窗口**：窗口标题/聊天对象名称匹配任务目标（如"安琪"、"安琪和减肥"）
+  2. **消息内容已发送**：
+     - 在聊天记录中看到任务要求发送的消息内容（如"今天天气真好"）
+     - ⚠️ 必须是**用户发送的消息**（右侧绿色气泡），不是对方的消息（左侧白色气泡）
+     - 消息有"已送达"/"已读"标记，或消息在对话记录中出现
+  3. **示例判断**：
+     - 任务："搜索安琪，发送'今天天气真好'" → 看到"今天天气真好"出现在右侧绿色气泡中 → Done ✅
+     - 任务同上，但看到"今天天气真好"在左侧白色气泡 → 是对方发送的，用户尚未发送 → Ready ❌
+
+## suggestion.action 判断标准
+- **done**: 当前步骤已完成，建议结束（⚠️ 这只是建议，不代表整个任务完成！）
+- **click**: 需要点击按钮/元素来完成任务
+- **type**: 需要输入文字
+- **key_combo**: 需要按快捷键（如 enter 发送消息）
+- **wait**: 页面加载中，需要等待
+
+## 最佳实践（优先级）
+1. **打开应用**：优先建议用 Spotlight，不要建议点击 Dock 图标
+   - 例如：打开微信 → key_combo("cmd+space") → key_type("微信") → key_combo("enter")
+   - 原因：Spotlight 不需要定位图标坐标，更可靠
+2. **输入框提交**：输入框输入文字后，优先建议 `key_combo("enter")` 发送，而不是点击发送按钮
+   - 例如：微信/QQ 聊天 → key_type("消息") → key_combo("enter")
+   - 原因：Enter 键更可靠，不需要定位按钮坐标
+
+⚠️ 关键区分：
+- screenStatus='Done'：整个任务完成（全局视角）→ 触发退出循环
+- suggestion.action='done'：当前步骤完成（子任务视角）→ 只是建议，可能还有后续步骤
+
+只返回 JSON，不要其他内容。''';
+
+    try {
+      final response = await _llmManager!.analyzeScreenshot(
+        base64Image: base64,
+        mimeType: 'image/jpeg',
+        prompt: prompt,
+      );
+
+      if (response == null || response.isEmpty) {
+        return SkillResult.ok(
+          '✅ 截图成功（VLM 分析返回空）\n'
+          '   分辨率: ${logicalW}x$logicalH',
+          data: {
+            ...screenshotData,
+            'state': '分析失败',
+            'elements': [],
+            'suggestion': null,
+          },
+        );
+      }
+
+      // 解析 JSON
+      final jsonMatch = RegExp(r'\{[\s\S]*\}').firstMatch(response);
+      if (jsonMatch == null) {
+        return SkillResult.ok(
+          '✅ 截图成功（VLM 分析格式错误）\n'
+          '   分辨率: ${logicalW}x$logicalH',
+          data: {
+            ...screenshotData,
+            'state': '分析格式错误',
+            'elements': [],
+            'suggestion': null,
+            'rawResponse': response,
+          },
+        );
+      }
+
+      final analysis = jsonDecode(jsonMatch.group(0)!) as Map<String, dynamic>;
+      final appName = analysis['appName'] as String? ?? '';
+      final state = analysis['state'] as String? ?? '';
+      final screenStatus = analysis['screenStatus'] as String? ?? 'Ready';
+      final keyElements = analysis['keyElements'] as List? ?? [];
+      final canProceed = analysis['canProceed'] as bool? ?? true;
+      final blockers = analysis['blockers'] as List? ?? [];
+      final suggestion = analysis['suggestion'] as Map<String, dynamic>?;
+
+      debugPrint('🤖 观察结果: app=$appName, state=$state, screenStatus=$screenStatus, canProceed=$canProceed');
+
+      // 构建输出
+      final buffer = StringBuffer();
+      buffer.writeln('✅ 屏幕状态观察完成');
+      buffer.writeln('   📱 应用: ${appName.isNotEmpty ? appName : "未知"}');
+      buffer.writeln('   📋 状态: $state');
+      buffer.writeln('   🚦 屏幕状态: $screenStatus');
+      if (blockers.isNotEmpty) {
+        buffer.writeln('   ⚠️ 阻碍: ${blockers.join(", ")}');
+      }
+      if (suggestion != null) {
+        final sugAction = suggestion['action'] ?? '';
+        final sugTarget = suggestion['target'] ?? '';
+        final sugDetail = suggestion['detail'] ?? '';
+        buffer.writeln('   💡 建议: $sugAction - $sugTarget');
+        if (sugDetail.toString().isNotEmpty) {
+          buffer.writeln('   📝 详情: $sugDetail');
+        }
+      }
+      buffer.writeln('   🔍 关键元素: ${keyElements.length} 个');
+      for (var i = 0; i < keyElements.length; i++) {
+        final elem = keyElements[i];
+        if (elem is Map<String, dynamic>) {
+          final eType = elem['type'] ?? '';
+          final eLabel = elem['label'] ?? '';
+          final eDesc = elem['description'] ?? '';
+          final ePos = elem['approximate_position'] ?? '';
+          buffer.writeln('      [${i + 1}] $eType | "$eLabel" | $eDesc | 位置: $ePos');
+        }
+      }
+
+      // 调试：打印 suggestion 内容
+      final suggestionAction = suggestion?['action'] as String?;
+      debugPrint('🔍 [CUA] cua_observe 返回 suggestion: $suggestion');
+      debugPrint('🔍 [CUA] suggestionAction=$suggestionAction, screenStatus=$screenStatus');
+
+      return SkillResult.ok(
+        buffer.toString(),
+        data: {
+          ...screenshotData,
+          'appName': appName,
+          'state': state,
+          'screenStatus': screenStatus,
+          'keyElements': keyElements,
+          'canProceed': canProceed,
+          'blockers': blockers,
+          'suggestion': suggestion,
+        },
+      );
+    } catch (e) {
+      debugPrint('⚠️ VLM 分析失败: $e');
+      return SkillResult.ok(
+        '✅ 截图成功（VLM 分析异常: $e）\n'
+        '   分辨率: ${logicalW}x$logicalH',
+        data: {
+          ...screenshotData,
+          'state': '分析异常',
+          'elements': [],
+          'suggestion': null,
+          'error': e.toString(),
+        },
+      );
+    }
+  }
+
+  // ═══════════════════════════════════════════
+  // cua_step: 一键循环 - 观察 + 决策 + 执行
+  // ═══════════════════════════════════════════
+
+  /// 一键执行完整的 CUA 循环
+  /// 
+  /// 输入：
+  /// - task_goal: 任务目标（必需）
+  /// - auto_execute: 是否自动执行建议的操作（默认 false，只返回建议）
+  /// 
+  /// 流程：
+  /// 1. 截图并分析当前状态
+  /// 2. 根据任务目标决定下一步
+  /// 3. 如果 auto_execute=true，自动执行建议操作
+  /// 
+  /// 输出：
+  /// - observe: 观察结果
+  /// - suggestion: 建议的操作
+  /// - executed: 是否已执行
+  /// - result: 执行结果（如果已执行）
+  Future<SkillResult> _cuaStep(Map<String, dynamic> args) async {
+    final taskGoal = args['task_goal'] as String?;
+    final autoExecute = (args['auto_execute'] as bool?) ?? false;
+
+    if (taskGoal == null || taskGoal.isEmpty) {
+      return SkillResult.fail('cua_step 需要 task_goal 参数，描述任务目标');
+    }
+
+    debugPrint('🔄 CUA step: taskGoal=$taskGoal autoExecute=$autoExecute');
+
+    // Step 1: 观察当前状态
+    final observeResult = await _cuaObserve({'task_goal': taskGoal});
+    if (!observeResult.success) {
+      return observeResult;
+    }
+
+    final observeData = observeResult.data!;
+    final state = observeData['state'] as String? ?? '';
+    final suggestion = observeData['suggestion'] as Map<String, dynamic>?;
+    final canProceed = observeData['canProceed'] as bool? ?? true;
+    final blockers = observeData['blockers'] as List? ?? [];
+
+    // Step 2: 检查是否可以继续
+    if (!canProceed) {
+      return SkillResult.ok(
+        '⚠️ 任务受阻，无法继续\n'
+        '   状态: $state\n'
+        '   阻碍: ${blockers.join(", ")}\n'
+        '   建议: ${suggestion?['reason'] ?? "无"}',
+        data: {
+          'observe': observeData,
+          'executed': false,
+          'blocked': true,
+        },
+      );
+    }
+
+    // Step 3: 检查是否已完成（只检测强信号）
+    // 强信号：screenStatus='Done'（整个任务完成）
+    // 弱信号：suggestion.action='done'（子任务完成）→ 不触发完成
+    final screenStatus = observeData['screenStatus'] as String?;
+    final suggestionAction = suggestion?['action'] as String?;
+    final isTaskDone = screenStatus?.toLowerCase() == 'done';
+    
+    debugPrint('🔍 [CUA] _cuaStep screenStatus=$screenStatus, suggestionAction=$suggestionAction, isTaskDone=$isTaskDone');
+    
+    if (isTaskDone) {
+      debugPrint('🎯 [CUA] _cuaStep 检测到 screenStatus=Done（任务完成），返回 done=true');
+      return SkillResult.ok(
+        '✅ 任务已完成\n'
+        '   状态: $state',
+        data: {
+          'observe': observeData,
+          'executed': false,
+          'done': true,
+        },
+      );
+    }
+
+    // Step 4: 返回建议或自动执行
+    if (!autoExecute || suggestion == null) {
+      return SkillResult.ok(
+        '👁️ 观察完成，等待决策\n'
+        '   状态: $state\n'
+        '   建议: ${suggestion?['action']} - ${suggestion?['target']}\n'
+        '   原因: ${suggestion?['reason'] ?? "无"}',
+        data: {
+          'observe': observeData,
+          'suggestion': suggestion,
+          'executed': false,
+        },
+      );
+    }
+
+    // Step 5: 自动执行建议的操作
+    debugPrint('🔄 自动执行: ${suggestion['action']} - ${suggestion['target']}');
+
+    SkillResult? executeResult;
+    final action = suggestion['action'] as String?;
+
+    switch (action) {
+      case 'click':
+        // 需要先 find_element 定位
+        final findResult = await _findElement({
+          'query': suggestion['target'],
+          'task_context': taskGoal,
+        });
+        if (findResult.success && findResult.data != null) {
+          final cx = findResult.data!['clickX'];
+          final cy = findResult.data!['clickY'];
+          if (cx != null && cy != null) {
+            executeResult = await _mouseClick({
+              'x': cx,
+              'y': cy,
+              'button': 'left',
+              'clicks': 1,
+            });
+          } else {
+            executeResult = SkillResult.fail('find_element 未返回有效坐标');
+          }
+        } else {
+          executeResult = findResult;
+        }
+        break;
+
+      case 'type':
+        final text = suggestion['text'] as String?;
+        if (text != null && text.isNotEmpty) {
+          executeResult = await _keyType({'text': text});
+        } else {
+          executeResult = SkillResult.fail('type 操作缺少 text 参数');
+        }
+        break;
+
+      case 'scroll':
+        final direction = suggestion['direction'] as String? ?? 'down';
+        executeResult = await _mouseScroll({
+          'direction': direction,
+          'amount': 3,
+        });
+        break;
+
+      case 'wait':
+        await Future.delayed(const Duration(seconds: 2));
+        executeResult = SkillResult.ok('等待 2 秒');
+        break;
+
+      default:
+        executeResult = SkillResult.fail('未知的操作类型: $action');
+    }
+
+    return SkillResult.ok(
+      '✅ CUA 步骤完成\n'
+      '   状态: $state\n'
+      '   操作: $action\n'
+      '   结果: ${executeResult.success ? "成功" : executeResult.message}',
+      data: {
+        'observe': observeData,
+        'suggestion': suggestion,
+        'executed': true,
+        'executeResult': executeResult.data,
+      },
+    );
   }
 
   /// 快速截图（只获取 base64，不保存确认文件）
@@ -801,8 +1561,6 @@ class CuaSkill extends GooseSkill {
     switch (action) {
       case 'screenshot':
         return 'CUA 截图会话';
-      case 'get_ui_tree':
-        return 'CUA UI 树分析';
       case 'open_app':
         return '操作 ${args['app_name'] ?? '应用'}';
       case 'mouse_click':
@@ -857,9 +1615,6 @@ class CuaSkill extends GooseSkill {
   /// 截图元信息（逻辑/物理分辨率、缩放因子）
   static Map<String, dynamic>? _lastScreenMeta;
 
-  /// 最近一次截图时的前台应用名称（由 _drawSomOnPng 设置）
-  static String _lastFrontmostApp = '';
-
   Future<SkillResult> _takeScreenshot(Map<String, dynamic> args) async {
     final display = (args['display'] as int?) ?? 1;
     debugPrint('🖥️ CUA screenshot: display=$display');
@@ -879,9 +1634,6 @@ class CuaSkill extends GooseSkill {
       } else {
         throw CuaException('screenshot', '不支持的平台: ${Platform.operatingSystem}');
       }
-
-      // SOM 标记：在 PNG 上绘制可交互元素编号（在 JPEG 转换前）
-      await _drawSomOnPng(pngPath);
 
       // PNG → JPEG 压缩（质量 85%，保证视觉模型能清晰识别）
       await _convertToJpeg(pngPath, jpgPath);
@@ -903,16 +1655,13 @@ class CuaSkill extends GooseSkill {
       final physicalHeight = meta?['physicalHeight'] as int? ?? logicalHeight;
       final scaleFactor = meta?['scaleFactor'] as double? ?? 1.0;
 
-      final somInfo = CuaSom.lastMarkers.isNotEmpty
-          ? '\n   SOM 标记: ${CuaSom.lastMarkers.length} 个元素'
-          : '';
       debugPrint('🖥️ 截图成功: ${SkillFileUtils.formatSize(fileSize)} '
-          '逻辑: ${logicalWidth}x$logicalHeight 物理: ${physicalWidth}x$physicalHeight 缩放: ${scaleFactor}x$somInfo');
+          '逻辑: ${logicalWidth}x$logicalHeight 物理: ${physicalWidth}x$physicalHeight 缩放: ${scaleFactor}x');
 
       // content 不嵌入 base64（避免撑爆 API 请求体），base64 仅存 data 供 UI 渲染
       return SkillResult.ok(
         '✅ 屏幕截图成功\n'
-        '   大小: ${SkillFileUtils.formatSize(fileSize)}$somInfo',
+        '   大小: ${SkillFileUtils.formatSize(fileSize)}',
         data: {
           'filePath': jpgPath,
           'fileSize': fileSize,
@@ -921,8 +1670,6 @@ class CuaSkill extends GooseSkill {
           'base64': base64Image,
           'mimeType': 'image/jpeg',
           'imageType': 'screenshot',
-          'somMarkerCount': CuaSom.lastMarkers.length,
-          'frontmostApp': _lastFrontmostApp,
         },
       );
     } catch (e) {
@@ -934,56 +1681,585 @@ class CuaSkill extends GooseSkill {
     }
   }
 
-  /// 在 PNG 截图上绘制 SOM 标记
+  // ═══════════════════════════════════════════
+  // 针对性 UI 元素定位（视觉模型，比全量扫描快 5-10 倍）
+  // ═══════════════════════════════════════════
+
+  /// 针对性查找 UI 元素（视觉模型定位）
   ///
-  /// 流程：获取 UI 树 → 提取可交互元素 → 用 Python Pillow 绘制编号圆圈 → 覆盖原 PNG
-  /// 失败时静默忽略，不影响正常截图流程
-  Future<void> _drawSomOnPng(String pngPath) async {
+  /// 流程：获取前景窗口 → 截图 → 调用 VLM → 返回坐标 + 绘制标记图
+  Future<SkillResult> _findElement(Map<String, dynamic> args) async {
+    final query = args['query'] as String?;
+    if (query == null || query.isEmpty) {
+      throw CuaException('find_element', '请提供要查找的元素描述 (query 参数)');
+    }
+
+    debugPrint('🔍 CUA find_element: "$query"');
+    final startTime = DateTime.now();
+
+    // 🎯 输出意图：查找 UI 元素（同时显示在控制台和对话框）
+    final purpose = args['purpose'] as String?;
+    final intentText = StringBuffer();
+    intentText.writeln('🎯 意图: 查找 UI 元素');
+    intentText.writeln('   目标: "$query"');
+    if (purpose != null && purpose.isNotEmpty) {
+      intentText.writeln('   目的: $purpose');
+    }
+    debugPrint(intentText.toString().trim());
+
+    // Step 1: 获取鼠标位置（屏幕逻辑坐标）
+    int mouseX = 0, mouseY = 0;
+    int logicalW = _detectScreenWidth();
+    int logicalH = _detectScreenHeight();
+
+    if (Platform.isMacOS) {
+      final mousePos = _MacOSNative.getMousePosition();
+      if (mousePos != null) {
+        mouseX = mousePos.$1;
+        mouseY = mousePos.$2;
+        debugPrint('🔍 鼠标位置（逻辑）: ($mouseX, $mouseY)');
+      }
+    }
+
+    // Step 2: 全屏截图
+    final timestamp = DateTime.now().millisecondsSinceEpoch;
+    final pngPath = p.join(SkillFileUtils.effectiveWorkingDir, 'cua_find_$timestamp.png');
+    final jpgPath = p.join(SkillFileUtils.effectiveWorkingDir, 'cua_find_$timestamp.jpg');
+    final markerPath = p.join(SkillFileUtils.effectiveWorkingDir, 'cua_find_marker_$timestamp.jpg');
+
     try {
-      if (!await File(pngPath).exists()) return;
-
-      final meta = _lastScreenMeta;
-      final screenW = meta?['logicalWidth'] as int? ?? _detectScreenWidth();
-      final screenH = meta?['logicalHeight'] as int? ?? _detectScreenHeight();
-
-      debugPrint('🏷️ SOM: 获取 UI 树 (screenW=$screenW, screenH=$screenH)...');
-
-      // 获取 UI 树（超时 5 秒，深度 10 以获取更多节点）
-      final treeResult = await CuaAccessibility.getUiTree(maxDepth: 10)
-          .timeout(const Duration(seconds: 5), onTimeout: () {
-            debugPrint('🏷️ SOM: UI 树获取超时');
-            return const UiTreeResult();
-          });
-
-      if (treeResult.root == null) {
-        debugPrint('🏷️ SOM: UI 树 root 为空 (${treeResult.appName}, nodes=${treeResult.nodeCount})');
-        CuaSom.lastMarkers = [];
-        return;
+      if (Platform.isMacOS) {
+        await Process.run('screencapture', ['-x', pngPath]);
+        debugPrint('🔍 全屏截图');
+      } else if (Platform.isWindows) {
+        await _screenshotWindows(pngPath);
+      } else if (Platform.isLinux) {
+        await _screenshotLinux(pngPath, 1);
       }
 
-      // 提取可交互元素标记
-      final markers = CuaSom.extractMarkers(treeResult.root, screenW, screenH);
-      CuaSom.lastMarkers = markers;
-      _lastFrontmostApp = treeResult.appName;
+      if (!await File(pngPath).exists()) {
+        throw CuaException('find_element', '截图失败');
+      }
+
+      // Step 3: 读取实际截图尺寸（物理像素）
+      int captureW = logicalW;  // 用于 VLM 的尺寸（可能是缩放后的）
+      int captureH = logicalH;
+      double retinaScale = 1.0;  // Retina 缩放因子
+      double vlmScale = 1.0;     // VLM 图片缩放比例
+
+      if (Platform.isMacOS) {
+        // 使用 sips 查询图片尺寸（物理像素）
+        final sipsResult = await Process.run('sips', ['-g', 'pixelWidth', '-g', 'pixelHeight', pngPath]);
+        if (sipsResult.exitCode == 0) {
+          final output = sipsResult.stdout.toString();
+          final wMatch = RegExp(r'pixelWidth:\s*(\d+)').firstMatch(output);
+          final hMatch = RegExp(r'pixelHeight:\s*(\d+)').firstMatch(output);
+          if (wMatch != null && hMatch != null) {
+            final actualW = int.parse(wMatch.group(1)!);
+            final actualH = int.parse(hMatch.group(1)!);
+            debugPrint('🔍 实际截图尺寸: ${actualW}x$actualH (窗口逻辑尺寸: ${logicalW}x$logicalH)');
+            
+            // 计算 Retina 缩放因子（物理像素 / 逻辑尺寸）
+            if (logicalW > 0) {
+              retinaScale = actualW / logicalW;
+              debugPrint('🔍 Retina 缩放因子: ${retinaScale.toStringAsFixed(2)}x (物理=${actualW}, 逻辑=${logicalW})');
+            }
+            
+            captureW = actualW;
+            captureH = actualH;
+
+            // 如果图片过大，需要缩放用于 VLM
+            const maxEdge = 1920;
+            if (max(actualW, actualH) > maxEdge) {
+              vlmScale = maxEdge / max(actualW, actualH);
+              captureW = (actualW * vlmScale).round();
+              captureH = (actualH * vlmScale).round();
+              debugPrint('🔍 VLM 缩放: ${actualW}x$actualH -> ${captureW}x${captureH}');
+            }
+          }
+        }
+      }
+
+      // 使用 sips 转换为 JPEG 并压缩（macOS）
+      if (Platform.isMacOS) {
+        // 如果需要缩放，使用 sips -Z 参数
+        if (vlmScale < 1.0) {
+          await Process.run('sips', ['-Z', '${max(captureW, captureH)}', '-s', 'format', 'jpeg', '-s', 'formatOptions', '75', pngPath, '--out', jpgPath]);
+        } else {
+          await Process.run('sips', ['-s', 'format', 'jpeg', '-s', 'formatOptions', '75', pngPath, '--out', jpgPath]);
+        }
+      } else {
+        await File(pngPath).copy(jpgPath);
+      }
+
+      final jpgBytes = await File(jpgPath).readAsBytes();
+      final jpgBase64 = base64Encode(jpgBytes);
+      debugPrint('🔍 图片大小: ${jpgBytes.length} bytes');
+
+      // Step 4: 调用 VLM API
+      final vlmResult = await _callVlmForFindElement(query, jpgBase64);
+      final elapsed = DateTime.now().difference(startTime);
+
+      if (vlmResult == null || vlmResult.isEmpty) {
+        return SkillResult.fail('未找到匹配的元素: "$query"');
+      }
+
+      // Step 5: 坐标映射
+      // VLM [0,1000) → 缩放后像素 → 物理像素 → 逻辑坐标 → 屏幕坐标
+      final markers = <Map<String, dynamic>>[];
+      for (final elem in vlmResult) {
+        final bbox = elem['bbox_2d'] as List? ?? elem['bbox'] as List?;
+        if (bbox == null || bbox.length < 4) continue;
+
+        double x1 = (bbox[0] as num).toDouble();
+        double y1 = (bbox[1] as num).toDouble();
+        double x2 = (bbox[2] as num).toDouble();
+        double y2 = (bbox[3] as num).toDouble();
+
+        debugPrint('🔍 CUA 坐标转换: VLM原始=[$x1, $y1, $x2, $y2]');
+
+        // VLM [0,1000) → 缩放后像素
+        final maxCoord = [x1, y1, x2, y2].reduce((a, b) => a > b ? a : b);
+        if (maxCoord <= 1000) {
+          // Qwen 归一化 [0,1000)
+          x1 = x1 / 1000 * captureW;
+          y1 = y1 / 1000 * captureH;
+          x2 = x2 / 1000 * captureW;
+          y2 = y2 / 1000 * captureH;
+          debugPrint('🔍 CUA 坐标转换: [0,1000) → 缩放后像素=[$x1, $y1, $x2, $y2] (captureW=$captureW, captureH=$captureH)');
+        } else if (maxCoord <= 1.0) {
+          // 归一化 [0,1]
+          x1 = x1 * captureW;
+          y1 = y1 * captureH;
+          x2 = x2 * captureW;
+          y2 = y2 * captureH;
+          debugPrint('🔍 CUA 坐标转换: [0,1] → 缩放后像素=[$x1, $y1, $x2, $y2]');
+        }
+
+        // 缩放后像素 → 物理像素
+        double x1Phys = x1 / vlmScale;
+        double y1Phys = y1 / vlmScale;
+        double x2Phys = x2 / vlmScale;
+        double y2Phys = y2 / vlmScale;
+        debugPrint('🔍 CUA 坐标转换: 缩放后像素 → 物理像素=[$x1Phys, $y1Phys, $x2Phys, $y2Phys] (vlmScale=$vlmScale)');
+
+        // 物理像素 → 屏幕逻辑坐标（全屏截图不需要偏移）
+        final screenX1 = (x1Phys / retinaScale).round();
+        final screenY1 = (y1Phys / retinaScale).round();
+        final screenX2 = (x2Phys / retinaScale).round();
+        final screenY2 = (y2Phys / retinaScale).round();
+        
+        // 智能计算点击位置（根据元素类型）
+        final elemType = (elem['type'] ?? 'unknown').toString().toLowerCase();
+        final clickResult = _getSmartClickPosition(
+          elemType: elemType,
+          x1: screenX1,
+          y1: screenY1,
+          x2: screenX2,
+          y2: screenY2,
+        );
+        final cx = clickResult['cx']!;
+        final cy = clickResult['cy']!;
+        final offsetDesc = clickResult['desc'] ?? '';
+        
+        debugPrint('🔍 CUA 坐标转换: 物理像素 → 屏幕逻辑=[$screenX1, $screenY1, $screenX2, $screenY2] (retinaScale=$retinaScale)');
+        debugPrint('🔍 CUA 坐标转换: 最终屏幕坐标=($cx, $cy) $offsetDesc');
+
+        markers.add({
+          'id': markers.length + 1,
+          'x1': screenX1, 'y1': screenY1, 'x2': screenX2, 'y2': screenY2,
+          'cx': cx, 'cy': cy,
+          'w': screenX2 - screenX1, 'h': screenY2 - screenY1,
+          'type': elem['type'] ?? 'unknown',
+          'label': elem['label'] ?? '',
+          'function': elem['function'] ?? '',
+          'physX1': x1Phys.round(), 'physY1': y1Phys.round(),  // 物理像素（用于绘制）
+          'physX2': x2Phys.round(), 'physY2': y2Phys.round(),
+        });
+      }
 
       if (markers.isEmpty) {
-        debugPrint('🏷️ SOM: 未提取到可交互标记');
-        return;
+        return SkillResult.fail('未找到有效的元素坐标: "$query"');
       }
 
-      debugPrint('🏷️ SOM: 提取了 ${markers.length} 个标记，开始绘制...');
+      // Step 6: 绘制标记图（包含鼠标位置）
+      await _drawFindElementMarker(pngPath, markerPath, markers, query, mouseX, mouseY, retinaScale);
 
-      // 用 Python Pillow 在 PNG 上绘制标记（直接就地修改文件）
-      final success = await CuaSom.drawMarkersWithPillow(pngPath, markers);
-      if (success) {
-        debugPrint('🏷️ SOM: 标记已绘制到 $pngPath');
+      // 构建返回结果（包含意图）
+      final best = markers.first;
+      final resultText = StringBuffer();
+      resultText.writeln(intentText.toString().trim());  // 意图显示在对话框
+      resultText.writeln('');
+      resultText.writeln('✅ 找到 ${markers.length} 个匹配元素');
+      resultText.writeln('');
+      
+      // 鼠标位置（相对于屏幕）
+      if (mouseX > 0 || mouseY > 0) {
+        resultText.writeln('🖱️ 当前鼠标位置（屏幕逻辑坐标）:');
+        resultText.writeln('   位置: ($mouseX, $mouseY)');
+        resultText.writeln('');
+      }
+      
+      // 组件位置信息
+      resultText.writeln('🎯 组件位置信息:');
+      resultText.writeln('   最佳匹配: [${best['id']}] ${best['type']} "${best['label']}"');
+      resultText.writeln('   中心坐标: (${best['cx']}, ${best['cy']}) ← 点击此位置');
+      resultText.writeln('   边界框: (${best['x1']}, ${best['y1']}) ~ (${best['x2']}, ${best['y2']})');
+      resultText.writeln('   尺寸: ${best['w']} × ${best['h']} 像素');
+      if (best['function'] != null && best['function'].toString().isNotEmpty) {
+        resultText.writeln('   功能: ${best['function']}');
+      }
+      resultText.writeln('   耗时: ${elapsed.inMilliseconds}ms');
+      
+      // 位置关系提示
+      if (mouseX > 0 || mouseY > 0) {
+        final dx = (best['cx'] as int) - mouseX;
+        final dy = (best['cy'] as int) - mouseY;
+        resultText.writeln('');
+        resultText.writeln('📍 位置关系:');
+        resultText.writeln('   鼠标 → 组件中心: Δx=$dx, Δy=$dy');
+        if (dx.abs() < 50 && dy.abs() < 50) {
+          resultText.writeln('   💡 鼠标已接近目标组件');
+        }
+      }
+      
+      // 添加下一步建议
+      resultText.writeln('\n💡 下一步建议:');
+      resultText.writeln('   1. 点击该元素: mouse_click(x=${best['cx']}, y=${best['cy']})');
+      if (best['type'] == 'input' || best['type'] == 'textfield' || best['type'] == 'textbox') {
+        resultText.writeln('   2. 输入文本: key_type(text="你的内容")');
+      }
+
+      debugPrint('🔍 find_element 完成: ${markers.length} 个结果，耗时 ${elapsed.inMilliseconds}ms');
+
+      // 缓存 find_element 返回的坐标（用于 mouse_click 校验）
+      final now = DateTime.now();
+      // 先清理过期坐标
+      _recentFindCoords.removeWhere((c) => now.difference(c.timestamp).inSeconds > _findCoordTtlSeconds);
+      // 添加新坐标
+      for (final m in markers) {
+        _recentFindCoords.add(_FindElementCoord(
+          cx: m['cx'] as int,
+          cy: m['cy'] as int,
+          query: query,
+          timestamp: now,
+        ));
+      }
+      debugPrint('📌 缓存 find_element 坐标: ${markers.length} 个，当前缓存总数: ${_recentFindCoords.length}');
+
+      // 读取标记图 base64（用于在对话框中显示）
+      String? markerBase64;
+      try {
+        final markerFile = File(markerPath);
+        if (await markerFile.exists()) {
+          final markerBytes = await markerFile.readAsBytes();
+          markerBase64 = base64Encode(markerBytes);
+          debugPrint('🔍 标记图大小: ${markerBytes.length} bytes');
+        }
+      } catch (e) {
+        debugPrint('⚠️ 读取标记图失败: $e');
+      }
+
+      return SkillResult.ok(
+        resultText.toString(),
+        data: {
+          'query': query,
+          'markers': markers,
+          'bestMatch': best,
+          'clickX': best['cx'],
+          'clickY': best['cy'],
+          'elapsedMs': elapsed.inMilliseconds,
+          'markerImage': markerPath,
+          'filePath': markerPath,
+          'base64': markerBase64,
+          'mimeType': 'image/jpeg',
+          'imageType': 'screenshot',   // 复用截图渲染通道，让对话框显示标记图
+          'intent': '查找 UI 元素: $query',
+          'result': '找到 ${markers.length} 个匹配，最佳: ${best['type']} [${best['label']}]',
+        },
+      );
+    } finally {
+      // 清理临时文件
+      try { await File(pngPath).delete(); } catch (_) {}
+    }
+  }
+
+  /// 调用 VLM API 查找元素
+  Future<List<Map<String, dynamic>>?> _callVlmForFindElement(String query, String imageBase64) async {
+    // 检查是否注入了 LLMManager
+    if (_llmManager == null) {
+      throw CuaException('find_element', 'LLMManager 未注入，无法使用视觉分析');
+    }
+
+    // 检查是否配置了视觉模型
+    final visionProvider = _llmManager!.currentConfig.visionProvider;
+    final visionModel = _llmManager!.currentConfig.visionModel;
+    if (visionProvider == null || visionProvider.isEmpty || 
+        visionModel == null || visionModel.isEmpty) {
+      throw CuaException('find_element', '未配置视觉模型，请在设置中配置');
+    }
+
+    // 🎯 优化后的 Prompt：更精确、更有上下文
+    final prompt = '''You are a precise UI element locator for desktop applications. Your task is to identify the EXACT position of UI elements.
+
+## Target Element
+Find this UI element: "$query"
+
+## Critical Rules
+1. **Be Precise**: The bounding box must tightly fit the element, not the entire container
+2. **Text Matching**: If query contains text, find the element with that exact or similar text
+3. **Icon Recognition**: For icon-only elements, identify by shape (magnifier=search, gear=settings, etc.)
+4. **Type Inference**: Determine element type from appearance (button, input, link, dropdown, checkbox, etc.)
+5. **Multiple Matches**: Return ALL matching elements sorted by relevance (best match first)
+
+## Common Element Types
+- **input/search_box**: Text input fields, search bars
+- **button**: Clickable buttons (text or icon)
+- **dropdown/select**: Dropdown menus, combo boxes
+- **checkbox/radio**: Checkbox or radio button (include the box itself, not just the label)
+- **tab**: Tab items in tab bars
+- **link**: Hyperlinks (often blue, underlined)
+- **menu_item**: Menu items in dropdown or context menus
+- **list_item**: Items in a list view
+
+## Output Format
+Return a JSON array. Each element must have:
+- bbox_2d: [x1,y1,x2,y2] in [0,1000) normalized coordinates (MUST be accurate!)
+- type: element type (see above)
+- label: visible text on the element (empty string if icon-only)
+- function: what clicking does (be specific and concise)
+- confidence: 0.0-1.0 (how confident you are about this match)
+
+If NOT found or unclear, return: [{"found":false,"reason":"explanation"}]
+
+## Examples
+Query: "搜索框"
+Result: [{"bbox_2d":[50,120,350,160],"type":"input","label":"","function":"Search input field","confidence":0.95}]
+
+Query: "发送按钮"
+Result: [{"bbox_2d":[700,400,780,440],"type":"button","label":"发送","function":"Send message","confidence":0.98}]
+
+Now find: "$query"''';
+
+    try {
+      final response = await _llmManager!.analyzeScreenshot(
+        base64Image: imageBase64,
+        mimeType: 'image/jpeg',
+        prompt: prompt,
+      );
+
+      if (response == null || response.isEmpty) {
+        throw CuaException('find_element', '视觉模型返回空结果');
+      }
+
+      // 解析 JSON 数组
+      final jsonMatch = RegExp(r'\[[\s\S]*\]').firstMatch(response);
+      if (jsonMatch != null) {
+        final elements = jsonDecode(jsonMatch.group(0)!) as List;
+        final rawResults = elements.cast<Map<String, dynamic>>();
+        
+        // 🎯 置信度过滤：移除低置信度结果
+        const minConfidence = 0.6;  // 最低置信度阈值
+        final filteredResults = rawResults.where((elem) {
+          // 检查 found:false 标记
+          if (elem['found'] == false) {
+            return false;
+          }
+          
+          // 检查置信度（如果提供）
+          final confidence = elem['confidence'];
+          if (confidence != null) {
+            final confValue = (confidence as num).toDouble();
+            if (confValue < minConfidence) {
+              debugPrint('⚠️ 过滤低置信度结果: ${(elem['label'] ?? 'unknown')} (置信度: $confValue)');
+              return false;
+            }
+          }
+          
+          // 验证 bbox 合理性
+          final bbox = elem['bbox_2d'] ?? elem['bbox'];
+          if (bbox != null && bbox is List && bbox.length >= 4) {
+            final x1 = (bbox[0] as num).toDouble();
+            final y1 = (bbox[1] as num).toDouble();
+            final x2 = (bbox[2] as num).toDouble();
+            final y2 = (bbox[3] as num).toDouble();
+            
+            // 检查坐标是否合法
+            if (x2 <= x1 || y2 <= y1) {
+              debugPrint('⚠️ 过滤非法 bbox: [$x1, $y1, $x2, $y2]');
+              return false;
+            }
+            
+            // 检查 bbox 是否过大（可能是误识别整个窗口）
+            final width = x2 - x1;
+            final height = y2 - y1;
+            if (width > 800 || height > 800) {
+              debugPrint('⚠️ 过滤超大 bbox: ${width}x$height (可能误识别整个窗口)');
+              return false;
+            }
+          }
+          
+          return true;
+        }).toList();
+        
+        // 按置信度排序（如果提供）
+        filteredResults.sort((a, b) {
+          final confA = (a['confidence'] as num?)?.toDouble() ?? 0.5;
+          final confB = (b['confidence'] as num?)?.toDouble() ?? 0.5;
+          return confB.compareTo(confA);  // 降序
+        });
+        
+        debugPrint('✅ VLM 结果: ${rawResults.length} 个 → 过滤后 ${filteredResults.length} 个');
+        return filteredResults;
+      }
+      
+      throw CuaException('find_element', '视觉模型返回格式错误: ${response.substring(0, response.length.clamp(0, 200))}');
+    } on CuaException {
+      rethrow;
+    } catch (e) {
+      throw CuaException('find_element', 'VLM 调用失败: $e');
+    }
+  }
+
+  /// 绘制标记图（用于调试）
+  Future<void> _drawFindElementMarker(
+    String pngPath,
+    String outPath,
+    List<Map<String, dynamic>> markers,
+    String query,
+    int mouseX,
+    int mouseY,
+    double retinaScale,
+  ) async {
+    try {
+      // 使用 Python Pillow 绘制标记
+      final markersJson = jsonEncode(markers);
+      final pyScript = '''
+import sys
+try:
+    from PIL import Image, ImageDraw, ImageFont
+    import json
+
+    img = Image.open("${pngPath}").convert("RGBA")
+    draw = ImageDraw.Draw(img)
+
+    # 加载字体
+    font = None
+    font_small = None
+    for fp in ["/System/Library/Fonts/PingFang.ttc", "/System/Library/Fonts/Helvetica.ttc"]:
+        try:
+            font = ImageFont.truetype(fp, 16)
+            font_small = ImageFont.truetype(fp, 12)
+            break
+        except: pass
+
+    COLORS = [(220, 50, 47), (38, 139, 210), (133, 153, 0), (181, 137, 0)]
+
+    # 绘制鼠标位置（绿色十字 + 坐标标注）
+    mouse_x, mouse_y, retina_scale = ${mouseX}, ${mouseY}, ${retinaScale}
+    if mouse_x > 0 or mouse_y > 0:
+        # 屏幕逻辑坐标 → 物理像素（全屏截图，无需偏移）
+        mouse_win_x = int(mouse_x * retina_scale)
+        mouse_win_y = int(mouse_y * retina_scale)
+
+        if 0 <= mouse_win_x <= img.width and 0 <= mouse_win_y <= img.height:
+            mouse_color = (0, 255, 100)
+            cross_size = 20
+            # 十字准星
+            draw.line([mouse_win_x - cross_size, mouse_win_y, mouse_win_x + cross_size, mouse_win_y],
+                      fill=mouse_color + (255,), width=2)
+            draw.line([mouse_win_x, mouse_win_y - cross_size, mouse_win_x, mouse_win_y + cross_size],
+                      fill=mouse_color + (255,), width=2)
+            # 外圈
+            draw.ellipse([mouse_win_x - 12, mouse_win_y - 12, mouse_win_x + 12, mouse_win_y + 12],
+                         outline=mouse_color + (255,), width=2)
+            # 坐标标注
+            mouse_label = f"({mouse_x}, {mouse_y})"
+            if font_small:
+                mbbox = draw.textbbox((0, 0), mouse_label, font=font_small)
+                mw, mh = mbbox[2] - mbbox[0], mbbox[3] - mbbox[1]
+                mx = mouse_win_x + 20
+                my = mouse_win_y - mh // 2
+                if mx + mw > img.width: mx = mouse_win_x - mw - 20
+                if my < 0: my = 10
+                if my + mh > img.height: my = img.height - mh - 10
+                draw.rectangle([mx - 2, my - 1, mx + mw + 2, my + mh + 1], fill=(0, 0, 0, 200))
+                draw.text((mx, my), mouse_label, fill=mouse_color + (255,), font=font_small)
+
+    markers = json.loads("""$markersJson""")
+
+    for m in markers:
+        color = COLORS[(m["id"] - 1) % len(COLORS)]
+        # 使用物理像素坐标
+        x1, y1, x2, y2 = m["physX1"], m["physY1"], m["physX2"], m["physY2"]
+
+        # 矩形边框
+        draw.rectangle([x1, y1, x2, y2], outline=color + (255,), width=3)
+
+        # 四个角坐标标注
+        corners = [
+            (x1, y1, f"({m['x1']},{m['y1']})"),
+            (x2, y1, f"({m['x2']},{m['y1']})"),
+            (x1, y2, f"({m['x1']},{m['y2']})"),
+            (x2, y2, f"({m['x2']},{m['y2']})"),
+        ]
+        for cx, cy, text in corners:
+            draw.ellipse([cx - 4, cy - 4, cx + 4, cy + 4], fill=color + (255,))
+            if font_small:
+                draw.text((cx + 8, cy - 6), text, fill=color + (255,), font=font_small)
+
+        # 中心点十字
+        win_cx = (x1 + x2) // 2
+        win_cy = (y1 + y2) // 2
+        draw.ellipse([win_cx - 6, win_cy - 6, win_cx + 6, win_cy + 6],
+                     outline=color + (255,), width=2)
+        draw.line([win_cx - 10, win_cy, win_cx + 10, win_cy], fill=color + (255,), width=2)
+        draw.line([win_cx, win_cy - 10, win_cx, win_cy + 10], fill=color + (255,), width=2)
+
+        # 编号气泡
+        badge_r = 18
+        bx, by = x1 + badge_r, y1 + badge_r
+        draw.ellipse([bx - badge_r, by - badge_r, bx + badge_r, by + badge_r],
+                     fill=color + (255,), outline=(255, 255, 255, 255), width=2)
+        label = str(m["id"])
+        if font:
+            bbox = draw.textbbox((0, 0), label, font=font)
+            tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+            draw.text((bx - tw // 2, by - th // 2 - 1), label, fill=(255, 255, 255, 255), font=font)
+
+        # 标签（类型 + 文本）
+        tag = f"{m['type']}: {m.get('label', '')[:20]}" if m.get('label') else m['type']
+        if font_small:
+            tbbox = draw.textbbox((0, 0), tag, font=font_small)
+            tw, th = tbbox[2] - tbbox[0], tbbox[3] - tbbox[1]
+            tx, ty = x1, y1 - th - 6
+            if ty < 0: ty = y2 + 4
+            draw.rectangle([tx - 2, ty - 1, tx + tw + 2, ty + th + 1], fill=(0, 0, 0, 200))
+            draw.text((tx, ty), tag, fill=(255, 255, 255, 255), font=font_small)
+
+        # 屏幕坐标（底部）
+        coord_text = f"屏幕: ({m['cx']}, {m['cy']})"
+        if font_small:
+            cbbox = draw.textbbox((0, 0), coord_text, font=font_small)
+            cw, ch = cbbox[2] - cbbox[0], cbbox[3] - cbbox[1]
+            cx_txt, cy_txt = x1, y2 + 4
+            draw.rectangle([cx_txt - 2, cy_txt - 1, cx_txt + cw + 2, cy_txt + ch + 1], fill=(0, 0, 0, 180))
+            draw.text((cx_txt, cy_txt), coord_text, fill=(200, 255, 200, 255), font=font_small)
+
+    img.convert("RGB").save("$outPath", "JPEG", quality=90)
+    print("OK")
+except Exception as e:
+    print(f"ERROR: {e}", file=sys.stderr)
+    sys.exit(1)
+''';
+      final result = await Process.run('python3', ['-c', pyScript]);
+      if (result.exitCode == 0) {
+        debugPrint('🔍 标记图已保存: $outPath');
       } else {
-        debugPrint('⚠️ SOM: Pillow 绘制失败');
+        debugPrint('⚠️ 标记图绘制失败: ${result.stderr}');
       }
-    } catch (e, st) {
-      debugPrint('⚠️ SOM 标记失败（不影响截图）: $e');
-      debugPrint('⚠️ SOM stacktrace: $st');
-      CuaSom.lastMarkers = [];
+    } catch (e) {
+      debugPrint('⚠️ 标记图绘制异常: $e');
     }
   }
 
@@ -1023,7 +2299,7 @@ class CuaSkill extends GooseSkill {
           'physicalHeight': (result['physicalHeight'] as num?)?.toInt(),
           'scaleFactor': (result['scaleFactor'] as num?)?.toDouble(),
         };
-        debugPrint('🖥️ 屏幕元信息: $_lastScreenMeta');
+
       }
     } on PlatformException catch (e) {
       debugPrint('⚠️ 原生截图失败: ${e.message}，回退到 screencapture');
@@ -1154,23 +2430,69 @@ Add-Type -AssemblyName System.Drawing
   // ═══════════════════════════════════════════
 
   Future<SkillResult> _mouseClick(Map<String, dynamic> args) async {
-    // 归一化坐标 0~1000 → 像素坐标
-    final screenWidth = _detectScreenWidth();
-    final screenHeight = _detectScreenHeight();
-    final x = _normalizedToPixel((args['x'] as int?) ?? 0, screenWidth, 'mouse_click.x');
-    final y = _normalizedToPixel((args['y'] as int?) ?? 0, screenHeight, 'mouse_click.y');
-    final normalizedX = (args['x'] as int?) ?? 0;
-    final normalizedY = (args['y'] as int?) ?? 0;
+    // 和 test_cua_wechat.py 保持一致：直接使用屏幕逻辑坐标
+    final x = (args['x'] as int?) ?? 0;
+    final y = (args['y'] as int?) ?? 0;
     final button = args['button'] as String? ?? 'left';
     final clicks = (args['clicks'] as int?) ?? 1;
+    final purpose = args['purpose'] as String?;
+    final expectedOutcome = args['expected_outcome'] as String?;
+    final taskContext = args['task_context'] as String?;
 
-    // 匹配最近的 SOM 标记
+    // ── find_element 坐标校验 ──
+    // 检查 mouse_click 的坐标是否来自最近的 find_element 返回值
+    final now = DateTime.now();
+    // 先清理过期坐标
+    _recentFindCoords.removeWhere((c) => now.difference(c.timestamp).inSeconds > _findCoordTtlSeconds);
+    
+    bool coordValidated = false;
+    String? matchedQuery;
+    if (_recentFindCoords.isNotEmpty) {
+      for (final coord in _recentFindCoords) {
+        final dx = (x - coord.cx).abs();
+        final dy = (y - coord.cy).abs();
+        if (dx <= _coordTolerance && dy <= _coordTolerance) {
+          coordValidated = true;
+          matchedQuery = coord.query;
+          break;
+        }
+      }
+    }
+    
+    if (!coordValidated) {
+      debugPrint('⛔ mouse_click 坐标($x, $y) 未通过 find_element 校验！缓存坐标: ${_recentFindCoords.map((c) => "(${c.cx},${c.cy})").join(", ")}');
+      return SkillResult.fail(
+        '⛔ 操作被拦截：mouse_click 的坐标 ($x, $y) 不是来自 find_element 的返回值！\n\n'
+        '🚫 严禁凭猜测或记忆直接给坐标点击。\n'
+        '✅ 正确流程：先调用 cua(action="find_element", query="目标元素描述") 定位元素，再用返回的精确坐标执行 mouse_click。\n'
+        '${_recentFindCoords.isEmpty ? "💡 当前没有任何 find_element 缓存坐标，请先调用 find_element。" : "💡 当前缓存的 find_element 坐标: ${_recentFindCoords.map((c) => "(${c.cx},${c.cy}) [${c.query}]").join(", ")}"}',
+      );
+    }
+    
+    debugPrint('✅ mouse_click 坐标校验通过: ($x, $y) 匹配 find_element("$matchedQuery")');
+
+
+    // 匹配最近的 SOM 标记（需要转换坐标）
+    final screenWidth = _detectScreenWidth();
+    final screenHeight = _detectScreenHeight();
+    final normalizedX = (x / screenWidth * 1000).round();
+    final normalizedY = (y / screenHeight * 1000).round();
     final marker = CuaSom.findNearestMarker(normalizedX.toDouble(), normalizedY.toDouble());
     final markerHint = marker != null
-        ? '，命中标记 [${marker.id}] ${marker.role}${marker.title.isNotEmpty ? ' "${marker.title}"' : ''}'
+        ? ' [${marker.id}] ${marker.role}${marker.title.isNotEmpty ? ' "${marker.title}"' : ''}'
         : '';
 
-    debugPrint('🖥️ CUA mouse_click: 归一化($normalizedX, $normalizedY) → 像素($x, $y) button=$button clicks=$clicks$markerHint');
+    // 🎯 输出意图（同时显示在控制台和对话框）
+    final intentText = StringBuffer();
+    intentText.writeln('🎯 意图: 鼠标点击');
+    intentText.writeln('   操作: ${button} ${clicks == 2 ? '双击' : '单击'}');
+    intentText.writeln('   位置: ($x, $y)$markerHint');
+    if (purpose != null && purpose.isNotEmpty) {
+      intentText.writeln('   目的: $purpose');
+    }
+    debugPrint(intentText.toString().trim());
+
+    debugPrint('🖥️ CUA mouse_click: 屏幕坐标($x, $y) button=$button clicks=$clicks$markerHint');
 
     if (Platform.isMacOS) {
       await _mouseClickMacOS(x, y, button, clicks);
@@ -1182,16 +2504,54 @@ Add-Type -AssemblyName System.Drawing
       throw CuaException('mouse_click', '不支持的平台');
     }
 
-    // 点击后自适应等待 UI 响应，然后自动截图确认
-    final confirmResult = await _waitForChangeAndScreenshot('mouse_click');
-
-    final confirmInfo = confirmResult != null
-        ? '\n📸 点击后截图确认:\n   ${confirmResult['info']}'
-        : '';
-    return SkillResult.ok(
-      '✅ 鼠标点击成功 ($x, $y) button=$button clicks=$clicks$markerHint$confirmInfo',
-      data: confirmResult,
+    // 点击后自适应等待 UI 响应，然后自动截图确认（支持智能分析）
+    final confirmResult = await _waitForChangeAndScreenshot(
+      'mouse_click',
+      expectedOutcome: expectedOutcome,
+      taskContext: taskContext,
     );
+
+    final confirmInfo = _formatConfirmResult(confirmResult);
+    final resultText = StringBuffer();
+    resultText.writeln(intentText.toString().trim());
+    resultText.writeln('');
+    resultText.writeln('✅ 鼠标点击成功 ($x, $y) button=$button clicks=$clicks$confirmInfo');
+    return SkillResult.ok(
+      resultText.toString().trim(),
+      data: {
+        ...?confirmResult,
+        'intent': '鼠标点击 ($x, $y)',
+        'result': '点击完成',
+      },
+    );
+  }
+
+  /// 格式化确认结果（包含智能分析）
+  String _formatConfirmResult(Map<String, dynamic>? result) {
+    if (result == null) return '';
+    
+    final buffer = StringBuffer();
+    buffer.writeln('\n📸 操作后截图确认:');
+    buffer.writeln('   ${result['info']}');
+    
+    final analysis = result['analysis'] as Map<String, dynamic>?;
+    if (analysis != null) {
+      final success = analysis['success'] == true;
+      buffer.writeln('\n🤖 智能分析:');
+      buffer.writeln('   操作结果: ${success ? '✅ 成功' : '❌ 失败'} - ${analysis['successReason'] ?? '未知'}');
+      buffer.writeln('   屏幕状态: ${analysis['screenDescription'] ?? '未知'}');
+      
+      final nextAction = analysis['nextAction'] as Map<String, dynamic>?;
+      if (nextAction != null) {
+        buffer.writeln('   建议下一步: ${nextAction['action']} - ${nextAction['reason']}');
+      }
+      
+      final blockers = analysis['blockers'] as List?;
+      if (blockers != null && blockers.isNotEmpty) {
+        buffer.writeln('   ⚠️ 阻碍因素: ${blockers.join(', ')}');
+      }
+    }
+    return buffer.toString();
   }
 
   /// 点击后截图确认（复用截图逻辑，不经过视觉分析）
@@ -1212,7 +2572,8 @@ Add-Type -AssemblyName System.Drawing
           return null;
         }
 
-        await _drawSomOnPng(pngPath);
+        // 注意：不自动分析所有 UI，保持截图原样
+        // 符合 test_cua_wechat.py 的逻辑
 
         await _convertToJpeg(pngPath, jpgPath);
 
@@ -1226,10 +2587,7 @@ Add-Type -AssemblyName System.Drawing
         final screenWidth = meta?['logicalWidth'] as int? ?? _detectScreenWidth();
         final screenHeight = meta?['logicalHeight'] as int? ?? _detectScreenHeight();
 
-        final somInfo = CuaSom.lastMarkers.isNotEmpty
-            ? ', SOM: ${CuaSom.lastMarkers.length} 个标记'
-            : '';
-        debugPrint('📸 确认截图: ${SkillFileUtils.formatSize(fileSize)}$somInfo');
+        debugPrint('📸 确认截图: ${SkillFileUtils.formatSize(fileSize)}');
 
         return {
           'filePath': jpgPath,
@@ -1239,9 +2597,7 @@ Add-Type -AssemblyName System.Drawing
           'base64': base64Image,
           'mimeType': 'image/jpeg',
           'imageType': 'confirm_screenshot',
-          'info': '操作后截图确认, 大小: ${SkillFileUtils.formatSize(fileSize)}$somInfo',
-          'somMarkerCount': CuaSom.lastMarkers.length,
-          'frontmostApp': _lastFrontmostApp,
+          'info': '操作后截图确认, 大小: ${SkillFileUtils.formatSize(fileSize)}',
         };
       } finally {
         try { await File(pngPath).delete(); } catch (_) {}
@@ -1263,7 +2619,7 @@ Add-Type -AssemblyName System.Drawing
     try {
       _MacOSNative.postMouseClick(x.toDouble(), y.toDouble(), btn, clicks);
       return;
-    } on StateError catch (e) {
+    } on StateError {
       throw CuaException('mouse_click',
           '辅助功能权限不足。\n'
           '请在 系统设置 → 隐私与安全性 → 辅助功能 中勾选鹅宝，然后重启应用。');
@@ -1389,12 +2745,11 @@ for (\$i = 0; \$i -lt $clicks; \$i++) {
   }
 
   Future<SkillResult> _mouseMove(Map<String, dynamic> args) async {
-    final screenWidth = _detectScreenWidth();
-    final screenHeight = _detectScreenHeight();
-    final x = _normalizedToPixel((args['x'] as int?) ?? 0, screenWidth, 'mouse_move.x');
-    final y = _normalizedToPixel((args['y'] as int?) ?? 0, screenHeight, 'mouse_move.y');
+    // 和 test_cua_wechat.py 保持一致：直接使用屏幕逻辑坐标
+    final x = (args['x'] as int?) ?? 0;
+    final y = (args['y'] as int?) ?? 0;
 
-    debugPrint('🖥️ CUA mouse_move: ($x, $y)');
+    debugPrint('🖥️ CUA mouse_move: 屏幕坐标($x, $y)');
 
     if (Platform.isMacOS) {
       // CGEvent 使用左上角原点，与截图一致，无需翻转
@@ -1425,14 +2780,15 @@ Add-Type -AssemblyName System.Windows.Forms
   }
 
   Future<SkillResult> _mouseScroll(Map<String, dynamic> args) async {
-    final screenWidth = _detectScreenWidth();
-    final screenHeight = _detectScreenHeight();
-    final x = _normalizedToPixel((args['x'] as int?) ?? 0, screenWidth, 'mouse_scroll.x');
-    final y = _normalizedToPixel((args['y'] as int?) ?? 0, screenHeight, 'mouse_scroll.y');
+    // 和其他鼠标操作保持一致：直接使用屏幕逻辑坐标
+    final x = (args['x'] as int?) ?? 0;
+    final y = (args['y'] as int?) ?? 0;
     final scrollX = args['scroll_x'] as int? ?? 0;
     final scrollY = args['scroll_y'] as int? ?? 0;
+    final expectedOutcome = args['expected_outcome'] as String?;
+    final taskContext = args['task_context'] as String?;
 
-    debugPrint('🖥️ CUA mouse_scroll: ($x, $y) delta=($scrollX, $scrollY)');
+    debugPrint('🖥️ CUA mouse_scroll: 屏幕坐标($x, $y) delta=($scrollX, $scrollY)');
 
     if (Platform.isMacOS) {
       final clampedY = (-scrollY).clamp(-100, 100);
@@ -1476,23 +2832,26 @@ Start-Sleep -Milliseconds 50
       }
     }
 
-    // 操作后自适应等待并截图确认
-    final confirmResult = await _waitForChangeAndScreenshot('mouse_scroll');
-    final confirmInfo = confirmResult != null
-        ? '\n📸 滚动后截图确认:\n   ${confirmResult['info']}'
-        : '';
+    // 操作后自适应等待并截图确认（支持智能分析）
+    final confirmResult = await _waitForChangeAndScreenshot(
+      'mouse_scroll',
+      expectedOutcome: expectedOutcome,
+      taskContext: taskContext,
+    );
+    final confirmInfo = _formatConfirmResult(confirmResult);
     return SkillResult.ok('✅ 滚动操作完成: 水平=$scrollX, 垂直=$scrollY$confirmInfo');
   }
 
   Future<SkillResult> _mouseDrag(Map<String, dynamic> args) async {
-    final screenWidth = _detectScreenWidth();
-    final screenHeight = _detectScreenHeight();
-    final x = _normalizedToPixel((args['x'] as int?) ?? 0, screenWidth, 'mouse_drag.x');
-    final y = _normalizedToPixel((args['y'] as int?) ?? 0, screenHeight, 'mouse_drag.y');
-    final targetX = _normalizedToPixel((args['target_x'] as int?) ?? args['x'] as int? ?? 0, screenWidth, 'mouse_drag.target_x');
-    final targetY = _normalizedToPixel((args['target_y'] as int?) ?? args['y'] as int? ?? 0, screenHeight, 'mouse_drag.target_y');
+    // 和 test_cua_wechat.py 保持一致：直接使用屏幕逻辑坐标
+    final x = (args['x'] as int?) ?? 0;
+    final y = (args['y'] as int?) ?? 0;
+    final targetX = (args['target_x'] as int?) ?? args['x'] as int? ?? 0;
+    final targetY = (args['target_y'] as int?) ?? args['y'] as int? ?? 0;
+    final expectedOutcome = args['expected_outcome'] as String?;
+    final taskContext = args['task_context'] as String?;
 
-    debugPrint('🖥️ CUA mouse_drag: ($x, $y) → ($targetX, $targetY)');
+    debugPrint('🖥️ CUA mouse_drag: 屏幕坐标($x, $y) → ($targetX, $targetY)');
 
     if (Platform.isMacOS) {
       // CGEvent 使用左上角原点，与截图一致，无需翻转
@@ -1531,11 +2890,13 @@ Start-Sleep -Milliseconds 50
       await Process.run('xdotool', ['mouseup', '1']);
     }
 
-    // 操作后自适应等待并截图确认
-    final confirmResult = await _waitForChangeAndScreenshot('mouse_drag');
-    final confirmInfo = confirmResult != null
-        ? '\n📸 拖拽后截图确认:\n   ${confirmResult['info']}'
-        : '';
+    // 操作后自适应等待并截图确认（支持智能分析）
+    final confirmResult = await _waitForChangeAndScreenshot(
+      'mouse_drag',
+      expectedOutcome: expectedOutcome,
+      taskContext: taskContext,
+    );
+    final confirmInfo = _formatConfirmResult(confirmResult);
     return SkillResult.ok('✅ 拖拽完成: ($x, $y) → ($targetX, $targetY)$confirmInfo');
   }
 
@@ -1548,6 +2909,18 @@ Start-Sleep -Milliseconds 50
     if (appName.isEmpty) {
       throw CuaException('open_app', 'app_name 参数不能为空');
     }
+    final purpose = args['purpose'] as String?;
+    final expectedOutcome = args['expected_outcome'] as String?;
+    final taskContext = args['task_context'] as String?;
+
+    // 🎯 输出意图（同时显示在控制台和对话框）
+    final intentText = StringBuffer();
+    intentText.writeln('🎯 意图: 打开应用');
+    intentText.writeln('   应用: $appName');
+    if (purpose != null && purpose.isNotEmpty) {
+      intentText.writeln('   目的: $purpose');
+    }
+    debugPrint(intentText.toString().trim());
 
     debugPrint('🖥️ CUA open_app: $appName');
 
@@ -1559,12 +2932,82 @@ Start-Sleep -Milliseconds 50
       await _openAppLinux(appName);
     }
 
-    // 打开应用后自适应等待（应用启动较慢）并截图确认
-    final confirmResult = await _waitForChangeAndScreenshot('open_app');
-    final confirmInfo = confirmResult != null
-        ? '\n📸 打开应用后截图确认:\n   ${confirmResult['info']}'
-        : '';
-    return SkillResult.ok('✅ 已打开应用: $appName$confirmInfo');
+    // 打开应用后自适应等待（应用启动较慢）并截图确认（支持智能分析）
+    final confirmResult = await _waitForChangeAndScreenshot(
+      'open_app',
+      expectedOutcome: expectedOutcome,
+      taskContext: taskContext,
+    );
+    final confirmInfo = _formatConfirmResult(confirmResult);
+    final resultText = StringBuffer();
+    resultText.writeln(intentText.toString().trim());
+    resultText.writeln('');
+    resultText.writeln('✅ 已打开应用: $appName$confirmInfo');
+    return SkillResult.ok(
+      resultText.toString().trim(),
+      data: {
+        ...?confirmResult,
+        'intent': '打开应用: $appName',
+        'result': '应用已启动',
+      },
+    );
+  }
+
+  // ─── wait action: 主动等待页面/应用加载 ───
+
+  /// 等待指定秒数，期间监测屏幕变化，页面稳定后立即截图返回
+  /// 解决：操作后程序加载慢，Brain 截图时还没加载完导致误判
+  Future<SkillResult> _waitAction(Map<String, dynamic> args) async {
+    final durationSec = (args['duration'] as num?)?.toInt() ?? 2;
+    final clampedDuration = durationSec.clamp(1, 10);
+
+    debugPrint('⏳ CUA wait: 等待 ${clampedDuration}s，期间监测屏幕变化...');
+
+    // 先拿一张基准截图
+    final baseShot = await _quickScreenshot();
+
+    // 等待指定时长，同时监测屏幕是否稳定
+    final deadline = DateTime.now().add(Duration(seconds: clampedDuration));
+    const checkInterval = Duration(milliseconds: 500);
+    var previousShot = baseShot;
+    var stableCount = 0;
+    const stableThreshold = 2; // 连续 2 次稳定才认为加载完成
+
+    while (DateTime.now().isBefore(deadline)) {
+      await Future.delayed(checkInterval);
+      final currentShot = await _quickScreenshot();
+      if (currentShot == null || previousShot == null) continue;
+
+      final similarity = _computeScreenshotSimilarity(previousShot, currentShot);
+      debugPrint('⏳ wait 稳定检测: similarity=${similarity.toStringAsFixed(2)} stableCount=$stableCount');
+
+      if (similarity > 0.97) {
+        stableCount++;
+        if (stableCount >= stableThreshold) {
+          debugPrint('✅ 页面已稳定（等待了 ${DateTime.now().difference(deadline.subtract(Duration(seconds: clampedDuration))).inMilliseconds}ms）');
+          break;
+        }
+      } else {
+        stableCount = 0; // 还在变化，重置计数
+      }
+      previousShot = currentShot;
+    }
+
+    // 截图返回
+    final confirmResult = await _takeScreenshotForConfirm();
+    if (confirmResult != null) {
+      _lastScreenshotBase64 = confirmResult['base64'] as String?;
+    }
+    final confirmInfo = _formatConfirmResult(confirmResult);
+
+    return SkillResult.ok(
+      '⏳ 已等待加载（最长 ${clampedDuration}s，页面稳定后截图）$confirmInfo',
+      data: {
+        ...?confirmResult,
+        'intent': '等待页面加载 ${clampedDuration}s',
+        'result': '等待完成，已截图',
+      },
+    );
   }
 
   Future<void> _openAppMacOS(String appName) async {
@@ -1629,6 +3072,19 @@ Start-Sleep -Milliseconds 50
     if (text.isEmpty) {
       throw CuaException('key_type', 'text 参数不能为空');
     }
+    final purpose = args['purpose'] as String?;
+    final expectedOutcome = args['expected_outcome'] as String?;
+    final taskContext = args['task_context'] as String?;
+
+    // 🎯 输出意图（同时显示在控制台和对话框）
+    final displayText = text.length > 50 ? '${text.substring(0, 50)}...' : text;
+    final intentText = StringBuffer();
+    intentText.writeln('🎯 意图: 输入文本');
+    intentText.writeln('   内容: "$displayText"');
+    if (purpose != null && purpose.isNotEmpty) {
+      intentText.writeln('   目的: $purpose');
+    }
+    debugPrint(intentText.toString().trim());
 
     debugPrint('🖥️ CUA key_type: "${text.length > 50 ? '${text.substring(0, 50)}...' : text}"');
 
@@ -1759,12 +3215,25 @@ try {
       await Process.run('xdotool', ['type', '--clearmodifiers', text]);
     }
 
-    // 操作后自适应等待并截图确认
-    final confirmResult = await _waitForChangeAndScreenshot('key_type');
-    final confirmInfo = confirmResult != null
-        ? '\n📸 输入后截图确认:\n   ${confirmResult['info']}'
-        : '';
-    return SkillResult.ok('✅ 文本输入完成 (${text.length} 字符)$confirmInfo');
+    // 操作后自适应等待并截图确认（支持智能分析）
+    final confirmResult = await _waitForChangeAndScreenshot(
+      'key_type',
+      expectedOutcome: expectedOutcome,
+      taskContext: taskContext,
+    );
+    final confirmInfo = _formatConfirmResult(confirmResult);
+    final resultText = StringBuffer();
+    resultText.writeln(intentText.toString().trim());
+    resultText.writeln('');
+    resultText.writeln('✅ 文本输入完成 (${text.length} 字符)$confirmInfo');
+    return SkillResult.ok(
+      resultText.toString().trim(),
+      data: {
+        ...?confirmResult,
+        'intent': '输入文本: $displayText',
+        'result': '输入完成 (${text.length} 字符)',
+      },
+    );
   }
 
   Future<SkillResult> _keyCombo(Map<String, dynamic> args) async {
@@ -1772,6 +3241,18 @@ try {
     if (keys.isEmpty) {
       throw CuaException('key_combo', 'keys 参数不能为空');
     }
+    final purpose = args['purpose'] as String?;
+    final expectedOutcome = args['expected_outcome'] as String?;
+    final taskContext = args['task_context'] as String?;
+
+    // 🎯 输出意图（同时显示在控制台和对话框）
+    final intentText = StringBuffer();
+    intentText.writeln('🎯 意图: 执行快捷键');
+    intentText.writeln('   按键: $keys');
+    if (purpose != null && purpose.isNotEmpty) {
+      intentText.writeln('   目的: $purpose');
+    }
+    debugPrint(intentText.toString().trim());
 
     debugPrint('🖥️ CUA key_combo: $keys');
 
@@ -1783,12 +3264,25 @@ try {
       await _keyComboLinux(keys);
     }
 
-    // 操作后自适应等待并截图确认
-    final confirmResult = await _waitForChangeAndScreenshot('key_combo');
-    final confirmInfo = confirmResult != null
-        ? '\n📸 快捷键后截图确认:\n   ${confirmResult['info']}'
-        : '';
-    return SkillResult.ok('✅ 快捷键执行成功: $keys$confirmInfo');
+    // 操作后自适应等待并截图确认（支持智能分析）
+    final confirmResult = await _waitForChangeAndScreenshot(
+      'key_combo',
+      expectedOutcome: expectedOutcome,
+      taskContext: taskContext,
+    );
+    final confirmInfo = _formatConfirmResult(confirmResult);
+    final resultText = StringBuffer();
+    resultText.writeln(intentText.toString().trim());
+    resultText.writeln('');
+    resultText.writeln('✅ 快捷键执行成功: $keys$confirmInfo');
+    return SkillResult.ok(
+      resultText.toString().trim(),
+      data: {
+        ...?confirmResult,
+        'intent': '执行快捷键: $keys',
+        'result': '快捷键已执行',
+      },
+    );
   }
 
   Future<void> _keyComboMacOS(String keys) async {
@@ -2018,42 +3512,7 @@ public class WinKeyCombo {
   // UI 树解析（优化1）
   // ═══════════════════════════════════════════
 
-  Future<SkillResult> _getUiTree(Map<String, dynamic> args) async {
-    final maxDepth = ((args['max_depth'] as int?) ?? 6).clamp(1, 10);
-    final appFilter = args['app_filter'] as String?;
-
-    debugPrint('🌳 CUA get_ui_tree: maxDepth=$maxDepth appFilter=$appFilter');
-
-    try {
-      final treeResult = await CuaAccessibility.getUiTree(
-        maxDepth: maxDepth,
-        appFilter: appFilter,
-      );
-
-      final buffer = StringBuffer();
-      buffer.writeln('✅ UI 树解析成功');
-      if (treeResult.appName.isNotEmpty) {
-        buffer.writeln('   当前应用: ${treeResult.appName}');
-      }
-      if (treeResult.appBundleId.isNotEmpty) {
-        buffer.writeln('   Bundle ID: ${treeResult.appBundleId}');
-      }
-      buffer.writeln('   元素数量: ${treeResult.nodeCount}');
-      buffer.writeln('   解析深度: $maxDepth');
-      buffer.writeln();
-      buffer.writeln('🌳 UI 元素树:');
-      buffer.writeln(treeResult.text);
-
-      return SkillResult.ok(buffer.toString(), data: {
-        'nodeCount': treeResult.nodeCount,
-        'appName': treeResult.appName,
-      });
-    } on StateError catch (e) {
-      throw CuaException('get_ui_tree', e.message);
-    } catch (e) {
-      throw CuaException('get_ui_tree', 'UI 树解析失败: $e');
-    }
-  }
+  
 
   // ═══════════════════════════════════════════
   // 任务管理（优化6+8）

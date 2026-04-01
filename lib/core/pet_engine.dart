@@ -24,9 +24,13 @@ class PetEngine extends ChangeNotifier {
   /// 上次重置挂机金币的日期（用于每日重置）
   String _lastIdleResetDate = '';
   /// 每日挂机金币上限
-  static const int _maxDailyIdleCoins = 100;
+  static const int _maxDailyIdleCoins = 200;
   /// 挂机金币间隔（秒）
   static const int _idleCoinIntervalSeconds = 60;
+  /// 今日通过对话获得的金币数
+  int _dailyChatCoins = 0;
+  /// 每日对话金币上限
+  static const int _maxDailyChatCoins = 20;
 
   /// 成就管理器引用（由外部设置，用于触发成就事件）
   AchievementManager? achievementManager;
@@ -424,6 +428,7 @@ class PetEngine extends ChangeNotifier {
     // 记录成就金币事件
     achievementManager?.recordCoinsEarned(bonus);
     _saveState();
+    _saveIdleCoinState();
     notifyListeners();
   }
 
@@ -432,6 +437,7 @@ class PetEngine extends ChangeNotifier {
     final today = DateTime.now().toIso8601String().substring(0, 10); // YYYY-MM-DD
     if (_lastIdleResetDate != today) {
       _dailyIdleCoins = 0;
+      _dailyChatCoins = 0;
       _lastIdleResetDate = today;
       _saveIdleCoinState();
     }
@@ -452,25 +458,35 @@ class PetEngine extends ChangeNotifier {
     _checkDailyIdleReset();
   }
 
-  /// 对话获取金币（每次对话获得更多金币）
+  /// 对话获取金币（每日前 20 次对话有金币奖励）
   void earnChatCoins() {
+    // 检查每日对话金币上限
+    _checkDailyIdleReset();
+    if (_dailyChatCoins >= _maxDailyChatCoins) return;
+
     // 对话奖励：5-15 金币随机，等级越高越多
     final baseCoins = 5;
     final levelBonus = _state.level;
     final randomBonus = _random.nextInt(10); // 0-9 随机
     final totalCoins = baseCoins + (levelBonus ~/ 2) + randomBonus;
 
+    _dailyChatCoins += 1; // 计数对话次数（不是金币数）
     _state = _state.copyWith(coins: _state.coins + totalCoins);
     achievementManager?.recordCoinsEarned(totalCoins);
     _saveState();
     notifyListeners();
-    debugPrint('🦢 对话奖励 $totalCoins 金币（基础$baseCoins + 等级${levelBonus ~/ 2} + 随机$randomBonus）');
+    debugPrint('🦢 对话奖励 $totalCoins 金币（今日第$_dailyChatCoins/$_maxDailyChatCoins 次）');
   }
 
   /// 获取今日挂机金币信息
   int get dailyIdleCoins => _dailyIdleCoins;
   int get maxDailyIdleCoins => _maxDailyIdleCoins;
   int get remainingIdleCoins => (_maxDailyIdleCoins - _dailyIdleCoins).clamp(0, _maxDailyIdleCoins);
+
+  /// 获取今日对话金币信息
+  int get dailyChatCoins => _dailyChatCoins;
+  int get maxDailyChatCoins => _maxDailyChatCoins;
+  int get remainingChatCoins => (_maxDailyChatCoins - _dailyChatCoins).clamp(0, _maxDailyChatCoins);
 
   /// 商店购买物品
   bool buyItem(ShopItem item) {
@@ -940,9 +956,9 @@ class PetEngine extends ChangeNotifier {
     }
   }
 
-  /// 检查升级
+  /// 检查升级（支持多级连升）
   void _checkLevelUp() {
-    if (_state.exp >= _state.expToNextLevel) {
+    while (_state.exp >= _state.expToNextLevel) {
       final newLevel = _state.level + 1;
       _state = _state.copyWith(
         level: newLevel,
@@ -1065,42 +1081,6 @@ class PetEngine extends ChangeNotifier {
       _welcomeSentToday = true;
       onMilestone?.call(welcomeMessage, 'welcome');
     }
-  }
-
-  /// 检查连续登录天数
-  int getConsecutiveLoginDays() {
-    final box = Hive.box('pet_state');
-    final lastLoginDate = box.get('last_login_date', defaultValue: '') as String;
-    final consecutiveDays = box.get('consecutive_login_days', defaultValue: 0) as int;
-
-    final today = DateTime.now();
-    final todayStr = '${today.year}-${today.month.toString().padLeft(2, '0')}-${today.day.toString().padLeft(2, '0')}';
-
-    if (lastLoginDate == todayStr) {
-      return consecutiveDays;
-    }
-
-    // 检查是否是连续日期
-    int newConsecutive;
-    if (lastLoginDate.isNotEmpty) {
-      try {
-        final lastDate = DateTime.parse(lastLoginDate);
-        final daysDiff = today.difference(lastDate).inDays;
-        if (daysDiff == 1) {
-          newConsecutive = consecutiveDays + 1;
-        } else {
-          newConsecutive = 1; // 断签
-        }
-      } catch (_) {
-        newConsecutive = 1;
-      }
-    } else {
-      newConsecutive = 1;
-    }
-
-    box.put('last_login_date', todayStr);
-    box.put('consecutive_login_days', newConsecutive);
-    return newConsecutive;
   }
 
   /// 鹅宝主动情绪表达（由行为引擎定时触发）

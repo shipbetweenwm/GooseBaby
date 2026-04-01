@@ -174,7 +174,6 @@ class _PetWindowState extends State<PetWindow> with TickerProviderStateMixin, Wi
         }
       }
 
-      debugPrint('🦢 HitRects: window=${size.width}x${size.height}, rects=$rects');
       await _hitTestChannel.invokeMethod('setHitRects', rects);
     } catch (e) {
       debugPrint('🦢 更新 hit rects 失败: $e');

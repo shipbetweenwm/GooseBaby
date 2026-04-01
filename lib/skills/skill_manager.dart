@@ -47,6 +47,9 @@ class SkillManager extends ChangeNotifier {
   /// 新闻技能实例（需要运行时注入 GNews API Key）
   NewsSkill? _newsSkill;
   
+  /// CUA 桌面控制技能实例（需要运行时注入 LLMManager）
+  CuaSkill? _cuaSkill;
+  
   /// MCP 工具技能实例（动态注入 MCP 工具）
   McpToolSkill? _mcpToolSkill;
 
@@ -88,7 +91,11 @@ class SkillManager extends ChangeNotifier {
     register(ReadFileSkill());
     register(ScheduleTaskSkill());
     register(BrowserSkill());    // 统一的浏览器自动化技能
-    register(CuaSkill());        // CUA 桌面控制（视觉感知+操作模拟）
+    
+    // 注册 CUA 桌面控制技能（需要运行时注入 LLMManager）
+    _cuaSkill = CuaSkill();
+    register(_cuaSkill!);
+    
     register(WebFetchSkill());   // 网页抓取技能
     register(BatchFileSkill());  // 批量文件操作技能
     
@@ -132,7 +139,15 @@ class SkillManager extends ChangeNotifier {
   void configureAgentTeamsSkill({
     void Function(TeamMessage message)? onMessage,
   }) {
-    _agentTeamsSkill?.onMessage = onMessage;
+    if (_agentTeamsSkill != null) {
+      _agentTeamsSkill!.onMessage = onMessage;
+    }
+  }
+  
+  /// 注入 LLMManager 到 CUA 技能
+  void setLLMManagerForCua(dynamic llmManager) {
+    _cuaSkill?.setLLMManager(llmManager);
+    debugPrint('🦢 CUA 技能已注入 LLMManager');
   }
 
   /// 配置搜索 / 新闻技能的 API Key 及 MemoryManager

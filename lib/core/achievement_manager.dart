@@ -68,6 +68,9 @@ class AchievementStats {
   final int loginDays;         // 累计登录天数
   final double currentMood;    // 当前心情
   final double currentHealth;  // 当前健康度
+  final double currentHunger;  // 当前饱食度
+  final double currentEnergy;  // 当前精力
+  final double currentClean;   // 当前清洁度
 
   const AchievementStats({
     this.companionDays = 0,
@@ -85,6 +88,9 @@ class AchievementStats {
     this.loginDays = 0,
     this.currentMood = 80,
     this.currentHealth = 90,
+    this.currentHunger = 80,
+    this.currentEnergy = 80,
+    this.currentClean = 80,
   });
 
   Map<String, dynamic> toJson() => {
@@ -103,6 +109,9 @@ class AchievementStats {
     'loginDays': loginDays,
     'currentMood': currentMood,
     'currentHealth': currentHealth,
+    'currentHunger': currentHunger,
+    'currentEnergy': currentEnergy,
+    'currentClean': currentClean,
   };
 
   factory AchievementStats.fromJson(Map<String, dynamic> json) => AchievementStats(
@@ -121,6 +130,9 @@ class AchievementStats {
     loginDays: json['loginDays'] as int? ?? 0,
     currentMood: (json['currentMood'] as num?)?.toDouble() ?? 80,
     currentHealth: (json['currentHealth'] as num?)?.toDouble() ?? 90,
+    currentHunger: (json['currentHunger'] as num?)?.toDouble() ?? 80,
+    currentEnergy: (json['currentEnergy'] as num?)?.toDouble() ?? 80,
+    currentClean: (json['currentClean'] as num?)?.toDouble() ?? 80,
   );
 
   AchievementStats copyWith({
@@ -139,6 +151,9 @@ class AchievementStats {
     int? loginDays,
     double? currentMood,
     double? currentHealth,
+    double? currentHunger,
+    double? currentEnergy,
+    double? currentClean,
   }) {
     return AchievementStats(
       companionDays: companionDays ?? this.companionDays,
@@ -156,6 +171,9 @@ class AchievementStats {
       loginDays: loginDays ?? this.loginDays,
       currentMood: currentMood ?? this.currentMood,
       currentHealth: currentHealth ?? this.currentHealth,
+      currentHunger: currentHunger ?? this.currentHunger,
+      currentEnergy: currentEnergy ?? this.currentEnergy,
+      currentClean: currentClean ?? this.currentClean,
     );
   }
 }
@@ -258,6 +276,9 @@ class AchievementManager extends ChangeNotifier {
       coins: petState.coins,
       currentMood: petState.mood,
       currentHealth: petState.health,
+      currentHunger: petState.hunger,
+      currentEnergy: petState.energy,
+      currentClean: petState.clean,
     );
     _checkAllAchievements();
   }
@@ -376,6 +397,17 @@ class AchievementManager extends ChangeNotifier {
   /// 获取某个成就的解锁时间
   DateTime? getUnlockTime(String achievementId) =>
       _unlocked[achievementId]?.unlockedAt;
+
+  /// 获取成就进度（对特殊成就返回实际解锁数）
+  (int current, int target) getAchievementProgress(Achievement achievement) {
+    if (achievement.id == 'achievement_10') {
+      return (_unlocked.length.clamp(0, 10), 10);
+    }
+    if (achievement.id == 'achievement_all') {
+      return (_unlocked.length.clamp(0, allAchievements.length - 1), allAchievements.length - 1);
+    }
+    return achievement.getProgress(_stats);
+  }
 
   /// 按类别获取成就
   List<Achievement> getByCategory(AchievementCategory category) =>
@@ -738,12 +770,20 @@ class AchievementManager extends ChangeNotifier {
         rarity: AchievementRarity.epic,
         rewardCoins: 200,
         rewardExp: 50,
-        checkCondition: (s) => s.currentMood >= 90 && s.currentHealth >= 90,
+        checkCondition: (s) =>
+            s.currentMood >= 90 &&
+            s.currentHealth >= 90 &&
+            s.currentHunger >= 90 &&
+            s.currentEnergy >= 90 &&
+            s.currentClean >= 90,
         getProgress: (s) {
           int count = 0;
           if (s.currentMood >= 90) count++;
           if (s.currentHealth >= 90) count++;
-          return (count, 2);
+          if (s.currentHunger >= 90) count++;
+          if (s.currentEnergy >= 90) count++;
+          if (s.currentClean >= 90) count++;
+          return (count, 5);
         },
       ),
       Achievement(

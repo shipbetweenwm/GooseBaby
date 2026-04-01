@@ -314,36 +314,9 @@ def traverse(node):
 traverse(tree)
 print(f"  ✅ 提取 {len(markers)} 个标记")
 
-# ═══ 推断应用窗口边界，过滤窗口外的元素 ═══
-# 从 UI 树根节点的子元素中找面积最大的窗口作为主窗口边界
-win_bounds = None
-for child in tree.get('children', []):
-    if 'x' in child and 'width' in child and 'height' in child:
-        if child['width'] > 0 and child['height'] > 0:
-            if win_bounds is None or child['width'] * child['height'] > win_bounds[2] * win_bounds[3]:
-                win_bounds = (child['x'], child['y'], child['width'], child['height'])
-
-if win_bounds:
-    bx, by, bw, bh = win_bounds
-    # 转换为像素坐标（与 markers 一致）
-    bx_px = bx * scale_x
-    by_px = by * scale_y
-    bw_px = bw * scale_x
-    bh_px = bh * scale_y
-    margin = 5  # 像素容差
-    before_filter = len(markers)
-    filtered = []
-    for m in markers:
-        # 元素中心必须在窗口边界内
-        if (bx_px - margin <= m['cx'] <= bx_px + bw_px + margin and
-            by_px - margin <= m['cy'] <= by_px + bh_px + margin):
-            filtered.append(m)
-    markers = filtered
-    print(f"  ✅ 窗口边界过滤 (逻辑:{bx:.0f},{by:.0f} {bw:.0f}x{bh:.0f}): {before_filter} → {len(markers)}")
-
 # ═══ 合并标记 ═══
 before_count = len(markers)
-MERGE_DIST = 50  # 中心距离阈值（像素）
+MERGE_DIST = 30  # 中心距离阈值（像素）
 
 def _is_contained(inner, outer, margin=0.60):
     """判断 inner 是否被 outer 包含（≥80% 面积重叠即视为包含）"""

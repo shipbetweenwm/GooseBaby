@@ -248,7 +248,7 @@ class _AchievementPanelState extends State<AchievementPanel>
             final achievement = catAchievements[index];
             final isUnlocked = manager.isUnlocked(achievement.id);
             final unlockTime = manager.getUnlockTime(achievement.id);
-            final progress = achievement.getProgress(manager.stats);
+            final progress = manager.getAchievementProgress(achievement);
 
             return _AchievementCard(
               achievement: achievement,
