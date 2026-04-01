@@ -19,6 +19,7 @@ import '../../ai/memory/context_manager.dart';
 import '../../ai/self_improvement.dart';
 import '../../ai/prompts.dart';
 import '../../core/pet_engine.dart';
+import '../../core/emotion_analyzer.dart';
 import '../../models/models.dart';
 import '../../skills/skill_manager.dart';
 import '../../skills/skill_file_utils.dart';
@@ -874,6 +875,13 @@ class _ChatPanelState extends State<ChatPanel> with SingleTickerProviderStateMix
     final petEngine = context.read<PetEngine>();
     petEngine.startWorking();
     petEngine.onUserActive(); // 标记用户活跃
+    
+    // 情绪分析 + 性格演化（千人千宠）
+    EmotionResult? userEmotion;
+    if (text.isNotEmpty) {
+      userEmotion = petEngine.processUserMessage(text);
+      debugPrint('🦆 用户情绪分析: ${userEmotion.emotion}, 强度: ${userEmotion.intensity.toStringAsFixed(2)}');
+    }
 
     // 记录成就事件（对话）
     petEngine.achievementManager?.recordChat();
@@ -1076,6 +1084,21 @@ class _ChatPanelState extends State<ChatPanel> with SingleTickerProviderStateMix
         promptLevel, 
         workMode: widget.workMode,
       );
+      
+      // 添加动态情绪和性格调整（千人千宠）
+      if (userEmotion != null) {
+        final personalityTonePrompt = petEngine.getPersonalityTonePrompt();
+        final dynamicAdjustment = GoosePrompts.getDynamicPromptAdjustment(
+          userEmotion: userEmotion.emotion,
+          emotionIntensity: userEmotion.intensity,
+          gentleness: petEngine.state.gentleness,
+          liveliness: petEngine.state.liveliness,
+          tsundere: petEngine.state.tsundere,
+          personalityTonePrompt: personalityTonePrompt,
+        );
+        systemPrompt += dynamicAdjustment;
+        debugPrint('🦆 添加动态调整: ${userEmotion.emotion}, 温柔度=${petEngine.state.gentleness.toStringAsFixed(1)}, 活泼度=${petEngine.state.liveliness.toStringAsFixed(1)}, 傲娇度=${petEngine.state.tsundere.toStringAsFixed(1)}');
+      }
       
       // 添加记忆上下文（优化6：作为 Segment 管理）
       if (effectiveMemoryContext.isNotEmpty) {

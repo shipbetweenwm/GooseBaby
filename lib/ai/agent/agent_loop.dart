@@ -274,20 +274,36 @@ class AgentLoop {
       
       // ── 检查执行模式 ──
       if (mode == AgentMode.ask) {
-        // Ask 模式：不执行工具，直接返回响应
-        debugPrint('💬 [Agent] Ask 模式，跳过工具执行');
-        final toolNames = response.toolCalls.map((tc) => tc.name).join(', ');
-        final result = AgentLoopResult(
-          text: '【Ask 模式】我只提供信息和建议，不执行实际操作。\n\n'
-              '你想执行的操作涉及以下工具: $toolNames\n\n'
-              '如需执行操作，请切换到 **Craft 模式**（立即执行）或 **Plan 模式**（先规划后执行）。',
-          apiMessages: allApiMessages,
-          skillNames: [],
-          outputFiles: [],
-          steps: steps,
-        );
-        await hookManager.triggerLoopEnd(result);
-        return result;
+        // Ask 模式：只允许执行只读工具，拒绝写操作工具
+        final readOnlyTools = {
+          'think', 'save_memory', 'web_search', 'search',
+          'read_file', 'activate_skill', 'list_dir',
+          'search_file', 'search_content',
+        };
+        
+        final writeTools = response.toolCalls
+            .where((tc) => !readOnlyTools.contains(tc.name))
+            .map((tc) => tc.name)
+            .toSet();
+        
+        if (writeTools.isNotEmpty) {
+          // 有写操作工具，拒绝执行
+          debugPrint('💬 [Agent] Ask 模式，拒绝写操作: ${writeTools.join(', ')}');
+          final result = AgentLoopResult(
+            text: '【Ask 模式】我只提供信息和建议，不执行实际操作。\n\n'
+                '你想执行的操作涉及写操作: ${writeTools.join(', ')}\n\n'
+                '如需执行操作，请切换到 **Craft 模式**（立即执行）或 **Plan 模式**（先规划后执行）。',
+            apiMessages: allApiMessages,
+            skillNames: [],
+            outputFiles: [],
+            steps: steps,
+          );
+          await hookManager.triggerLoopEnd(result);
+          return result;
+        }
+        
+        // 只有只读工具，继续执行（搜索、思考、读取等）
+        debugPrint('💬 [Agent] Ask 模式，执行只读工具: ${response.toolCalls.map((tc) => tc.name).join(', ')}');
       }
       
       if (mode == AgentMode.plan) {

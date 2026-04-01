@@ -5,6 +5,8 @@ import 'package:hive/hive.dart';
 import '../models/models.dart';
 import '../services/diary_service.dart';
 import 'achievement_manager.dart';
+import 'emotion_analyzer.dart';
+import 'personality_evolver.dart';
 
 /// 宠物行为引擎
 /// 管理鹅宝的状态、行为状态机、属性衰减、金币挂机和物理移动
@@ -903,6 +905,113 @@ class PetEngine extends ChangeNotifier {
   void stopWorking() {
     _isWorking = false;
     _updateBehavior();
+  }
+  
+  /// 处理用户消息（情绪分析 + 性格演化）
+  /// 返回情绪分析结果，供对话系统使用
+  EmotionResult processUserMessage(String userMessage) {
+    // 1. 分析用户情绪
+    final emotionResult = EmotionAnalyzer.analyze(userMessage);
+    
+    // 2. 统计表情符号使用
+    final emojiCount = EmotionAnalyzer.countEmojis(userMessage);
+    
+    // 3. 更新互动统计
+    int happyInteractions = _state.happyInteractions;
+    int sadInteractions = _state.sadInteractions;
+    int calmInteractions = _state.calmInteractions;
+    int excitedInteractions = _state.excitedInteractions;
+    
+    switch (emotionResult.emotion) {
+      case EmotionAnalyzer.happy:
+      case EmotionAnalyzer.grateful:
+        happyInteractions++;
+        break;
+      case EmotionAnalyzer.sad:
+      case EmotionAnalyzer.anxious:
+      case EmotionAnalyzer.frustrated:
+        sadInteractions++;
+        break;
+      case EmotionAnalyzer.excited:
+        excitedInteractions++;
+        break;
+      default:
+        calmInteractions++;
+    }
+    
+    // 4. 更新平均消息长度
+    final newTotalMessages = _state.totalMessages + 1;
+    final newAvgMessageLength = 
+        (_state.avgMessageLength * _state.totalMessages + userMessage.length) / 
+        newTotalMessages;
+    
+    // 5. 性格演化
+    final newTraits = PersonalityEvolver.evolve(
+      _state,
+      userMessage,
+      emotionResult,
+    );
+    
+    // 6. 根据用户情绪调整鹅宝的心情
+    double moodDelta = 0;
+    switch (emotionResult.emotion) {
+      case EmotionAnalyzer.happy:
+      case EmotionAnalyzer.excited:
+      case EmotionAnalyzer.grateful:
+        moodDelta = 5 * emotionResult.intensity;
+        break;
+      case EmotionAnalyzer.sad:
+      case EmotionAnalyzer.anxious:
+        moodDelta = -3 * emotionResult.intensity;
+        break;
+      case EmotionAnalyzer.angry:
+        moodDelta = -2 * emotionResult.intensity;
+        break;
+    }
+    
+    // 7. 更新状态
+    _state = _state.copyWith(
+      totalInteractions: _state.totalInteractions + 1,
+      happyInteractions: happyInteractions,
+      sadInteractions: sadInteractions,
+      calmInteractions: calmInteractions,
+      excitedInteractions: excitedInteractions,
+      totalMessages: newTotalMessages,
+      avgMessageLength: newAvgMessageLength,
+      emojiUsageCount: _state.emojiUsageCount + emojiCount,
+      gentleness: newTraits.gentleness,
+      liveliness: newTraits.liveliness,
+      tsundere: newTraits.tsundere,
+      mood: (_state.mood + moodDelta).clamp(0.0, 100.0),
+    );
+    
+    // 8. 保存状态
+    _saveState();
+    notifyListeners();
+    
+    return emotionResult;
+  }
+  
+  /// 获取当前性格描述
+  String getPersonalityDescription() {
+    return PersonalityEvolver.getPersonalityDescription(
+      PersonalityTraits(
+        gentleness: _state.gentleness,
+        liveliness: _state.liveliness,
+        tsundere: _state.tsundere,
+      ),
+    );
+  }
+  
+  /// 获取性格调整后的语气提示词
+  String getPersonalityTonePrompt() {
+    return PersonalityEvolver.getTonePrompt(
+      PersonalityTraits(
+        gentleness: _state.gentleness,
+        liveliness: _state.liveliness,
+        tsundere: _state.tsundere,
+      ),
+    );
   }
 
   /// 鼠标悬浮触发被撸

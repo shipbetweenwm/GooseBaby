@@ -14,6 +14,21 @@ class PetState {
   final double x;          // 位置 X
   final double y;          // 位置 Y
   final bool facingRight;  // 朝向
+  
+  // ── 性格维度（千人千宠）──
+  final double gentleness;  // 温柔度 0-100（越高越温柔体贴）
+  final double liveliness;  // 活泼度 0-100（越高越活泼好动）
+  final double tsundere;    // 傲娇度 0-100（越高越傲娇可爱）
+  
+  // ── 用户互动风格统计 ──
+  final int totalInteractions;      // 总互动次数
+  final int happyInteractions;      // 开心互动次数
+  final int sadInteractions;        // 悲伤互动次数
+  final int calmInteractions;       // 平静互动次数
+  final int excitedInteractions;    // 兴奋互动次数
+  final int totalMessages;          // 总消息数
+  final double avgMessageLength;    // 平均消息长度
+  final int emojiUsageCount;        // 表情符号使用次数
 
   const PetState({
     this.mood = 80,
@@ -30,6 +45,19 @@ class PetState {
     this.x = 0,
     this.y = 0,
     this.facingRight = true,
+    // 性格维度默认值（中性）
+    this.gentleness = 50,
+    this.liveliness = 50,
+    this.tsundere = 30,
+    // 用户互动风格统计默认值
+    this.totalInteractions = 0,
+    this.happyInteractions = 0,
+    this.sadInteractions = 0,
+    this.calmInteractions = 0,
+    this.excitedInteractions = 0,
+    this.totalMessages = 0,
+    this.avgMessageLength = 0,
+    this.emojiUsageCount = 0,
   });
 
   PetState copyWith({
@@ -47,6 +75,17 @@ class PetState {
     double? x,
     double? y,
     bool? facingRight,
+    double? gentleness,
+    double? liveliness,
+    double? tsundere,
+    int? totalInteractions,
+    int? happyInteractions,
+    int? sadInteractions,
+    int? calmInteractions,
+    int? excitedInteractions,
+    int? totalMessages,
+    double? avgMessageLength,
+    int? emojiUsageCount,
   }) {
     return PetState(
       mood: mood ?? this.mood,
@@ -63,6 +102,17 @@ class PetState {
       x: x ?? this.x,
       y: y ?? this.y,
       facingRight: facingRight ?? this.facingRight,
+      gentleness: gentleness ?? this.gentleness,
+      liveliness: liveliness ?? this.liveliness,
+      tsundere: tsundere ?? this.tsundere,
+      totalInteractions: totalInteractions ?? this.totalInteractions,
+      happyInteractions: happyInteractions ?? this.happyInteractions,
+      sadInteractions: sadInteractions ?? this.sadInteractions,
+      calmInteractions: calmInteractions ?? this.calmInteractions,
+      excitedInteractions: excitedInteractions ?? this.excitedInteractions,
+      totalMessages: totalMessages ?? this.totalMessages,
+      avgMessageLength: avgMessageLength ?? this.avgMessageLength,
+      emojiUsageCount: emojiUsageCount ?? this.emojiUsageCount,
     );
   }
 
@@ -83,6 +133,17 @@ class PetState {
     'coins': coins,
     'companionDays': companionDays,
     'emotion': emotion,
+    'gentleness': gentleness,
+    'liveliness': liveliness,
+    'tsundere': tsundere,
+    'totalInteractions': totalInteractions,
+    'happyInteractions': happyInteractions,
+    'sadInteractions': sadInteractions,
+    'calmInteractions': calmInteractions,
+    'excitedInteractions': excitedInteractions,
+    'totalMessages': totalMessages,
+    'avgMessageLength': avgMessageLength,
+    'emojiUsageCount': emojiUsageCount,
   };
 
   factory PetState.fromJson(Map<String, dynamic> json) => PetState(
@@ -96,6 +157,17 @@ class PetState {
     coins: json['coins'] as int? ?? 100,
     companionDays: json['companionDays'] as int? ?? 1,
     emotion: json['emotion'] as String? ?? 'normal',
+    gentleness: (json['gentleness'] as num?)?.toDouble() ?? 50,
+    liveliness: (json['liveliness'] as num?)?.toDouble() ?? 50,
+    tsundere: (json['tsundere'] as num?)?.toDouble() ?? 30,
+    totalInteractions: json['totalInteractions'] as int? ?? 0,
+    happyInteractions: json['happyInteractions'] as int? ?? 0,
+    sadInteractions: json['sadInteractions'] as int? ?? 0,
+    calmInteractions: json['calmInteractions'] as int? ?? 0,
+    excitedInteractions: json['excitedInteractions'] as int? ?? 0,
+    totalMessages: json['totalMessages'] as int? ?? 0,
+    avgMessageLength: (json['avgMessageLength'] as num?)?.toDouble() ?? 0,
+    emojiUsageCount: json['emojiUsageCount'] as int? ?? 0,
   );
 }
 
