@@ -68,6 +68,9 @@ class _ConversationState {
   bool cuaSessionActive = false;
   bool cuaSessionFailed = false;
   CancellationToken? cancellationToken;
+  
+  // 用户输入草稿（切换会话时保存）
+  String inputText = '';
 
   // Team 状态
   bool showAgentTeamPanel = false;
@@ -110,18 +113,16 @@ class _ChatPanelState extends State<ChatPanel> with SingleTickerProviderStateMix
   /// 所有对话的独立状态缓存（按 conversationId 隔离）
   final Map<String, _ConversationState> _conversationStates = {};
 
-  /// 异步流程（如 _sendMessage）中锁定的对话 ID
-  /// 在异步流程期间，_cs 优先使用此 ID，防止用户切换对话后状态串写
-  /// 注意：同一时间只允许一个异步流程锁定（_isLoading 检查保证了这一点）
-  String? _lockedConversationId;
+  /// 当前正在处理中的对话ID集合（支持多个会话并发处理）
+  /// 每个异步流程使用局部变量持有自己的 targetId，此集合用于 UI 判断
+  final Set<String> _activeConversationIds = {};
 
   /// 获取当前对话的状态（如果不存在则创建默认状态）
   /// 当 _currentConversationId 为 null 时，使用一个临时兜底状态，避免初始化阶段崩溃
   static final _ConversationState _fallbackState = _ConversationState();
   
-  _ConversationState get _cs {
-    // 异步流程中优先使用锁定的对话 ID
-    final id = _lockedConversationId ?? _currentConversationId;
+  /// 根据 ID 获取指定对话的状态
+  _ConversationState _getConversationState(String? id) {
     if (id == null) return _fallbackState;
     if (!_conversationStates.containsKey(id)) {
       _conversationStates[id] = _ConversationState();
@@ -129,65 +130,87 @@ class _ChatPanelState extends State<ChatPanel> with SingleTickerProviderStateMix
     return _conversationStates[id]!;
   }
 
-  // ===== 以下所有运行时状态都代理到 _cs，实现对话间隔离 =====
-  List<_ChatMessage> get _messages => _cs.messages;
-  bool get _isLoading => _cs.isLoading;
-  set _isLoading(bool v) => _cs.isLoading = v;
+  /// 兼容旧代码：_cs 指向当前显示的对话（同 _displayCs）
+  /// 注意：异步流程中不应使用 _cs，应使用 _getConversationState(targetId)
+  _ConversationState get _cs => _displayCs;
+  
+  /// 用于 UI 显示的状态（始终使用当前查看的对话ID）
+  _ConversationState get _displayCs => _getConversationState(_currentConversationId);
 
-  List<PendingPlan> get _pendingPlans => _cs.pendingPlans;
-  int get _activePlanIndex => _cs.activePlanIndex;
-  set _activePlanIndex(int v) => _cs.activePlanIndex = v;
-  String get _streamingContent => _cs.streamingContent;
-  set _streamingContent(String v) => _cs.streamingContent = v;
-  List<_ToolCallStep> get _toolCallSteps => _cs.toolCallSteps;
-  List<MessageAttachment> get _pendingAttachments => _cs.pendingAttachments;
-  set _pendingAttachments(List<MessageAttachment> v) => _cs.pendingAttachments = v;
-  bool get _cuaSessionActive => _cs.cuaSessionActive;
-  set _cuaSessionActive(bool v) => _cs.cuaSessionActive = v;
-  bool get _cuaSessionFailed => _cs.cuaSessionFailed;
-  set _cuaSessionFailed(bool v) => _cs.cuaSessionFailed = v;
-  CancellationToken? get _cancellationToken => _cs.cancellationToken;
-  set _cancellationToken(CancellationToken? v) => _cs.cancellationToken = v;
+  // ===== UI 显示状态：始终显示当前查看的会话内容，不跨会话混合 =====
+  // 
+  // 设计原则：
+  // - 所有 UI getter 统一使用 _displayCs（跟随 _currentConversationId）
+  // - 当用户切换到 B 会话时，即使 A 会话还在后台流式输出，
+  //   B 会话的 UI 也只显示 B 自己的状态（干净的，无流式内容）
+  // - 当用户切回 A 会话时，A 的流式内容已通过 targetCs 正确写入 A 的状态，
+  //   此时 _displayCs 指向 A，自然能正确显示 A 的流式内容
+  // - 之前的 bug：_streamingContent/_toolCallSteps 在有锁定时跨会话
+  //   显示 A 的内容到 B 的 UI 中，导致"串窗口"
+  List<_ChatMessage> get _messages => _displayCs.messages;
+  bool get _isLoading => _displayCs.isLoading;
+  String get _streamingContent => _displayCs.streamingContent;
+  List<_ToolCallStep> get _toolCallSteps => _displayCs.toolCallSteps;
+  List<PendingPlan> get _pendingPlans => _displayCs.pendingPlans;
+  int get _activePlanIndex => _displayCs.activePlanIndex;
+  List<MessageAttachment> get _pendingAttachments => _displayCs.pendingAttachments;
+  CancellationToken? get _cancellationToken => _displayCs.cancellationToken;
+  
+  // ===== 异步流程写入状态（已弃用 setter，改为在异步方法中直接操作 targetCs）=====
+  // 注意：所有 setter 已移除！异步流程中应使用局部变量 targetCs 来读写状态。
+  // 以下 getter/setter 仅用于非异步的同步上下文（如 UI 交互、initState 等）
+  set _isLoading(bool v) => _displayCs.isLoading = v;
+  set _streamingContent(String v) => _displayCs.streamingContent = v;
+  set _activePlanIndex(int v) => _displayCs.activePlanIndex = v;
+  set _pendingAttachments(List<MessageAttachment> v) => _displayCs.pendingAttachments = v;
+  set _cancellationToken(CancellationToken? v) => _displayCs.cancellationToken = v;
+  
+  // ===== CUA 状态：读写都使用 _displayCs（同步上下文） =====
+  bool get _cuaSessionActive => _displayCs.cuaSessionActive;
+  set _cuaSessionActive(bool v) => _displayCs.cuaSessionActive = v;
 
-  bool get _showAgentTeamPanel => _cs.showAgentTeamPanel;
-  set _showAgentTeamPanel(bool v) => _cs.showAgentTeamPanel = v;
-  List<TeamAgent> get _teamAgents => _cs.teamAgents;
-  TeamMessageBoard get _teamMessageBoard => _cs.teamMessageBoard;
-  List<TeamTask> get _dynamicTasks => _cs.dynamicTasks;
-  Map<String, String> get _agentStatus => _cs.agentStatus;
-  Map<String, String> get _taskOutputFiles => _cs.taskOutputFiles;
-  String? get _currentOutputDir => _cs.currentOutputDir;
-  set _currentOutputDir(String? v) => _cs.currentOutputDir = v;
-  CancellationToken? get _teamCancellationToken => _cs.teamCancellationToken;
-  set _teamCancellationToken(CancellationToken? v) => _cs.teamCancellationToken = v;
-  bool get _isTeamExecuting => _cs.isTeamExecuting;
-  set _isTeamExecuting(bool v) => _cs.isTeamExecuting = v;
+  // ===== Team UI 显示状态：使用 _displayCs =====
+  bool get _showAgentTeamPanel => _displayCs.showAgentTeamPanel;
+  List<TeamAgent> get _teamAgents => _displayCs.teamAgents;
+  TeamMessageBoard get _teamMessageBoard => _displayCs.teamMessageBoard;
+  List<TeamTask> get _dynamicTasks => _displayCs.dynamicTasks;
+  Map<String, String> get _agentStatus => _displayCs.agentStatus;
+  Map<String, String> get _taskOutputFiles => _displayCs.taskOutputFiles;
+  String? get _currentOutputDir => _displayCs.currentOutputDir;
+  CancellationToken? get _teamCancellationToken => _displayCs.teamCancellationToken;
+  bool get _isTeamExecuting => _displayCs.isTeamExecuting;
+  String? get _currentTeamTask => _displayCs.currentTeamTask;
+  int get _currentStageIndex => _displayCs.currentStageIndex;
+  Set<String> get _completedTaskIds => _displayCs.completedTaskIds;
+  Map<String, String> get _taskOutputs => _displayCs.taskOutputs;
+  TeamMode get _teamMode => _displayCs.teamMode;
+  List<DiscussionTurn> get _discussionTurns => _displayCs.discussionTurns;
+  DiscussionConfig? get _discussionConfig => _displayCs.discussionConfig;
+  int get _currentDiscussionRound => _displayCs.currentDiscussionRound;
+  bool get _isDiscussing => _displayCs.isDiscussing;
+  
+  // ===== Team 写入状态：使用 _displayCs（同步上下文） =====
+  set _showAgentTeamPanel(bool v) => _displayCs.showAgentTeamPanel = v;
+  set _currentOutputDir(String? v) => _displayCs.currentOutputDir = v;
+  set _teamCancellationToken(CancellationToken? v) => _displayCs.teamCancellationToken = v;
+  set _isTeamExecuting(bool v) => _displayCs.isTeamExecuting = v;
+  set _currentTeamTask(String? v) => _displayCs.currentTeamTask = v;
+  set _currentStageIndex(int v) => _displayCs.currentStageIndex = v;
+  set _teamMode(TeamMode v) => _displayCs.teamMode = v;
+  set _discussionConfig(DiscussionConfig? v) => _displayCs.discussionConfig = v;
+  set _currentDiscussionRound(int v) => _displayCs.currentDiscussionRound = v;
+  set _isDiscussing(bool v) => _displayCs.isDiscussing = v;
 
-  ContextManager get _contextManager => _cs.contextManager;
-  int get _currentHistoryTokens => _cs.currentHistoryTokens;
-  set _currentHistoryTokens(int v) => _cs.currentHistoryTokens = v;
-  int get _currentSystemPromptTokens => _cs.currentSystemPromptTokens;
-  set _currentSystemPromptTokens(int v) => _cs.currentSystemPromptTokens = v;
+  // ===== 上下文管理：读写都用 _displayCs =====
+  ContextManager get _contextManager => _displayCs.contextManager;
+  int get _currentHistoryTokens => _displayCs.currentHistoryTokens;
+  set _currentHistoryTokens(int v) => _displayCs.currentHistoryTokens = v;
+  int get _currentSystemPromptTokens => _displayCs.currentSystemPromptTokens;
+  set _currentSystemPromptTokens(int v) => _displayCs.currentSystemPromptTokens = v;
 
-  String? get _currentTeamTask => _cs.currentTeamTask;
-  set _currentTeamTask(String? v) => _cs.currentTeamTask = v;
-  int get _currentStageIndex => _cs.currentStageIndex;
-  set _currentStageIndex(int v) => _cs.currentStageIndex = v;
-  Set<String> get _completedTaskIds => _cs.completedTaskIds;
-  Map<String, String> get _taskOutputs => _cs.taskOutputs;
-
-  TeamMode get _teamMode => _cs.teamMode;
-  set _teamMode(TeamMode v) => _cs.teamMode = v;
-  List<DiscussionTurn> get _discussionTurns => _cs.discussionTurns;
-  DiscussionConfig? get _discussionConfig => _cs.discussionConfig;
-  set _discussionConfig(DiscussionConfig? v) => _cs.discussionConfig = v;
-  int get _currentDiscussionRound => _cs.currentDiscussionRound;
-  set _currentDiscussionRound(int v) => _cs.currentDiscussionRound = v;
-  bool get _isDiscussing => _cs.isDiscussing;
-  set _isDiscussing(bool v) => _cs.isDiscussing = v;
-
-  String? get _processingConversationId => _cs.processingConversationId;
-  set _processingConversationId(String? v) => _cs.processingConversationId = v;
+  // ===== 处理中的会话ID =====
+  String? get _processingConversationId => _displayCs.processingConversationId;
+  set _processingConversationId(String? v) => _displayCs.processingConversationId = v;
   
   /// 当前 Agent 模式
   AgentMode _agentMode = AgentMode.craft;
@@ -388,6 +411,23 @@ class _ChatPanelState extends State<ChatPanel> with SingleTickerProviderStateMix
   void didUpdateWidget(ChatPanel oldWidget) {
     super.didUpdateWidget(oldWidget);
     
+    // 面板可见性变化时，保存/恢复输入框内容
+    if (oldWidget.isVisible != widget.isVisible) {
+      if (oldWidget.isVisible && !widget.isVisible) {
+        // 面板即将隐藏：保存当前输入框内容到会话状态
+        if (_currentConversationId != null && _conversationStates.containsKey(_currentConversationId)) {
+          _conversationStates[_currentConversationId]!.inputText = _inputController.text;
+          debugPrint('🦢 面板隐藏，保存输入内容: ${_inputController.text.length} 字符');
+        }
+      } else if (!oldWidget.isVisible && widget.isVisible) {
+        // 面板即将显示：恢复当前会话的输入框内容
+        if (_currentConversationId != null && _conversationStates.containsKey(_currentConversationId)) {
+          _inputController.text = _conversationStates[_currentConversationId]!.inputText;
+          debugPrint('🦢 面板显示，恢复输入内容: ${_inputController.text.length} 字符');
+        }
+      }
+    }
+    
     // 模式切换时，不重新初始化，保持现有状态
     if (oldWidget.workMode != widget.workMode) {
       if (widget.workMode && _conversationManager == null) {
@@ -450,14 +490,16 @@ class _ChatPanelState extends State<ChatPanel> with SingleTickerProviderStateMix
 
 
   /// 保存聊天历史（统一使用 ConversationManager）
-  /// 使用 _processingConversationId 确保保存到正确的会话
-  void _saveChatHistory() {
+  /// [forConversationId] 可选参数，指定要保存的会话ID，用于异步流程中确保保存到正确的会话
+  void _saveChatHistory({String? forConversationId}) {
     try {
-      // 优先使用正在处理的会话ID，否则使用当前会话ID
-      final targetId = _processingConversationId ?? _currentConversationId;
+      // 优先使用指定的会话ID，否则使用当前显示的会话ID
+      final targetId = forConversationId ?? _currentConversationId;
       if (_conversationManager != null && targetId != null) {
+        // 获取目标会话的消息列表（直接从状态缓存读取，避免 getter 指向错误的会话）
+        final targetMessages = _conversationStates[targetId]?.messages ?? _displayCs.messages;
         // 两种模式统一：替换目标会话的全部消息
-        _conversationManager!.updateMessagesFor(targetId, _messages.map((m) => ConversationMessage(
+        _conversationManager!.updateMessagesFor(targetId, targetMessages.map((m) => ConversationMessage(
           content: m.content,
           isUser: m.isUser,
           timestamp: m.timestamp,
@@ -700,41 +742,43 @@ class _ChatPanelState extends State<ChatPanel> with SingleTickerProviderStateMix
   /// 停止当前会话（用户点击停止按钮）
   void _stopCurrentSession() {
     // 停止普通模式
-    if (_isLoading && _cancellationToken != null) {
-      _cancellationToken!.cancel();
+    if (_cs.isLoading && _cs.cancellationToken != null) {
+      _cs.cancellationToken!.cancel();
       debugPrint('🛑 用户取消了当前会话');
       
       // 如果有流式内容正在输出，保留已输出的部分作为消息
-      final partialContent = _streamingContent;
+      final partialContent = _cs.streamingContent;
       
       // 保存当前已有的工具调用步骤（停止后不丢失执行记录）
-      final savedToolSteps = List<_ToolCallStep>.from(_toolCallSteps);
+      final savedToolSteps = List<_ToolCallStep>.from(_cs.toolCallSteps);
       
       // 立即停止 UI 输出
       setState(() {
         if (partialContent.isNotEmpty) {
-          _messages.add(_ChatMessage(
+          _cs.messages.add(_ChatMessage(
             content: '$partialContent\n\n---\n*（已停止）*',
             isUser: false,
             timestamp: DateTime.now(),
             toolSteps: savedToolSteps,
           ));
         } else {
-          _messages.add(_ChatMessage(
+          _cs.messages.add(_ChatMessage(
             content: '好的，鹅宝已经停下来了~ 🦢✋',
             isUser: false,
             timestamp: DateTime.now(),
             toolSteps: savedToolSteps,
           ));
         }
-        _streamingContent = '';
-        _toolCallSteps.clear();
-        _isLoading = false;
-        _cancellationToken = null;
+        _cs.streamingContent = '';
+        _cs.toolCallSteps.clear();
+        _cs.isLoading = false;
+        _cs.cancellationToken = null;
       });
       _saveChatHistory();
       // 同步释放对话锁定，允许后续操作立即切换到新对话
-      _lockedConversationId = null;
+      if (_currentConversationId != null) {
+        _activeConversationIds.remove(_currentConversationId!);
+      }
       _processingConversationId = null;
       return; // 普通模式已处理完，直接返回
     }
@@ -744,7 +788,9 @@ class _ChatPanelState extends State<ChatPanel> with SingleTickerProviderStateMix
       _teamCancellationToken!.cancel();
       debugPrint('🛑 用户取消了 Team 模式任务');
       // 同步释放对话锁定
-      _lockedConversationId = null;
+      if (_currentConversationId != null) {
+        _activeConversationIds.remove(_currentConversationId!);
+      }
       _processingConversationId = null;
       
       // 保存当前执行状态（用于恢复）
@@ -780,7 +826,16 @@ class _ChatPanelState extends State<ChatPanel> with SingleTickerProviderStateMix
     final text = _inputController.text.trim();
     final attachments = List<MessageAttachment>.from(_pendingAttachments);
     if (text.isEmpty && attachments.isEmpty) return;
-    if (_isLoading) return;
+
+    // 生成唯一的工作会话ID（用于多对话框并发）
+    final sessionId = '${DateTime.now().millisecondsSinceEpoch}_${_currentConversationId ?? 'default'}';
+    
+    // 捕获当前会话 ID 到局部变量，整个异步流程都使用这个 ID
+    final targetId = _currentConversationId;
+    final targetCs = _getConversationState(targetId);
+    
+    // 如果该会话已经在处理中（isLoading），阻止重复发送
+    if (targetCs.isLoading) return;
 
     // Plan 模式下，如果有待确认计划，不允许发送新消息（应先点击按钮确认/取消）
     if (_pendingPlans.any((p) => !p.isConfirmed && !p.isRejected)) {
@@ -828,10 +883,9 @@ class _ChatPanelState extends State<ChatPanel> with SingleTickerProviderStateMix
       return;
     }
 
-    // 锁定当前对话 ID，确保整个异步流程中 _cs 始终指向正确的对话状态
-    // 即使用户中途切换了对话，AI 回复也会写入正确的对话
-    _lockedConversationId = _currentConversationId;
-    _processingConversationId = _currentConversationId;
+    // 记录当前处理的会话 ID（使用局部变量 targetId 已在方法开头捕获）
+    targetCs.processingConversationId = targetId;
+    if (targetId != null) _activeConversationIds.add(targetId);
     _inputController.clear();
 
     // 检测"记住"类指令，直接保存到长期记忆（不走工具链）
@@ -873,7 +927,7 @@ class _ChatPanelState extends State<ChatPanel> with SingleTickerProviderStateMix
 
     // 开始工作动画（鹅宝开始干活了）
     final petEngine = context.read<PetEngine>();
-    petEngine.startWorking();
+    petEngine.startWorking(sessionId);  // 传递会话ID支持并发
     petEngine.onUserActive(); // 标记用户活跃
     
     // 情绪分析 + 性格演化（千人千宠）
@@ -923,17 +977,17 @@ class _ChatPanelState extends State<ChatPanel> with SingleTickerProviderStateMix
     }
 
     setState(() {
-      _messages.add(_ChatMessage(
+      targetCs.messages.add(_ChatMessage(
         content: text,
         isUser: true,
         timestamp: DateTime.now(),
         attachments: attachments,
       ));
-      _isLoading = true;
-      _streamingContent = '';
-      _toolCallSteps.clear();
-      _pendingAttachments = [];
-      _cancellationToken = CancellationToken();
+      targetCs.isLoading = true;
+      targetCs.streamingContent = '';
+      targetCs.toolCallSteps.clear();
+      targetCs.pendingAttachments = [];
+      targetCs.cancellationToken = CancellationToken();
     });
     _scrollToBottom();
 
@@ -1322,7 +1376,7 @@ class _ChatPanelState extends State<ChatPanel> with SingleTickerProviderStateMix
           messages: fullApiMessages,
           tools: tools,
           executeTool: (call, {onOutput}) => _executeTool(call, skillManager, workDir, onOutput: onOutput),
-          cancellationToken: _cancellationToken,
+          cancellationToken: targetCs.cancellationToken,
           hooks: hooks,
           mode: _agentMode,
           userRequest: text,
@@ -1330,34 +1384,36 @@ class _ChatPanelState extends State<ChatPanel> with SingleTickerProviderStateMix
           embedScreenshotImages: false,
           onPlanGenerated: (plan) {
             if (!mounted) return;
-            setState(() {
-              _pendingPlans.add(plan);
-              _activePlanIndex = _pendingPlans.length - 1;
-            });
+            targetCs.pendingPlans.add(plan);
+            targetCs.activePlanIndex = targetCs.pendingPlans.length - 1;
+            if (_currentConversationId == targetId) {
+              setState(() {});
+            }
           },
           onStepUpdate: (step) {
             if (!mounted) return;
-            setState(() {
-              // 用 identity 匹配：同一 ToolStep 对象更新而非重复添加
-              final existIdx = _toolCallSteps.indexWhere(
-                (s) => identical(s.sourceStep, step),
-              );
-              final widget = _ToolCallStep(
-                sourceStep: step,
-                title: step.title,
-                content: step.content,
-                isLoading: step.isLoading,
-                isSkip: step.isSkip,
-                isFailed: step.isFailed,
-                timestamp: step.timestamp,
-              );
-              if (existIdx >= 0) {
-                _toolCallSteps[existIdx] = widget;
-              } else {
-                _toolCallSteps.add(widget);
-              }
-            });
-            _scrollToBottom();
+            // 用 identity 匹配：同一 ToolStep 对象更新而非重复添加
+            final existIdx = targetCs.toolCallSteps.indexWhere(
+              (s) => identical(s.sourceStep, step),
+            );
+            final widget = _ToolCallStep(
+              sourceStep: step,
+              title: step.title,
+              content: step.content,
+              isLoading: step.isLoading,
+              isSkip: step.isSkip,
+              isFailed: step.isFailed,
+              timestamp: step.timestamp,
+            );
+            if (existIdx >= 0) {
+              targetCs.toolCallSteps[existIdx] = widget;
+            } else {
+              targetCs.toolCallSteps.add(widget);
+            }
+            if (_currentConversationId == targetId) {
+              setState(() {});
+              _scrollToBottom();
+            }
           },
         );
         fullResponse = loopResult.text;
@@ -1374,13 +1430,18 @@ class _ChatPanelState extends State<ChatPanel> with SingleTickerProviderStateMix
         final streamBuffer = StringBuffer();
         await for (final chunk in llmManager.chatStreamWithMessages(fullApiMessages, tools: tools)) {
           if (!mounted) break;
-          if (_cancellationToken?.isCancelled ?? false) break;
+          if (targetCs.cancellationToken?.isCancelled ?? false) break;
           streamBuffer.write(chunk);
-          setState(() => _streamingContent = streamBuffer.toString());
-          _scrollToBottom();
+          // 直接写入目标会话状态
+          targetCs.streamingContent = streamBuffer.toString();
+          // 仅当用户正在查看该会话时才刷新 UI 和滚动
+          if (_currentConversationId == targetId) {
+            setState(() {});
+            _scrollToBottom();
+          }
         }
         // 如果是被取消的，抛出 CancelledException 走统一的取消处理
-        if (_cancellationToken?.isCancelled ?? false) {
+        if (targetCs.cancellationToken?.isCancelled ?? false) {
           throw CancelledException();
         }
         fullResponse = streamBuffer.toString();
@@ -1388,7 +1449,7 @@ class _ChatPanelState extends State<ChatPanel> with SingleTickerProviderStateMix
 
       // 停止工作动画（仅休闲模式，工作模式保持工作状态）
       if (!widget.workMode) {
-        petEngine.stopWorking();
+        petEngine.stopWorking(sessionId);  // 传递会话ID支持并发
         final emotion = llmManager.extractEmotion(fullResponse);
         petEngine.setEmotion(emotion);
       }
@@ -1397,7 +1458,7 @@ class _ChatPanelState extends State<ChatPanel> with SingleTickerProviderStateMix
       _processEmotionalFeedback(text, fullResponse, petEngine, memoryManager);
 
       setState(() {
-        _messages.add(_ChatMessage(
+        targetCs.messages.add(_ChatMessage(
           content: fullResponse,
           isUser: false,
           timestamp: DateTime.now(),
@@ -1405,13 +1466,13 @@ class _ChatPanelState extends State<ChatPanel> with SingleTickerProviderStateMix
               ? '🎯 ${resultSkillNames.join(", ")}'
               : (hasToolCalls ? '🎯 已调用技能' : null),
           attachments: resultAttachments,
-          toolSteps: List.unmodifiable(_toolCallSteps),
+          toolSteps: List.unmodifiable(targetCs.toolCallSteps),
           apiMessages: resultApiMessages.isNotEmpty
               ? List.unmodifiable(resultApiMessages)
               : null,
         ));
-        _streamingContent = '';
-        _toolCallSteps.clear();
+        targetCs.streamingContent = '';
+        targetCs.toolCallSteps.clear();
       });
 
       // 记录日记统计（AI 回复）
@@ -1420,7 +1481,7 @@ class _ChatPanelState extends State<ChatPanel> with SingleTickerProviderStateMix
       // 对话完成奖励金币
       petEngine.earnChatCoins();
 
-      _saveChatHistory();
+      _saveChatHistory(forConversationId: targetId);
 
       // 如果面板当前不可见（用户关闭了对话框），通知外部显示气泡提示
       if (!widget.isVisible && widget.onBackgroundComplete != null) {
@@ -1441,47 +1502,47 @@ class _ChatPanelState extends State<ChatPanel> with SingleTickerProviderStateMix
     } on CancelledException {
       // 用户主动取消会话 — UI 已在 _stopCurrentSession 中立即处理，此处仅做兜底清理
       if (!widget.workMode) {
-        petEngine.stopWorking();
+        petEngine.stopWorking(sessionId);  // 传递会话ID支持并发
       }
       // 标记 CUA 会话为失败
-      if (_cuaSessionActive) {
-        _cuaSessionFailed = true;
+      if (targetCs.cuaSessionActive) {
+        targetCs.cuaSessionFailed = true;
       }
       // 不重复添加消息（_stopCurrentSession 已添加）
-      if (_streamingContent.isNotEmpty || _toolCallSteps.isNotEmpty) {
+      if (targetCs.streamingContent.isNotEmpty || targetCs.toolCallSteps.isNotEmpty) {
         setState(() {
-          _streamingContent = '';
-          _toolCallSteps.clear();
+          targetCs.streamingContent = '';
+          targetCs.toolCallSteps.clear();
         });
       }
     } catch (e) {
       // 出错也要停止工作动画（仅休闲模式）
       if (!widget.workMode) {
-        petEngine.stopWorking();
+        petEngine.stopWorking(sessionId);  // 传递会话ID支持并发
       }
 
       // 标记 CUA 会话为失败（finalizeTask 会在 finally 中使用此标记）
-      if (_cuaSessionActive) {
-        _cuaSessionFailed = true;
+      if (targetCs.cuaSessionActive) {
+        targetCs.cuaSessionFailed = true;
       }
 
       setState(() {
-        _messages.add(_ChatMessage(
+        targetCs.messages.add(_ChatMessage(
           content: '嘎...鹅宝的大脑出了点问题: $e',
           isUser: false,
           timestamp: DateTime.now(),
           isError: true,
         ));
-        _streamingContent = '';
+        targetCs.streamingContent = '';
       });
-      _saveChatHistory();
+      _saveChatHistory(forConversationId: targetId);
     } finally {
       // CUA 会话结束后恢复：重新打开聊天面板 + 关闭任务
-      if (_cuaSessionActive) {
-        _cuaSessionActive = false;
+      if (targetCs.cuaSessionActive) {
+        targetCs.cuaSessionActive = false;
         // 关闭 CUA 任务（设置状态、结束时间、持久化）
-        await CuaSkill.finalizeTask(status: _cuaSessionFailed ? 'failed' : 'completed');
-        _cuaSessionFailed = false;
+        await CuaSkill.finalizeTask(status: targetCs.cuaSessionFailed ? 'failed' : 'completed');
+        targetCs.cuaSessionFailed = false;
         try {
           widget.onClose?.call(); // togglePanel('chat') → 重新打开
           await Future.delayed(const Duration(milliseconds: 300));
@@ -1489,13 +1550,13 @@ class _ChatPanelState extends State<ChatPanel> with SingleTickerProviderStateMix
         } catch (_) {}
       }
       setState(() {
-        _isLoading = false;
-        _cancellationToken = null;
+        targetCs.isLoading = false;
+        targetCs.cancellationToken = null;
       });
       _scrollToBottom();
       // 释放对话锁定 + 清除正在处理的会话ID
-      _lockedConversationId = null;
-      _processingConversationId = null;
+      if (targetId != null) _activeConversationIds.remove(targetId);
+      targetCs.processingConversationId = null;
     }
   }
 
@@ -3791,12 +3852,14 @@ $skillsDesc
   Future<void> _handleMentionedReply(String text, List<TeamAgent> mentionedAgents) async {
     if (mentionedAgents.isEmpty) return;
     
-    // 锁定当前对话 ID
-    _lockedConversationId = _currentConversationId;
-    _processingConversationId = _currentConversationId;
+    // 捕获目标会话 ID
+    final targetId = _currentConversationId;
+    final targetCs = _getConversationState(targetId);
+    targetCs.processingConversationId = targetId;
+    if (targetId != null) _activeConversationIds.add(targetId);
 
     // 初始化取消令牌
-    _teamCancellationToken = CancellationToken();
+    targetCs.teamCancellationToken = CancellationToken();
     
     setState(() {
       _isLoading = true;
@@ -3899,20 +3962,22 @@ $skillBuffer
       }
     } finally {
       if (mounted) setState(() {
-        _isLoading = false;
-        _isTeamExecuting = false;
-        _teamCancellationToken = null;
+        targetCs.isLoading = false;
+        targetCs.isTeamExecuting = false;
+        targetCs.teamCancellationToken = null;
       });
-      _lockedConversationId = null;
-      _processingConversationId = null;
+      if (targetId != null) _activeConversationIds.remove(targetId);
+      targetCs.processingConversationId = null;
     }
   }
 
   /// 启动团队执行（主管自动分解任务）
   Future<void> _startTeamExecution(String userTask) async {
-    // 锁定当前对话 ID，防止执行过程中切换对话导致状态串写
-    _lockedConversationId = _currentConversationId;
-    _processingConversationId = _currentConversationId;
+    // 捕获目标会话 ID
+    final targetId = _currentConversationId;
+    final targetCs = _getConversationState(targetId);
+    targetCs.processingConversationId = targetId;
+    if (targetId != null) _activeConversationIds.add(targetId);
 
     // 清空之前的消息和任务
     _teamMessageBoard.clear();
@@ -3956,8 +4021,8 @@ $skillBuffer
         _isTeamExecuting = false;
         _isLoading = false;
       });
-      _lockedConversationId = null;
-      _processingConversationId = null;
+      if (targetId != null) _activeConversationIds.remove(targetId);
+      targetCs.processingConversationId = null;
       return;
     }
     
@@ -3979,16 +4044,18 @@ $skillBuffer
         _isLoading = false;
         _teamCancellationToken = null;
       });
-      _lockedConversationId = null;
-      _processingConversationId = null;
+      if (targetId != null) _activeConversationIds.remove(targetId);
+      targetCs.processingConversationId = null;
     }
   }
   
   /// 恢复被中断的团队任务
   Future<void> _resumeTeamExecution() async {
-    // 锁定当前对话 ID
-    _lockedConversationId = _currentConversationId;
-    _processingConversationId = _currentConversationId;
+    // 捕获目标会话 ID
+    final targetId = _currentConversationId;
+    final targetCs = _getConversationState(targetId);
+    targetCs.processingConversationId = targetId;
+    if (targetId != null) _activeConversationIds.add(targetId);
 
     final state = _loadTeamExecutionState();
     if (state == null) {
@@ -4063,8 +4130,8 @@ $skillBuffer
         _isLoading = false;
         _teamCancellationToken = null;
       });
-      _lockedConversationId = null;
-      _processingConversationId = null;
+      if (targetId != null) _activeConversationIds.remove(targetId);
+      targetCs.processingConversationId = null;
     }
   }
   
@@ -4794,9 +4861,9 @@ ${agentsInfo.isNotEmpty ? agentsInfo : '（暂无其他成员，主管将自行�
     // 添加到消息板（供历史查询）
     _teamMessageBoard.add(message);
     
-    // 同时直接显示在主对话框
+    // 同时直接显示在主对话框（写入当前显示的会话）
     setState(() {
-      _messages.add(_ChatMessage(
+      _displayCs.messages.add(_ChatMessage(
         content: content,
         isUser: false,
         timestamp: DateTime.now(),
@@ -4811,9 +4878,11 @@ ${agentsInfo.isNotEmpty ? agentsInfo : '（暂无其他成员，主管将自行�
   
   /// 启动圆桌讨论
   Future<void> _startDiscussion(String topic) async {
-    // 锁定当前对话 ID
-    _lockedConversationId = _currentConversationId;
-    _processingConversationId = _currentConversationId;
+    // 捕获目标会话 ID
+    final targetId = _currentConversationId;
+    final targetCs = _getConversationState(targetId);
+    targetCs.processingConversationId = targetId;
+    if (targetId != null) _activeConversationIds.add(targetId);
 
     // 检查是否有主持人
     final moderator = _teamAgents.where((a) => a.id == 'supervisor').firstOrNull;
@@ -4929,8 +4998,8 @@ ${agentsInfo.isNotEmpty ? agentsInfo : '（暂无其他成员，主管将自行�
         _isTeamExecuting = false;
         _teamCancellationToken = null;
       });
-      _lockedConversationId = null;
-      _processingConversationId = null;
+      if (targetId != null) _activeConversationIds.remove(targetId);
+      targetCs.processingConversationId = null;
     }
   }
   
@@ -5990,9 +6059,14 @@ $discussionContext
   Future<void> _executeConfirmedPlan(PendingPlan plan) async {
     if (!mounted) return;
     
-    // 锁定当前对话 ID，防止执行过程中切换对话导致状态串写
-    _lockedConversationId = _currentConversationId;
-    _processingConversationId = _currentConversationId;
+    // 捕获目标会话 ID
+    final targetId = _currentConversationId;
+    final targetCs = _getConversationState(targetId);
+    targetCs.processingConversationId = targetId;
+    if (targetId != null) _activeConversationIds.add(targetId);
+    
+    // 生成唯一的工作会话ID（用于多对话框并发）
+    final sessionId = 'plan_${DateTime.now().millisecondsSinceEpoch}_${_currentConversationId ?? 'default'}';
 
     final llmManager = context.read<LLMManager>();
     final memoryManager = context.read<MemoryManager>();
@@ -6006,7 +6080,7 @@ $discussionContext
       _cancellationToken = CancellationToken();
     });
     
-    petEngine.startWorking();
+    petEngine.startWorking(sessionId);  // 传递会话ID支持并发
     
     // 初始化工作目录（和主流程一致）
     String workDir = '';
@@ -6110,26 +6184,28 @@ ${completedSteps.isNotEmpty ? '已完成步骤:\n$completedSteps\n' : ''}当前�
             userRequest: step.description,
             onStepUpdate: (toolStep) {
               if (!mounted) return;
-              setState(() {
-                final existIdx = _toolCallSteps.indexWhere(
-                  (s) => identical(s.sourceStep, toolStep),
-                );
-                final widget = _ToolCallStep(
-                  sourceStep: toolStep,
-                  title: toolStep.title,
-                  content: toolStep.content,
-                  isLoading: toolStep.isLoading,
-                  isSkip: toolStep.isSkip,
-                  isFailed: toolStep.isFailed,
-                  timestamp: toolStep.timestamp,
-                );
-                if (existIdx >= 0) {
-                  _toolCallSteps[existIdx] = widget;
-                } else {
-                  _toolCallSteps.add(widget);
-                }
-              });
-              _scrollToBottom();
+              final existIdx = targetCs.toolCallSteps.indexWhere(
+                (s) => identical(s.sourceStep, toolStep),
+              );
+              final widget = _ToolCallStep(
+                sourceStep: toolStep,
+                title: toolStep.title,
+                content: toolStep.content,
+                isLoading: toolStep.isLoading,
+                isSkip: toolStep.isSkip,
+                isFailed: toolStep.isFailed,
+                timestamp: toolStep.timestamp,
+              );
+              if (existIdx >= 0) {
+                targetCs.toolCallSteps[existIdx] = widget;
+              } else {
+                targetCs.toolCallSteps.add(widget);
+              }
+              final streamTargetId2 = targetId;
+              if (_currentConversationId == streamTargetId2) {
+                setState(() {});
+                _scrollToBottom();
+              }
             },
           );
           stepResult = loopResult.text;
@@ -6138,12 +6214,15 @@ ${completedSteps.isNotEmpty ? '已完成步骤:\n$completedSteps\n' : ''}当前�
           final streamBuffer = StringBuffer();
           await for (final chunk in llmManager.chatStreamWithMessages(messages, tools: tools)) {
             if (!mounted) break;
-            if (_cancellationToken?.isCancelled ?? false) break;
+            if (targetCs.cancellationToken?.isCancelled ?? false) break;
             streamBuffer.write(chunk);
-            setState(() => _streamingContent = streamBuffer.toString());
-            _scrollToBottom();
+            targetCs.streamingContent = streamBuffer.toString();
+            if (_currentConversationId == targetId) {
+              setState(() {});
+              _scrollToBottom();
+            }
           }
-          if (_cancellationToken?.isCancelled ?? false) {
+          if (targetCs.cancellationToken?.isCancelled ?? false) {
             throw CancelledException();
           }
           stepResult = streamBuffer.toString();
@@ -6152,7 +6231,7 @@ ${completedSteps.isNotEmpty ? '已完成步骤:\n$completedSteps\n' : ''}当前�
         // 标记步骤完成
         setState(() {
           step.complete(stepResult);
-          _streamingContent = '';
+          targetCs.streamingContent = '';
         });
       }
       
@@ -6164,15 +6243,15 @@ ${completedSteps.isNotEmpty ? '已完成步骤:\n$completedSteps\n' : ''}当前�
         ).result ?? '计划执行完成';
         
         setState(() {
-          _messages.add(_ChatMessage(
+          targetCs.messages.add(_ChatMessage(
             content: lastResult,
             isUser: false,
             timestamp: DateTime.now(),
-            toolSteps: List.unmodifiable(_toolCallSteps),
+            toolSteps: List.unmodifiable(targetCs.toolCallSteps),
           ));
-          _toolCallSteps.clear();
+          targetCs.toolCallSteps.clear();
         });
-        _saveChatHistory();
+        _saveChatHistory(forConversationId: targetId);
       }
     } catch (e) {
       // 标记当前执行中的步骤为失败
@@ -6183,7 +6262,7 @@ ${completedSteps.isNotEmpty ? '已完成步骤:\n$completedSteps\n' : ''}当前�
       
       if (mounted) {
         setState(() {
-          _messages.add(_ChatMessage(
+          targetCs.messages.add(_ChatMessage(
             content: '❌ 计划执行出错: $e',
             isUser: false,
             timestamp: DateTime.now(),
@@ -6193,10 +6272,10 @@ ${completedSteps.isNotEmpty ? '已完成步骤:\n$completedSteps\n' : ''}当前�
       }
     } finally {
       // CUA 会话结束后恢复：重新打开聊天面板
-      if (_cuaSessionActive) {
-        _cuaSessionActive = false;
-        await CuaSkill.finalizeTask(status: _cuaSessionFailed ? 'failed' : 'completed');
-        _cuaSessionFailed = false;
+      if (targetCs.cuaSessionActive) {
+        targetCs.cuaSessionActive = false;
+        await CuaSkill.finalizeTask(status: targetCs.cuaSessionFailed ? 'failed' : 'completed');
+        targetCs.cuaSessionFailed = false;
         try {
           widget.onClose?.call();
           await Future.delayed(const Duration(milliseconds: 300));
@@ -6205,16 +6284,16 @@ ${completedSteps.isNotEmpty ? '已完成步骤:\n$completedSteps\n' : ''}当前�
       }
       if (mounted) {
         setState(() {
-          _isLoading = false;
-          _streamingContent = '';
-          _cancellationToken = null;
+          targetCs.isLoading = false;
+          targetCs.streamingContent = '';
+          targetCs.cancellationToken = null;
           // 执行完的 Plan 保留在列表中（显示完成状态），不自动移除
           // 用户可手动关闭
         });
-        if (!widget.workMode) petEngine.stopWorking();
+        if (!widget.workMode) petEngine.stopWorking(sessionId);  // 传递会话ID支持并发
       }
-      _lockedConversationId = null;
-      _processingConversationId = null;
+      if (targetId != null) _activeConversationIds.remove(targetId);
+      targetCs.processingConversationId = null;
     }
   }
 
@@ -6225,8 +6304,8 @@ ${completedSteps.isNotEmpty ? '已完成步骤:\n$completedSteps\n' : ''}当前�
     final conversation = _conversationManager!.conversations
         .firstWhere((c) => c.id == _currentConversationId);
 
-    // 直接操作目标对话的状态，绕过 _cs（_cs 在 _lockedConversationId 存在时
-    // 会路由到锁定对话，导致清空/写入错误的消息列表）
+    // 直接操作目标对话的状态，绕过 _displayCs
+    // （避免在切换会话后清空/写入错误的消息列表）
     final targetState = _conversationStates[_currentConversationId!] ??= _ConversationState();
 
     setState(() {
@@ -6383,6 +6462,7 @@ ${completedSteps.isNotEmpty ? '已完成步骤:\n$completedSteps\n' : ''}当前�
                   isActive: isActive,
                   onTap: () => _switchConversation(conversation.id),
                   onDelete: () => _deleteConversation(conversation.id),
+                  onRename: (newTitle) => _renameConversation(conversation.id, newTitle),
                 );
               },
             ),
@@ -6396,11 +6476,20 @@ ${completedSteps.isNotEmpty ? '已完成步骤:\n$completedSteps\n' : ''}当前�
   void _createNewConversation() async {
     if (_conversationManager == null) return;
     
+    // 保存当前输入框内容到旧会话
+    if (_currentConversationId != null && _conversationStates.containsKey(_currentConversationId)) {
+      _conversationStates[_currentConversationId]!.inputText = _inputController.text;
+    }
+    
     final newId = await _conversationManager!.createConversation('新会话 ${_conversationManager!.conversations.length + 1}');
     setState(() {
       _currentConversationId = newId;
-      // 新对话会自动创建全新的 _ConversationState（通过 _cs getter）
+      // 新对话会自动创建全新的 _ConversationState（通过 _getConversationState）
     });
+    
+    // 新会话的输入框清空
+    _inputController.clear();
+    
     _loadConversationMessages();
   }
 
@@ -6408,15 +6497,59 @@ ${completedSteps.isNotEmpty ? '已完成步骤:\n$completedSteps\n' : ''}当前�
   void _switchConversation(String conversationId) {
     if (_currentConversationId == conversationId) return;
     
+    // 保存当前输入框内容到旧会话
+    if (_currentConversationId != null && _conversationStates.containsKey(_currentConversationId)) {
+      _conversationStates[_currentConversationId]!.inputText = _inputController.text;
+    }
+    
     // 不取消前一个对话的流式响应，让它继续在后台跑完。
-    // _lockedConversationId 已经保证响应会写入正确的对话记录。
+    // 每个异步流程持有自己的 targetId/targetCs 局部变量，保证响应写入正确的对话记录。
     // 只需确保 UI 不再为旧对话更新消息气泡（通过 _currentConversationId 判断）。
     
     _conversationManager!.switchConversation(conversationId);
     setState(() {
       _currentConversationId = conversationId;
     });
-    _loadConversationMessages();
+    
+    // 恢复新会话的输入框内容
+    final savedInput = _conversationStates.containsKey(conversationId)
+        ? _conversationStates[conversationId]!.inputText
+        : '';
+    _inputController.text = savedInput;
+    
+    // 如果目标会话正在处理中（isLoading / pendingPlans / streaming 等），
+    // 说明运行时状态已在内存 _conversationStates 中，且可能包含尚未持久化的
+    // 中间数据（如 Plan 面板、流式输出、toolCallSteps）。
+    // 此时从磁盘重新加载会覆盖这些运行时状态，导致 Plan 面板消失、
+    // 用户输入丢失等 bug。因此只需切换 _currentConversationId 让 UI
+    // 通过 _displayCs 重新渲染内存中已有的状态即可。
+    //
+    // 同理，如果内存中已有消息（说明该会话之前已经被加载过），也无需
+    // 从磁盘重复加载——内存中的数据就是最新的（每次 AI 回复后都会
+    // 通过 _saveChatHistory 同步到磁盘）。
+    final targetState = _conversationStates[conversationId];
+    final hasLiveState = targetState != null && (
+      targetState.messages.isNotEmpty ||
+      targetState.isLoading ||
+      targetState.pendingPlans.isNotEmpty ||
+      targetState.streamingContent.isNotEmpty ||
+      targetState.toolCallSteps.isNotEmpty ||
+      targetState.isTeamExecuting ||
+      targetState.isDiscussing ||
+      _activeConversationIds.contains(conversationId)
+    );
+    
+    if (hasLiveState) {
+      // 有运行时状态，跳过磁盘加载，直接使用内存中的状态
+      // 只需滚动到底部
+      _scrollToBottom(jump: true);
+      Future.delayed(const Duration(milliseconds: 50), () {
+        if (mounted) _scrollToBottom(jump: true);
+      });
+    } else {
+      // 无运行时状态（空闲会话），从持久化存储加载消息历史
+      _loadConversationMessages();
+    }
   }
 
   /// 删除会话
@@ -6438,9 +6571,14 @@ ${completedSteps.isNotEmpty ? '已完成步骤:\n$completedSteps\n' : ''}当前�
         _currentConversationId = firstConv.id;
       });
       _loadConversationMessages();
-    } else {
-      setState(() {});
     }
+  }
+  
+  /// 重命名会话
+  void _renameConversation(String conversationId, String newTitle) async {
+    if (_conversationManager == null) return;
+    await _conversationManager!.updateTitle(conversationId, newTitle);
+    setState(() {}); // 刷新UI
   }
 }
 
@@ -6816,14 +6954,15 @@ class _StepItemWidgetState extends State<_StepItemWidget> {
   }
 }
 
-/// 会话列表项
-class _ConversationItem extends StatelessWidget {
+/// 会话列表项（支持内联重命名）
+class _ConversationItem extends StatefulWidget {
   final String title;
   final String lastMessage;
   final String time;
   final bool isActive;
   final VoidCallback onTap;
   final VoidCallback? onDelete;
+  final void Function(String newTitle)? onRename;
 
   const _ConversationItem({
     required this.title,
@@ -6832,19 +6971,83 @@ class _ConversationItem extends StatelessWidget {
     required this.isActive,
     required this.onTap,
     this.onDelete,
+    this.onRename,
   });
+
+  @override
+  State<_ConversationItem> createState() => _ConversationItemState();
+}
+
+class _ConversationItemState extends State<_ConversationItem> {
+  bool _isEditing = false;
+  late TextEditingController _controller;
+  late FocusNode _focusNode;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = TextEditingController(text: widget.title);
+    _focusNode = FocusNode();
+  }
+
+  @override
+  void didUpdateWidget(_ConversationItem oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.title != widget.title) {
+      _controller.text = widget.title;
+    }
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    _focusNode.dispose();
+    super.dispose();
+  }
+
+  void _startEditing() {
+    setState(() {
+      _isEditing = true;
+      _controller.text = widget.title;
+    });
+    // 延迟聚焦，确保 TextField 已经构建完成
+    Future.delayed(const Duration(milliseconds: 100), () {
+      _focusNode.requestFocus();
+      _controller.selection = TextSelection(
+        baseOffset: 0,
+        extentOffset: _controller.text.length,
+      );
+    });
+  }
+
+  void _saveEdit() {
+    final newTitle = _controller.text.trim();
+    if (newTitle.isNotEmpty && newTitle != widget.title) {
+      widget.onRename?.call(newTitle);
+    }
+    setState(() {
+      _isEditing = false;
+    });
+  }
+
+  void _cancelEdit() {
+    _controller.text = widget.title;
+    setState(() {
+      _isEditing = false;
+    });
+  }
 
   @override
   Widget build(BuildContext context) {
     return InkWell(
-      onTap: onTap,
+      onTap: widget.onTap,
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
         decoration: BoxDecoration(
-          color: isActive ? const Color(0xFFE3F2FD) : Colors.transparent,
+          color: widget.isActive ? const Color(0xFFE3F2FD) : Colors.transparent,
           border: Border(
             left: BorderSide(
-              color: isActive ? const Color(0xFF4FC3F7) : Colors.transparent,
+              color: widget.isActive ? const Color(0xFF4FC3F7) : Colors.transparent,
               width: 3,
             ),
           ),
@@ -6855,19 +7058,43 @@ class _ConversationItem extends StatelessWidget {
             Row(
               children: [
                 Expanded(
-                  child: Text(
-                    title,
-                    style: TextStyle(
-                      fontSize: 13,
-                      fontWeight: isActive ? FontWeight.w600 : FontWeight.normal,
-                    ),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                  ),
+                  child: _isEditing
+                      ? TextField(
+                          controller: _controller,
+                          focusNode: _focusNode,
+                          style: const TextStyle(fontSize: 13),
+                          decoration: const InputDecoration(
+                            isDense: true,
+                            contentPadding: EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+                            border: OutlineInputBorder(),
+                          ),
+                          onSubmitted: (_) => _saveEdit(),
+                        )
+                      : Text(
+                          widget.title,
+                          style: TextStyle(
+                            fontSize: 13,
+                            fontWeight: widget.isActive ? FontWeight.w600 : FontWeight.normal,
+                          ),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
                 ),
-                if (onDelete != null)
+                if (!_isEditing && widget.onRename != null)
                   InkWell(
-                    onTap: onDelete,
+                    onTap: _startEditing,
+                    child: Padding(
+                      padding: const EdgeInsets.all(4),
+                      child: Icon(
+                        Icons.edit,
+                        size: 12,
+                        color: Colors.grey.shade400,
+                      ),
+                    ),
+                  ),
+                if (!_isEditing && widget.onDelete != null)
+                  InkWell(
+                    onTap: widget.onDelete,
                     child: Padding(
                       padding: const EdgeInsets.all(4),
                       child: Icon(
@@ -6878,15 +7105,16 @@ class _ConversationItem extends StatelessWidget {
                     ),
                   ),
                 const SizedBox(width: 4),
-                Text(
-                  time,
-                  style: TextStyle(fontSize: 10, color: Colors.grey.shade500),
-                ),
+                if (!_isEditing)
+                  Text(
+                    widget.time,
+                    style: TextStyle(fontSize: 10, color: Colors.grey.shade500),
+                  ),
               ],
             ),
             const SizedBox(height: 4),
             Text(
-              lastMessage,
+              widget.lastMessage,
               style: TextStyle(fontSize: 11, color: Colors.grey.shade600),
               maxLines: 1,
               overflow: TextOverflow.ellipsis,

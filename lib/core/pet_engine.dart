@@ -55,8 +55,9 @@ class PetEngine extends ChangeNotifier {
   ];
 
   /// 是否正在工作（对话中/AI回复中）
-  bool _isWorking = false;
-  bool get isWorking => _isWorking;
+  /// 支持多个会话并发：用 Set 跟踪活跃的工作会话ID
+  final Set<String> _activeWorkSessions = {};
+  bool get isWorking => _activeWorkSessions.isNotEmpty;
 
   PetState get state => _state;
 
@@ -337,7 +338,7 @@ class PetEngine extends ChangeNotifier {
     // 按配置间隔检查是否需要搭话（实际触发取决于陪伴节奏）
     _proactiveTimer = Timer.periodic(Duration(minutes: _proactiveChatInterval), (_) {
       if (!_notificationEnabled) return;
-      if (_isWorking) return; // 工作中不打扰
+      if (isWorking) return; // 工作中不打扰
 
       final minutesSinceLastInteraction = DateTime.now().difference(_lastUserInteraction).inMinutes;
 
@@ -559,7 +560,7 @@ class PetEngine extends ChangeNotifier {
   /// 行为状态机 - 根据当前属性决定下一个行为
   void _updateBehavior() {
     // 如果正在工作（对话中），保持工作状态
-    if (_isWorking) {
+    if (isWorking) {
       _state = _state.copyWith(
         currentAction: 'working',
         emotion: 'working',
@@ -878,9 +879,9 @@ class PetEngine extends ChangeNotifier {
   /// AI 对话后更新情绪
   void setEmotion(String emotion) {
     String action = _emotionToAction(emotion);
-    // 保护：如果已经停止工作（_isWorking == false），
+    // 保护：如果已经停止工作（所有会话都结束了），
     // 不允许 emotion 将 action 重新设回 working，否则工作动画不会退出
-    if (!_isWorking && action == 'working') {
+    if (!isWorking && action == 'working') {
       action = 'idle';
       emotion = 'normal';
     }
@@ -892,8 +893,9 @@ class PetEngine extends ChangeNotifier {
   }
 
   /// 开始工作（对话/AI回复时调用）
-  void startWorking() {
-    _isWorking = true;
+  /// [sessionId] 会话ID，用于支持多个对话框并发
+  void startWorking(String sessionId) {
+    _activeWorkSessions.add(sessionId);
     _state = _state.copyWith(
       currentAction: 'working',
       emotion: 'working',
@@ -902,9 +904,18 @@ class PetEngine extends ChangeNotifier {
   }
 
   /// 停止工作（对话结束/AI回复完成时调用）
-  void stopWorking() {
-    _isWorking = false;
-    _updateBehavior();
+  /// [sessionId] 会话ID，只有所有会话都停止时才真正停止工作动画
+  void stopWorking(String sessionId) {
+    _activeWorkSessions.remove(sessionId);
+    // 只有所有会话都停止时才恢复行为
+    if (_activeWorkSessions.isEmpty) {
+      _updateBehavior();
+    }
+  }
+  
+  /// 检查指定会话是否正在工作
+  bool isSessionWorking(String sessionId) {
+    return _activeWorkSessions.contains(sessionId);
   }
   
   /// 处理用户消息（情绪分析 + 性格演化）
@@ -1016,7 +1027,7 @@ class PetEngine extends ChangeNotifier {
 
   /// 鼠标悬浮触发被撸
   void onMouseHover() {
-    if (_isWorking) return; // 工作中不被打断
+    if (isWorking) return; // 工作中不被打断
     _state = _state.copyWith(
       currentAction: 'petted',
       emotion: 'happy',
@@ -1027,10 +1038,10 @@ class PetEngine extends ChangeNotifier {
 
   /// 鼠标离开，恢复正常行为
   void onMouseLeave() {
-    if (_isWorking) return;
+    if (isWorking) return;
     // 延迟一下再恢复，让被撸动画有时间播
     Future.delayed(const Duration(milliseconds: 500), () {
-      if (!_isWorking) {
+      if (!isWorking) {
         _updateBehavior();
       }
     });
@@ -1195,7 +1206,7 @@ class PetEngine extends ChangeNotifier {
   /// 鹅宝主动情绪表达（由行为引擎定时触发）
   /// 注意：传递的是情绪类型和场景提示，由 UI 层调用 LLM 生成个性化内容
   void _checkEmotionalBehavior() {
-    if (_isWorking) return;
+    if (isWorking) return;
 
     final minutesSinceInteraction = DateTime.now().difference(_lastUserInteraction).inMinutes;
 

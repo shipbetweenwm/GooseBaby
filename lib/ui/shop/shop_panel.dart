@@ -151,53 +151,76 @@ class _ShopPanelState extends State<ShopPanel> {
       separatorBuilder: (_, __) => const SizedBox(height: 8),
       itemBuilder: (context, index) {
         final item = items[index];
-        final canBuy = engine.coins >= item.price;
 
         return _ShopItemCard(
           item: item,
-          canBuy: canBuy,
-          onBuy: () => _buyItem(engine, item),
+          coins: engine.coins,
+          onBuy: (quantity) => _buyItem(engine, item, quantity),
         );
       },
     );
   }
 
-  void _buyItem(PetEngine engine, ShopItem item) {
-    if (engine.buyItem(item)) {
-      // 购买成功 → 通过气泡显示
-      widget.onShowBubble?.call('${item.icon} 成功购买了${item.name}！鹅宝好开心~ 🦢');
-      // 通知父组件关闭商店并播放动画
-      widget.onItemBought?.call(item);
+  void _buyItem(PetEngine engine, ShopItem item, int quantity) {
+    final totalCost = item.price * quantity;
+    
+    if (engine.coins >= totalCost) {
+      // 批量购买
+      bool allSuccess = true;
+      for (int i = 0; i < quantity; i++) {
+        if (!engine.buyItem(item)) {
+          allSuccess = false;
+          break;
+        }
+      }
+      
+      if (allSuccess) {
+        // 购买成功 → 通过气泡显示
+        final quantityText = quantity > 1 ? '$quantity 个' : '';
+        widget.onShowBubble?.call('${item.icon} 成功购买了$quantityText${item.name}！鹅宝好开心~ 🦢');
+        // 通知父组件关闭商店并播放动画
+        widget.onItemBought?.call(item);
+      }
     } else {
       // 金币不足 → 通过气泡显示
-      widget.onShowBubble?.call('🪙 金币不够啦~ 还差 ${item.price - engine.coins} 个金币');
+      widget.onShowBubble?.call('🪙 金币不够啦~ 还差 ${totalCost - engine.coins} 个金币');
     }
   }
 }
 
 /// 商店物品卡片
-class _ShopItemCard extends StatelessWidget {
+class _ShopItemCard extends StatefulWidget {
   final ShopItem item;
-  final bool canBuy;
-  final VoidCallback onBuy;
+  final int coins;
+  final void Function(int quantity) onBuy;
 
   const _ShopItemCard({
     required this.item,
-    required this.canBuy,
+    required this.coins,
     required this.onBuy,
   });
+
+  @override
+  State<_ShopItemCard> createState() => _ShopItemCardState();
+}
+
+class _ShopItemCardState extends State<_ShopItemCard> {
+  int _quantity = 1;
+
+  int get _totalCost => widget.item.price * _quantity;
+  bool get _canBuy => widget.coins >= _totalCost;
 
   @override
   Widget build(BuildContext context) {
     return Container(
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
-        color: canBuy ? Colors.white : Colors.grey.shade50,
+        color: _canBuy ? Colors.white : Colors.grey.shade50,
         borderRadius: BorderRadius.circular(14),
         border: Border.all(
-          color: canBuy ? Colors.grey.shade200 : Colors.grey.shade300,
+          color: _canBuy ? Colors.grey.shade200 : Colors.grey.shade300,
         ),
-        boxShadow: canBuy
+        boxShadow: _canBuy
             ? [
                 BoxShadow(
                   color: Colors.black.withOpacity(0.04),
@@ -218,7 +241,7 @@ class _ShopItemCard extends StatelessWidget {
               borderRadius: BorderRadius.circular(12),
             ),
             alignment: Alignment.center,
-            child: Text(item.icon, style: const TextStyle(fontSize: 26)),
+            child: Text(widget.item.icon, style: const TextStyle(fontSize: 26)),
           ),
           const SizedBox(width: 12),
           // 物品信息
@@ -227,19 +250,19 @@ class _ShopItemCard extends StatelessWidget {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
-                  item.name,
+                  widget.item.name,
                   style: TextStyle(
                     fontSize: 14,
                     fontWeight: FontWeight.w600,
-                    color: canBuy ? Colors.black87 : Colors.grey,
+                    color: _canBuy ? Colors.black87 : Colors.grey,
                   ),
                 ),
                 const SizedBox(height: 2),
                 Text(
-                  item.description,
+                  widget.item.description,
                   style: TextStyle(
                     fontSize: 11,
-                    color: canBuy ? Colors.grey.shade600 : Colors.grey.shade400,
+                    color: _canBuy ? Colors.grey.shade600 : Colors.grey.shade400,
                   ),
                 ),
                 const SizedBox(height: 4),
@@ -247,51 +270,115 @@ class _ShopItemCard extends StatelessWidget {
               ],
             ),
           ),
-          // 购买按钮
-          GestureDetector(
-            onTap: canBuy ? onBuy : null,
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-              decoration: BoxDecoration(
-                color: canBuy ? const Color(0xFFFF8F00) : Colors.grey.shade300,
-                borderRadius: BorderRadius.circular(10),
-              ),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  const Text('🪙', style: TextStyle(fontSize: 12)),
-                  const SizedBox(width: 3),
-                  Text(
-                    '${item.price}',
-                    style: TextStyle(
-                      fontSize: 13,
-                      fontWeight: FontWeight.bold,
-                      color: canBuy ? Colors.white : Colors.grey.shade500,
+          // 数量选择器和购买按钮
+          Column(
+            children: [
+              // 数量选择器
+              Container(
+                decoration: BoxDecoration(
+                  color: Colors.grey.shade100,
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    _buildQuantityButton(
+                      icon: Icons.remove,
+                      onPressed: _quantity > 1 ? () => _updateQuantity(_quantity - 1) : null,
                     ),
-                  ),
-                ],
+                    Container(
+                      constraints: const BoxConstraints(minWidth: 32),
+                      alignment: Alignment.center,
+                      child: Text(
+                        '$_quantity',
+                        style: const TextStyle(
+                          fontSize: 14,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
+                    _buildQuantityButton(
+                      icon: Icons.add,
+                      onPressed: _quantity < 99 && widget.coins >= widget.item.price * (_quantity + 1)
+                          ? () => _updateQuantity(_quantity + 1)
+                          : null,
+                    ),
+                  ],
+                ),
               ),
-            ),
+              const SizedBox(height: 6),
+              // 购买按钮
+              GestureDetector(
+                onTap: _canBuy ? () => widget.onBuy(_quantity) : null,
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                  decoration: BoxDecoration(
+                    color: _canBuy ? const Color(0xFFFF8F00) : Colors.grey.shade300,
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const Text('🪙', style: TextStyle(fontSize: 12)),
+                      const SizedBox(width: 3),
+                      Text(
+                        '$_totalCost',
+                        style: TextStyle(
+                          fontSize: 13,
+                          fontWeight: FontWeight.bold,
+                          color: _canBuy ? Colors.white : Colors.grey.shade500,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ],
           ),
         ],
       ),
     );
   }
 
+  Widget _buildQuantityButton({
+    required IconData icon,
+    required VoidCallback? onPressed,
+  }) {
+    return GestureDetector(
+      onTap: onPressed,
+      child: Container(
+        width: 28,
+        height: 28,
+        alignment: Alignment.center,
+        child: Icon(
+          icon,
+          size: 16,
+          color: onPressed != null ? Colors.black54 : Colors.grey.shade400,
+        ),
+      ),
+    );
+  }
+
+  void _updateQuantity(int newQuantity) {
+    setState(() {
+      _quantity = newQuantity.clamp(1, 99);
+    });
+  }
+
   Widget _buildEffects() {
     final effects = <Widget>[];
-    if (item.hungerBoost > 0) effects.add(_EffectBadge('🍖+${item.hungerBoost.toInt()}'));
-    if (item.moodBoost > 0) effects.add(_EffectBadge('❤️+${item.moodBoost.toInt()}'));
-    if (item.healthBoost > 0) effects.add(_EffectBadge('💚+${item.healthBoost.toInt()}'));
-    if (item.energyBoost > 0) effects.add(_EffectBadge('⚡+${item.energyBoost.toInt()}'));
-    if (item.energyBoost < 0) effects.add(_EffectBadge('⚡${item.energyBoost.toInt()}'));
-    if (item.cleanBoost > 0) effects.add(_EffectBadge('🧼+${item.cleanBoost.toInt()}'));
+    if (widget.item.hungerBoost > 0) effects.add(_EffectBadge('🍖+${widget.item.hungerBoost.toInt()}'));
+    if (widget.item.moodBoost > 0) effects.add(_EffectBadge('❤️+${widget.item.moodBoost.toInt()}'));
+    if (widget.item.healthBoost > 0) effects.add(_EffectBadge('💚+${widget.item.healthBoost.toInt()}'));
+    if (widget.item.energyBoost > 0) effects.add(_EffectBadge('⚡+${widget.item.energyBoost.toInt()}'));
+    if (widget.item.energyBoost < 0) effects.add(_EffectBadge('⚡${widget.item.energyBoost.toInt()}'));
+    if (widget.item.cleanBoost > 0) effects.add(_EffectBadge('🧼+${widget.item.cleanBoost.toInt()}'));
 
     return Wrap(spacing: 4, children: effects);
   }
 
   Color _getTypeBgColor() {
-    switch (item.type) {
+    switch (widget.item.type) {
       case ShopItemType.food:
         return Colors.orange;
       case ShopItemType.toy:

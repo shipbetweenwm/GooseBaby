@@ -1196,7 +1196,7 @@ class _PetWindowState extends State<PetWindow> with TickerProviderStateMixin, Wi
         }
         // 关闭聊天面板时，如果处于工作模式，停止工作动画
         if (panel == 'chat' && _chatWorkMode && mounted) {
-          context.read<PetEngine>().stopWorking();
+          context.read<PetEngine>().stopWorking('work_mode_panel');
         }
         // 关闭当前面板：先隐藏面板UI，再收缩窗口，避免面板闪烁
         if (mounted) {
@@ -1273,7 +1273,7 @@ class _PetWindowState extends State<PetWindow> with TickerProviderStateMixin, Wi
 
         // 打开聊天面板时，如果处于工作模式，启动工作动画
         if (panel == 'chat' && _chatWorkMode && mounted) {
-          context.read<PetEngine>().startWorking();
+          context.read<PetEngine>().startWorking('work_mode_panel');
         }
       }
     } finally {
@@ -1321,9 +1321,9 @@ class _PetWindowState extends State<PetWindow> with TickerProviderStateMixin, Wi
     if (mounted) {
       final petEngine = context.read<PetEngine>();
       if (toWorkMode) {
-        petEngine.startWorking();
+        petEngine.startWorking('work_mode_panel');
       } else {
-        petEngine.stopWorking();
+        petEngine.stopWorking('work_mode_panel');
       }
     }
   }
