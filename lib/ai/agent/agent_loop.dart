@@ -7,6 +7,16 @@ import 'agent_hooks.dart';
 import 'agent_mode.dart';
 import 'sub_agent_types.dart';
 import '../providers/llm_provider.dart';
+import '../config/agent_config.dart';
+import '../guardrails/guardrails.dart';
+import '../observability/tracer.dart';
+import 'planner.dart';
+import 'recovery.dart';
+import 'tool_selector.dart';
+import 'query_router.dart';
+import 'session_state_machine.dart';
+import '../workflow/workflow_engine.dart';
+import '../workflow/plan_workflow_adapter.dart';
 
 /// Claude Code 风格的 Agent 循环
 ///
@@ -40,7 +50,7 @@ class AgentLoop {
     required List<Map<String, dynamic>> messages,
     required List<Map<String, dynamic>> tools,
     required Future<ToolResult> Function(ToolCall call, {void Function(String line)? onOutput}) executeTool,
-    int maxTurns = 30,
+    int? maxTurns,  // 改为可选，默认从 AgentConfig 读取
     void Function(ToolStep step)? onStepUpdate,
     void Function(String failedTool, String summary, String error, String solution)? onToolFailure,
     CancellationToken? cancellationToken,
@@ -64,9 +74,45 @@ class AgentLoop {
     /// 更早的截图消息会被替换为压缩后的文字摘要，大幅降低 token 消耗。
     /// 默认 4 张（约 2 轮 screenshot + confirm_screenshot），设为 0 表示不限制。
     int maxScreenshotsInContext = 4,
+    // ===== 新增参数（全部可选，向后兼容）=====
+    /// 结构化规划器（Module 1），注入后 Plan 模式将使用结构化 DAG 规划
+    StructuredPlanner? planner,
+    /// 步骤评估器（Module 1），与 planner 配合进行每步评估
+    StepEvaluator? evaluator,
+    /// 防护系统（Module 3），注入后自动创建 GuardrailHook 替代 SecurityHook
+    GuardrailsSystem? guardrails,
+    /// 追踪器（Module 4），注入后自动创建 ObservabilityHook
+    Tracer? tracer,
+    /// 恢复管理器（Module 7），注入后自动创建 RecoveryHook
+    RecoveryManager? recovery,
+    /// 工具选择器（Module 5），注入后在每轮开始前进行工具排序和建议注入
+    ToolSelector? toolSelector,
+    /// 问答路由器，注入后自动根据用户意图选择最优模式
+    QueryRouter? queryRouter,
+    /// 会话状态机，注入后跟踪多轮对话的执行阶段
+    SessionStateMachine? stateMachine,
+    /// 工作流引擎，注入后 Plan 模式可走 Workflow DAG 执行路径
+    WorkflowEngine? workflowEngine,
   }) async {
+    // 使用配置中心的默认值
+    final agentConfig = AgentConfig();
+    final effectiveMaxTurns = maxTurns ?? agentConfig.maxTurns;
+
     // 创建 Hook 管理器
     final hookManager = HookManager();
+
+    // 自动注入内置 Hook（如果提供了对应的模块实例）
+    if (guardrails != null) {
+      hookManager.register(GuardrailHook(guardrails));
+    }
+    if (tracer != null) {
+      hookManager.register(ObservabilityHook(tracer: tracer));
+    }
+    if (recovery != null) {
+      hookManager.register(RecoveryHook(recovery));
+    }
+
+    // 注册用户自定义 Hook
     if (hooks != null) {
       for (final hook in hooks) {
         hookManager.register(hook);
@@ -75,11 +121,33 @@ class AgentLoop {
     
     // 创建 Agent 循环上下文
     final context = AgentLoopContext(
-      maxTurns: maxTurns,
+      maxTurns: effectiveMaxTurns,
       subAgentContext: subAgentContext,
       userRequest: userRequest ?? _extractUserRequest(messages),
     );
     
+    // ── 问答路由：自动选择最优模式 ──
+    AgentMode effectiveMode = mode;
+    if (queryRouter != null && mode != AgentMode.cua && mode != AgentMode.team) {
+      final routeResult = queryRouter.route(userRequest ?? '', userSpecifiedMode: mode);
+      debugPrint('🧭 [Agent] 路由结果: ${routeResult.recommendedMode.displayName}'
+          ' (置信度: ${(routeResult.confidence * 100).toStringAsFixed(0)}%,'
+          ' 原因: ${routeResult.reason})');
+      // 只有在置信度足够高且与用户指定不同时才覆盖
+      if (routeResult.confidence >= 0.8 && routeResult.recommendedMode != mode) {
+        effectiveMode = routeResult.recommendedMode;
+        debugPrint('🧭 [Agent] 模式自动调整: ${mode.displayName} → ${effectiveMode.displayName}');
+      }
+    }
+
+    // ── 状态机：初始化会话状态 ──
+    stateMachine?.transition(SessionState.routing, reason: '开始路由');
+    if (effectiveMode == AgentMode.plan) {
+      stateMachine?.transition(SessionState.planning, reason: '进入规划阶段');
+    } else if (effectiveMode == AgentMode.craft || effectiveMode == AgentMode.cua) {
+      stateMachine?.transition(SessionState.executing, reason: '进入执行阶段');
+    }
+
     // 触发循环开始 Hooks
     await hookManager.triggerLoopStart(context);
     final allApiMessages = <Map<String, dynamic>>[];
@@ -96,10 +164,10 @@ class AgentLoop {
     // 工作副本（会在循环中追加消息）
     final workingMessages = List<Map<String, dynamic>>.from(messages);
 
-    // ── 循环防护 ──
-    const maxDuplicateRounds = 3;
-    const maxStagnantRounds = 4;
-    const maxFailedCalls = 5;
+    // ── 循环防护（从 AgentConfig 读取阈值） ──
+    final maxDuplicateRounds = agentConfig.maxDuplicateRounds;
+    final maxStagnantRounds = agentConfig.maxStagnantRounds;
+    final maxFailedCalls = agentConfig.maxFailedCalls;
     final recentSignatures = <String>[];
     final recentResultLengths = <int>[];
     final recentFailedToolNames = <String>[];
@@ -118,9 +186,43 @@ class AgentLoop {
     final lastFailedTools = <String, ToolCall>{}; // 工具名 → 最后失败的调用
     final retryCountMap = <String, int>{}; // 工具名 → 重试次数
 
-    for (var turn = 0; turn < maxTurns; turn++) {
+    for (var turn = 0; turn < effectiveMaxTurns; turn++) {
       // ── 每轮开始前检查取消 ──
       cancellationToken?.throwIfCancelled();
+
+      // ── ToolSelector：每轮开始前进行工具排序和过滤 ──
+      List<Map<String, dynamic>> effectiveTools = tools;
+      if (toolSelector != null) {
+        try {
+          final selectionResult = await toolSelector.selectTools(
+            userQuery: userRequest ?? '',
+            allTools: tools,
+          );
+          if (selectionResult.rankedTools.isNotEmpty &&
+              selectionResult.rankedTools.length < tools.length) {
+            effectiveTools = selectionResult.rankedTools;
+            debugPrint('🎯 [Agent] ToolSelector: '
+                '${tools.length} → ${effectiveTools.length} 工具'
+                ' (类型: ${selectionResult.detectedTaskType.name},'
+                ' 过滤: ${selectionResult.filteredOut.length})');
+          }
+          // 注入工具使用建议到 System Prompt
+          if (selectionResult.suggestions.isNotEmpty) {
+            final sysMsgIdx = workingMessages.indexWhere((m) => m['role'] == 'system');
+            if (sysMsgIdx >= 0) {
+              final existingContent = workingMessages[sysMsgIdx]['content'] as String? ?? '';
+              if (!existingContent.contains(selectionResult.suggestions)) {
+                workingMessages[sysMsgIdx] = {
+                  ...workingMessages[sysMsgIdx],
+                  'content': '$existingContent\n\n${selectionResult.suggestions}',
+                };
+              }
+            }
+          }
+        } catch (e) {
+          debugPrint('⚠️ [Agent] ToolSelector 失败，使用全部工具: $e');
+        }
+      }
       
       // ── 截图滑动窗口（优化3：记忆压缩/上下文窗口管理） ──
       // 在发送给 LLM 前，压缩超出窗口大小的旧截图，降低 token 消耗
@@ -130,11 +232,11 @@ class AgentLoop {
 
       debugPrint('🔄 [Agent 第${turn + 1}轮] 发送 ${workingMessages.length} 条消息, tools=${tools.length}, model=${config.model}');
 
-      // ── 调用 LLM（支持即时取消） ──
+      // ── 调用 LLM（支持即时取消，使用 ToolSelector 过滤后的工具列表） ──
       final response = await _chat(
         provider, workingMessages,
         config: config,
-        tools: tools,
+        tools: effectiveTools,
         cancellationToken: cancellationToken,
       );
 
@@ -146,7 +248,58 @@ class AgentLoop {
       // ── 检查是否需要执行工具 ──
       if (!response.hasToolCalls) {
         // ── Plan 模式：即使没有工具调用，也要先规划 ──
-        if (mode == AgentMode.plan) {
+        if (effectiveMode == AgentMode.plan) {
+          if (planner != null) {
+            // 结构化规划
+            debugPrint('📋 [Agent] Plan 模式（纯文本响应，结构化规划器）');
+            try {
+              final planRequest = PlanRequest(
+                userQuery: userRequest ?? '',
+                availableTools: tools,
+              );
+              final executionPlan = await planner.plan(planRequest);
+              final planId = executionPlan.id;
+              final pendingPlan = PendingPlan(
+                id: planId,
+                userRequest: userRequest ?? '',
+                title: '执行计划',
+                steps: executionPlan.steps.asMap().entries.map((entry) {
+                  final step = entry.value;
+                  return PlanStep(
+                    id: step.id,
+                    order: entry.key + 1,
+                    description: step.description,
+                    toolName: step.toolName,
+                    dependsOn: step.dependsOn,
+                    criticality: step.criticality,
+                    canRetry: step.canRetry,
+                    maxRetries: step.maxRetries,
+                    expectedOutput: step.expectedOutput,
+                  );
+                }).toList(),
+                successCriteria: executionPlan.successCriteria,
+                estimatedTokens: executionPlan.estimatedTokens,
+                estimatedDuration: executionPlan.estimatedDuration,
+              );
+              onPlanGenerated?.call(pendingPlan);
+              
+              final planText = _formatStructuredPlanAsText(pendingPlan);
+              final result = AgentLoopResult(
+                text: planText,
+                apiMessages: allApiMessages,
+                skillNames: [],
+                outputFiles: [],
+                steps: steps,
+                pendingPlan: pendingPlan,
+              );
+              await hookManager.triggerLoopEnd(result);
+              return result;
+            } catch (e) {
+              debugPrint('⚠️ [Agent] 结构化规划失败，降级: $e');
+            }
+          }
+          
+          // 降级路径
           debugPrint('📋 [Agent] Plan 模式（纯文本响应），进行任务规划');
           final plan = _buildPlanFromTextResponse(response.text, userRequest ?? '');
           onPlanGenerated?.call(plan);
@@ -166,7 +319,7 @@ class AgentLoop {
 
         // ── CUA 模式：不允许纯文本退出，强制要求继续操作 ──
         // 但如果任务已完成（cuaTaskDone=true），允许 LLM 正常退出输出总结
-        if (mode == AgentMode.cua) {
+        if (effectiveMode == AgentMode.cua) {
           if (cuaTaskDone) {
             // 任务已完成，允许 LLM 输出总结并退出
             debugPrint('✅ [Agent] CUA 任务已完成（screenStatus=Done），允许纯文本退出');
@@ -199,6 +352,7 @@ class AgentLoop {
         // LLM 返回纯文本 → 循环结束
         final text = response.text;
         debugPrint('🔄 [Agent] LLM 返回纯文本 (${text.length} 字符)，循环结束');
+        stateMachine?.transition(SessionState.completed, reason: 'LLM 返回最终文本');
 
         // 检查截断
         if (response.stopReason == AgentStopReason.length) {
@@ -223,7 +377,7 @@ class AgentLoop {
       }
 
       // 有 tool_calls → 重置 CUA 纯文本计数
-      if (mode == AgentMode.cua) {
+      if (effectiveMode == AgentMode.cua) {
         cuaPlainTextRounds = 0;
 
         // ── CUA 第一轮必须先任务解析 ──
@@ -273,7 +427,7 @@ class AgentLoop {
       await hookManager.triggerAfterLLMResponse(response);
       
       // ── 检查执行模式 ──
-      if (mode == AgentMode.ask) {
+      if (effectiveMode == AgentMode.ask) {
         // Ask 模式：只允许执行只读工具，拒绝写操作工具
         final readOnlyTools = {
           'think', 'save_memory', 'web_search', 'search',
@@ -306,8 +460,103 @@ class AgentLoop {
         debugPrint('💬 [Agent] Ask 模式，执行只读工具: ${response.toolCalls.map((tc) => tc.name).join(', ')}');
       }
       
-      if (mode == AgentMode.plan) {
-        // Plan 模式：先让 LLM 思考并拆分任务，再生成计划
+      if (effectiveMode == AgentMode.plan) {
+        // Plan 模式：优先使用 StructuredPlanner（DAG 规划），降级使用简单 JSON 规划
+        if (planner != null) {
+          // ── 结构化规划（P0 升级）──
+          debugPrint('📋 [Agent] Plan 模式（结构化 DAG 规划器）');
+          stateMachine?.transition(SessionState.planning, reason: '结构化规划');
+          
+          try {
+            final planRequest = PlanRequest(
+              userQuery: userRequest ?? '',
+              availableTools: tools,
+              context: {
+                'initial_tool_calls': response.toolCalls.map((tc) => tc.name).toList(),
+              },
+            );
+            
+            final executionPlan = await planner.plan(planRequest);
+            
+            // 将 ExecutionPlan 转换为 PendingPlan（UI 层数据结构）
+            final planId = executionPlan.id;
+            final pendingPlan = PendingPlan(
+              id: planId,
+              userRequest: userRequest ?? '',
+              title: '执行计划',
+              steps: executionPlan.steps.asMap().entries.map((entry) {
+                final step = entry.value;
+                return PlanStep(
+                  id: step.id,
+                  order: entry.key + 1,
+                  description: step.description,
+                  toolName: step.toolName,
+                  dependsOn: step.dependsOn,
+                  criticality: step.criticality,
+                  canRetry: step.canRetry,
+                  maxRetries: step.maxRetries,
+                  expectedOutput: step.expectedOutput,
+                );
+              }).toList(),
+              successCriteria: executionPlan.successCriteria,
+              estimatedTokens: executionPlan.estimatedTokens,
+              estimatedDuration: executionPlan.estimatedDuration,
+            );
+            
+            onPlanGenerated?.call(pendingPlan);
+            
+            // ── Workflow 执行路径（可选）──
+            // 如果提供了 WorkflowEngine，将 ExecutionPlan 转为 Workflow 执行
+            if (workflowEngine != null) {
+              try {
+                stateMachine?.setPlanId(planId);
+                stateMachine?.transition(SessionState.executing, reason: 'Workflow DAG 执行');
+                final adapter = PlanWorkflowAdapter();
+                final workflow = adapter.convert(executionPlan);
+                final report = await workflowEngine.execute(workflow);
+                
+                debugPrint('📋 [Agent] Workflow 执行完成: ${report.isSuccess ? "✅" : "❌"}'
+                    ' (${report.completedNodes}/${report.totalNodes} 节点完成)');
+                stateMachine?.transition(SessionState.completed, reason: 'Workflow 执行完成');
+                
+                final planText = _formatStructuredPlanAsText(pendingPlan);
+                final wfSummary = '\n\n---\n**执行报告**: ${report.completedNodes}/${report.totalNodes} 步骤完成'
+                    '${report.failedNodes > 0 ? "，${report.failedNodes} 步失败" : ""}'
+                    '，耗时 ${report.totalDuration.inSeconds}s';
+                final result = AgentLoopResult(
+                  text: '$planText$wfSummary',
+                  apiMessages: allApiMessages,
+                  skillNames: [],
+                  outputFiles: [],
+                  steps: steps,
+                  pendingPlan: pendingPlan,
+                );
+                await hookManager.triggerLoopEnd(result);
+                return result;
+              } catch (e) {
+                debugPrint('⚠️ [Agent] Workflow 执行失败，降级为普通计划展示: $e');
+                stateMachine?.transition(SessionState.planning, reason: 'Workflow 失败，降级');
+              }
+            }
+            
+            final planText = _formatStructuredPlanAsText(pendingPlan);
+            final result = AgentLoopResult(
+              text: planText,
+              apiMessages: allApiMessages,
+              skillNames: [],
+              outputFiles: [],
+              steps: steps,
+              pendingPlan: pendingPlan,
+            );
+            await hookManager.triggerLoopEnd(result);
+            return result;
+          } catch (e) {
+            debugPrint('⚠️ [Agent] 结构化规划失败，降级到简单规划: $e');
+            // 降级到旧逻辑
+          }
+        }
+        
+        // ── 简单规划（旧逻辑/降级路径）──
         debugPrint('📋 [Agent] Plan 模式，引导 LLM 思考并拆分任务');
         
         // 注入规划提示，引导 LLM 进行任务分析和拆分
@@ -497,7 +746,7 @@ class AgentLoop {
         String stepDesc;
         if (toolCall.name == 'think') {
           // CUA 模式下 think 表示"决策 & 下一步规划"阶段
-          stepTitle = mode == AgentMode.cua ? '② 🧠 决策 & 规划' : '🧠 思考';
+          stepTitle = effectiveMode == AgentMode.cua ? '② 🧠 决策 & 规划' : '🧠 思考';
           stepDesc = toolCall.arguments['thought'] as String? ?? '';
         } else if (toolCall.name == 'save_memory') {
           stepTitle = '💾 保存记忆';
@@ -668,7 +917,7 @@ class AgentLoop {
         allApiMessages.add(Map<String, dynamic>.from(toolMsg));
 
         // ── CUA 模式：think 工具执行后标记任务解析完成 ──
-        if (mode == AgentMode.cua && toolCall.name == 'think') {
+        if (effectiveMode == AgentMode.cua && toolCall.name == 'think') {
           cuaTaskParsed = true;
           debugPrint('✅ [Agent] CUA 任务解析已完成（think 工具已执行）');
         }
@@ -714,7 +963,7 @@ class AgentLoop {
         // 【弱信号 - 子任务完成】：
         //   - data['suggestion']['action'] = 'done'（VLM 建议下一步是完成，子任务视角）
         //   - ⚠️ 这只代表当前步骤完成，不代表整个任务完成，不触发 cuaTaskDone
-        if (mode == AgentMode.cua && toolCall.name == 'cua' && !result.isError && result.data != null) {
+        if (effectiveMode == AgentMode.cua && toolCall.name == 'cua' && !result.isError && result.data != null) {
           final data = result.data!;
           final screenStatus = data['screenStatus'] as String?;
           final isDone = data['done'] as bool?;
@@ -767,6 +1016,85 @@ class AgentLoop {
         step.isFailed = result.isError;
         onStepUpdate?.call(step);
         
+        // ── StepEvaluator：评估工具执行结果 ──
+        if (evaluator != null) {
+          try {
+            final evalStep = EnhancedPlanStep(
+              id: toolCall.id,
+              description: stepDesc,
+              toolName: toolCall.name,
+              criticality: 'medium',
+              canRetry: true,
+              maxRetries: 2,
+            );
+            final evaluation = await evaluator.evaluate(evalStep, result);
+            if (!evaluation.allPassed) {
+              debugPrint('📋 [Agent] 评估结果: ${evaluation.decision.name}'
+                  ' (问题: ${evaluation.issues.map((i) => i.message).join("; ")})');
+
+              switch (evaluation.decision) {
+                case EvalDecision.proceedWithWarning:
+                  // 继续但注入警告
+                  deferredHookMessages.add({
+                    'role': 'user',
+                    'content': '【评估警告】${evaluation.issues.where((i) => i.severity == "warning").map((i) => i.message).join("; ")}'
+                        '${evaluation.issues.where((i) => i.suggestion != null).map((i) => i.suggestion).where((s) => s != null).isNotEmpty ? "。建议: ${evaluation.issues.where((i) => i.suggestion != null).map((i) => i.suggestion).whereType<String>().join("; ")}" : ""}',
+                  });
+                  stateMachine?.transition(SessionState.evaluating, reason: '评估发现警告');
+                  stateMachine?.transition(SessionState.executing, reason: '继续执行');
+                  break;
+
+                case EvalDecision.skipStep:
+                  debugPrint('⏭️ [Agent] 评估决策: 跳过当前步骤 ${toolCall.name}');
+                  step.content = '$stepDesc\n⏭️ 已跳过: ${evaluation.issues.first.message}';
+                  step.isLoading = false;
+                  onStepUpdate?.call(step);
+                  continue;
+
+                case EvalDecision.replan:
+                  debugPrint('🔄 [Agent] 评估决策: 需要重新规划');
+                  stateMachine?.transition(SessionState.evaluating, reason: '评估失败');
+                  stateMachine?.transition(SessionState.planning, reason: '重新规划');
+                  // 注入重新规划提示
+                  deferredHookMessages.add({
+                    'role': 'user',
+                    'content': '【评估决策】当前方法不可行: ${evaluation.issues.first.message}。'
+                        '请停止当前操作，重新思考并采用完全不同的方法。',
+                  });
+                  break;
+
+                case EvalDecision.rollbackAndRetry:
+                case EvalDecision.retry:
+                  if (evalStep.canRetry && evalStep.maxRetries > 0) {
+                    debugPrint('🔄 [Agent] 评估决策: 重试 ${toolCall.name}');
+                    stateMachine?.transition(SessionState.evaluating, reason: '需要重试');
+                    stateMachine?.transition(SessionState.executing, reason: '重试执行');
+                  }
+                  break;
+
+                case EvalDecision.rollbackAndAbort:
+                  debugPrint('🛑 [Agent] 评估决策: 终止执行');
+                  stateMachine?.transition(SessionState.failed, reason: '评估判定必须终止');
+                  final abortResult = AgentLoopResult(
+                    text: '任务执行中止：${evaluation.issues.first.message}',
+                    apiMessages: allApiMessages,
+                    skillNames: skillNames,
+                    outputFiles: outputFiles,
+                    steps: steps,
+                  );
+                  await hookManager.triggerLoopEnd(abortResult);
+                  return abortResult;
+
+                case EvalDecision.proceed:
+                  // 正常继续
+                  break;
+              }
+            }
+          } catch (e) {
+            debugPrint('⚠️ [Agent] StepEvaluator 执行失败: $e');
+          }
+        }
+
         // ── 触发 afterToolCall Hooks ──
         await hookManager.triggerAfterToolCall(toolCall, result, context);
         
@@ -797,7 +1125,7 @@ class AgentLoop {
       deferredHookMessages.clear();
 
       // ── CUA 模式防护：只思考不操作时强制提醒（任务完成除外） ──
-      if (mode == AgentMode.cua) {
+      if (effectiveMode == AgentMode.cua) {
         if (cuaTaskDone) {
           // 任务已完成，注入完成提示引导 LLM 输出总结
           debugPrint('🎯 [Agent] CUA 任务已完成，注入完成提示');
@@ -857,7 +1185,7 @@ class AgentLoop {
       }
 
       // ── 循环防护：无进展检测（CUA 模式跳过，因为 CUA 操作结果长度天然相近） ──
-      final isCuaMode = mode == AgentMode.cua;
+      final isCuaMode = effectiveMode == AgentMode.cua;
       if (!isCuaMode) {
       recentResultLengths.add(roundResultLength);
       if (recentResultLengths.length > maxStagnantRounds) recentResultLengths.removeAt(0);
@@ -1089,6 +1417,43 @@ class AgentLoop {
               ? '⏭️' 
               : '⬜';
       buffer.writeln('$status ${step.order}. ${step.description}');
+    }
+    
+    buffer.writeln();
+    buffer.writeln('---');
+    buffer.writeln('💡 **确认执行请回复「确认」或「执行」，取消请回复「取消」**');
+    
+    return buffer.toString();
+  }
+
+  /// 将结构化 DAG 计划格式化为文本（展示依赖关系和额外信息）
+  static String _formatStructuredPlanAsText(PendingPlan plan) {
+    final buffer = StringBuffer();
+    buffer.writeln('📋 **结构化执行计划**');
+    buffer.writeln();
+    buffer.writeln('**目标**: ${plan.userRequest}');
+    if (plan.successCriteria != null) {
+      buffer.writeln('**成功条件**: ${plan.successCriteria}');
+    }
+    if (plan.estimatedTokens > 0) {
+      buffer.writeln('**预估消耗**: ~${plan.estimatedTokens} tokens, ~${plan.estimatedDuration.inSeconds}s');
+    }
+    buffer.writeln();
+    buffer.writeln('**步骤**:');
+    
+    for (final step in plan.steps) {
+      final status = step.isExecuted 
+          ? '✅' 
+          : step.isSkipped 
+              ? '⏭️' 
+              : '⬜';
+      final depInfo = step.dependsOn.isNotEmpty
+          ? ' (依赖: ${step.dependsOn.join(", ")})'
+          : '';
+      final critInfo = step.criticality != 'medium'
+          ? ' [${step.criticality}]'
+          : '';
+      buffer.writeln('$status ${step.order}. ${step.description}$depInfo$critInfo');
     }
     
     buffer.writeln();

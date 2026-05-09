@@ -13,6 +13,11 @@ import 'agent_types.dart';
 import 'agent_hooks.dart';
 import 'sub_agent_types.dart';
 import '../providers/llm_provider.dart';
+import '../config/agent_config.dart';
+import '../guardrails/guardrails.dart';
+import '../observability/tracer.dart';
+import 'recovery.dart';
+import 'tool_selector.dart';
 
 /// Sub-Agent 技能
 class SubAgentSkill extends GooseSkill {
@@ -175,6 +180,13 @@ class SubAgentSkill extends GooseSkill {
       );
       
       // 运行子 Agent
+      // 根据 AgentConfig 开关为子 Agent 创建优化模块实例
+      final agentConfig = AgentConfig();
+      final guardrails = agentConfig.enableGuardrails ? GuardrailsSystem() : null;
+      final tracer = agentConfig.enableObservability ? Tracer() : null;
+      final recovery = agentConfig.enableRecovery ? RecoveryManager() : null;
+      final toolSelector = agentConfig.enableToolSelector ? ToolSelector() : null;
+
       final loopResult = await AgentLoop.run(
         provider: providerFactory!(),
         config: LLMConfig(
@@ -187,6 +199,10 @@ class SubAgentSkill extends GooseSkill {
         maxTurns: config.maxTurns,
         hooks: hookManager?.hooks,
         subAgentContext: subContext,
+        guardrails: guardrails,
+        tracer: tracer,
+        recovery: recovery,
+        toolSelector: toolSelector,
       );
       
       // 生成结果摘要

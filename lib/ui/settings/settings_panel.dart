@@ -1,5 +1,6 @@
 import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:window_manager/window_manager.dart';
@@ -8,6 +9,7 @@ import 'package:path/path.dart' as p;
 import '../../ai/llm_manager.dart';
 import '../../ai/memory/memory_manager.dart';
 import '../../ai/memory/context_manager.dart';
+import '../../ai/config/agent_config.dart';
 
 import '../../core/pet_engine.dart';
 import '../../models/models.dart';
@@ -34,7 +36,7 @@ class _SettingsPanelState extends State<SettingsPanel> {
   int _selectedTab = 0;
   String _workingDir = '';
 
-  final _tabs = const ['🧠 AI模型', '🎮 技能', '⏰ 定时任务', '🦢 宠物', '📋 关于'];
+  final _tabs = const ['🧠 AI模型', '🎮 技能', '⏰ 定时任务', '🔧 Agent', '🦢 宠物', '📋 关于'];
 
   /// 气泡回调便捷方法
   void _bubble(String message) => widget.onShowBubble?.call(message);
@@ -221,8 +223,10 @@ class _SettingsPanelState extends State<SettingsPanel> {
       case 2:
         return _ScheduledTaskSettings();
       case 3:
-        return _PetSettings();
+        return _AgentSettings(onShowBubble: _bubble);
       case 4:
+        return _PetSettings();
+      case 5:
         return _AboutPanel(onShowBubble: _bubble);
       default:
         return const SizedBox();
@@ -2627,6 +2631,441 @@ class _DetailRow extends StatelessWidget {
               overflow: TextOverflow.ellipsis,
             ),
           ),
+        ],
+      ),
+    );
+  }
+}
+
+// ════════════════════════════════════════════════════════
+// Agent 配置设置面板（模块 8 的 UI 层）
+// ════════════════════════════════════════════════════════
+
+class _AgentSettings extends StatefulWidget {
+  final void Function(String)? onShowBubble;
+  const _AgentSettings({this.onShowBubble});
+
+  @override
+  State<_AgentSettings> createState() => _AgentSettingsState();
+}
+
+class _AgentSettingsState extends State<_AgentSettings> {
+  final _config = AgentConfig();
+
+  // ── 模块开关状态 ──
+  bool _enableGuardrails = true;
+  bool _enableObservability = true;
+  bool _enableRecovery = true;
+  bool _enableToolSelector = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _enableGuardrails = _config.enableGuardrails;
+    _enableObservability = _config.enableObservability;
+    _enableRecovery = _config.enableRecovery;
+    _enableToolSelector = _config.enableToolSelector;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return ListView(
+      padding: const EdgeInsets.all(16),
+      children: [
+        // ── 循环控制 ──
+        _buildSectionTitle('🔄 循环控制', '控制 Agent 执行循环的核心参数'),
+        _buildSliderItem(
+          label: '最大工具轮数',
+          value: _config.maxTurns.toDouble(),
+          min: 5,
+          max: 100,
+          divisions: 19,
+          unit: '轮',
+          configKey: 'agent.maxTurns',
+        ),
+        _buildSliderItem(
+          label: '重复检测阈值',
+          value: _config.maxDuplicateRounds.toDouble(),
+          min: 2,
+          max: 10,
+          divisions: 8,
+          unit: '轮',
+          configKey: 'loop.maxDuplicateRounds',
+        ),
+        _buildSliderItem(
+          label: '停滞检测阈值',
+          value: _config.maxStagnantRounds.toDouble(),
+          min: 2,
+          max: 10,
+          divisions: 8,
+          unit: '轮',
+          configKey: 'loop.maxStagnantRounds',
+        ),
+        _buildSliderItem(
+          label: '最大连续失败',
+          value: _config.maxFailedCalls.toDouble(),
+          min: 2,
+          max: 15,
+          divisions: 13,
+          unit: '次',
+          configKey: 'loop.maxFailedCalls',
+        ),
+        const Divider(height: 24),
+
+        // ── 模块开关 ──
+        _buildSectionTitle('🧩 优化模块', '启用/禁用各个 AI 优化模块'),
+        _buildModuleSwitch(
+          icon: '🛡️',
+          title: 'Guardrails 防护系统',
+          subtitle: '4 层防护：输入验证 / 命令安全 / 输出脱敏 / 成本控制',
+          value: _enableGuardrails,
+          onChanged: (v) {
+            setState(() => _enableGuardrails = v);
+            _config.setOverride('guardrails.enabled', v);
+            widget.onShowBubble?.call(v ? '已启用 Guardrails 防护' : '已关闭 Guardrails 防护');
+          },
+        ),
+        _buildModuleSwitch(
+          icon: '📊',
+          title: 'Observability 可观测性',
+          subtitle: 'Trace 链路追踪 + Metrics 指标收集 + 性能分析',
+          value: _enableObservability,
+          onChanged: (v) {
+            setState(() => _enableObservability = v);
+            _config.setOverride('observability.enabled', v);
+            widget.onShowBubble?.call(v ? '已启用可观测性追踪' : '已关闭可观测性追踪');
+          },
+        ),
+        _buildModuleSwitch(
+          icon: '🔄',
+          title: 'Recovery 错误恢复',
+          subtitle: '状态快照 / 自动回滚 / 降级策略（重试→缩范围→简化→备选）',
+          value: _enableRecovery,
+          onChanged: (v) {
+            setState(() => _enableRecovery = v);
+            _config.setOverride('recovery.enabled', v);
+            widget.onShowBubble?.call(v ? '已启用错误恢复' : '已关闭错误恢复');
+          },
+        ),
+        _buildModuleSwitch(
+          icon: '🎯',
+          title: 'ToolSelector 智能工具选择',
+          subtitle: '基于任务类型 + 历史成功率 + 延迟的加权评分排序',
+          value: _enableToolSelector,
+          onChanged: (v) {
+            setState(() => _enableToolSelector = v);
+            _config.setOverride('toolSelector.enabled', v);
+            widget.onShowBubble?.call(v ? '已启用智能工具选择' : '已关闭智能工具选择');
+          },
+        ),
+        const Divider(height: 24),
+
+        // ── Guardrails 详细配置 ──
+        if (_enableGuardrails) ...[
+          _buildSectionTitle('🛡️ Guardrails 配置', '成本预算与安全限制'),
+          _buildSliderItem(
+            label: '单会话 Token 上限',
+            value: _config.maxTokensPerSession.toDouble(),
+            min: 10000,
+            max: 500000,
+            divisions: 49,
+            unit: '',
+            configKey: 'agent.maxTokensPerSession',
+            displayTransform: (v) => '${(v / 1000).round()}K',
+          ),
+          _buildSliderItem(
+            label: '工具调用预算',
+            value: _config.maxToolCallBudget.toDouble(),
+            min: 10,
+            max: 200,
+            divisions: 19,
+            unit: '次',
+            configKey: 'guardrails.maxToolCallBudget',
+          ),
+          _buildSliderItem(
+            label: '时间预算',
+            value: _config.maxTimeBudgetMinutes.toDouble(),
+            min: 1,
+            max: 30,
+            divisions: 29,
+            unit: '分钟',
+            configKey: 'guardrails.maxTimeBudgetMinutes',
+          ),
+          const Divider(height: 24),
+        ],
+
+        // ── Recovery 详细配置 ──
+        if (_enableRecovery) ...[
+          _buildSectionTitle('🔄 Recovery 配置', '快照与重试策略'),
+          _buildSliderItem(
+            label: '最大快照数',
+            value: _config.maxSnapshots.toDouble(),
+            min: 3,
+            max: 20,
+            divisions: 17,
+            unit: '个',
+            configKey: 'recovery.maxSnapshots',
+          ),
+          _buildSliderItem(
+            label: '最大重试次数',
+            value: _config.retryMaxAttempts.toDouble(),
+            min: 1,
+            max: 10,
+            divisions: 9,
+            unit: '次',
+            configKey: 'recovery.retryMaxAttempts',
+          ),
+          const Divider(height: 24),
+        ],
+
+        // ── 快捷操作 ──
+        _buildSectionTitle('⚡ 快捷操作', '重置配置或导出诊断信息'),
+        Row(
+          children: [
+            _buildActionButton(
+              icon: Icons.restart_alt,
+              label: '恢复默认',
+              color: Colors.orange,
+              onTap: () {
+                _config.reset();
+                setState(() {
+                  _enableGuardrails = true;
+                  _enableObservability = true;
+                  _enableRecovery = true;
+                  _enableToolSelector = true;
+                });
+                widget.onShowBubble?.call('已恢复所有 Agent 配置为默认值');
+              },
+            ),
+            const SizedBox(width: 8),
+            _buildActionButton(
+              icon: Icons.content_copy,
+              label: '导出配置',
+              color: const Color(0xFF4FC3F7),
+              onTap: () {
+                final config = _config.exportAll();
+                final configStr = config.entries
+                    .map((e) => '${e.key}: ${e.value}')
+                    .join('\n');
+                Clipboard.setData(ClipboardData(text: configStr));
+                widget.onShowBubble?.call('配置已复制到剪贴板');
+              },
+            ),
+          ],
+        ),
+        const SizedBox(height: 16),
+
+        // ── 当前配置概览 ──
+        _buildConfigOverview(),
+      ],
+    );
+  }
+
+  Widget _buildSectionTitle(String title, String subtitle) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(title, style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w600)),
+          const SizedBox(height: 2),
+          Text(subtitle, style: TextStyle(fontSize: 11, color: Colors.grey.shade500)),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildSliderItem({
+    required String label,
+    required double value,
+    required double min,
+    required double max,
+    required int divisions,
+    required String unit,
+    required String configKey,
+    String Function(double)? displayTransform,
+  }) {
+    final displayValue = displayTransform != null
+        ? displayTransform(value)
+        : '${value.round()}$unit';
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: Column(
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: Text(label, style: const TextStyle(fontSize: 13)),
+              ),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF4FC3F7).withOpacity(0.1),
+                  borderRadius: BorderRadius.circular(4),
+                ),
+                child: Text(
+                  displayValue,
+                  style: const TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w600,
+                    color: Color(0xFF4FC3F7),
+                  ),
+                ),
+              ),
+            ],
+          ),
+          SliderTheme(
+            data: SliderTheme.of(context).copyWith(
+              activeTrackColor: const Color(0xFF4FC3F7),
+              thumbColor: const Color(0xFF4FC3F7),
+              overlayColor: const Color(0xFF4FC3F7).withOpacity(0.1),
+              trackHeight: 3,
+              thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 6),
+            ),
+            child: Slider(
+              value: value.clamp(min, max),
+              min: min,
+              max: max,
+              divisions: divisions,
+              onChanged: (v) {
+                setState(() {
+                  _config.setOverride(configKey, v.round());
+                });
+              },
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildModuleSwitch({
+    required String icon,
+    required String title,
+    required String subtitle,
+    required bool value,
+    required ValueChanged<bool> onChanged,
+  }) {
+    return Container(
+      margin: const EdgeInsets.only(bottom: 8),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      decoration: BoxDecoration(
+        color: value ? const Color(0xFFE3F2FD).withOpacity(0.5) : Colors.grey.shade50,
+        borderRadius: BorderRadius.circular(12),
+        border: value
+            ? Border.all(color: const Color(0xFF4FC3F7).withOpacity(0.3))
+            : Border.all(color: Colors.grey.shade200),
+      ),
+      child: Row(
+        children: [
+          Text(icon, style: const TextStyle(fontSize: 22)),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(title, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500)),
+                Text(subtitle, style: TextStyle(fontSize: 11, color: Colors.grey.shade600), maxLines: 2),
+              ],
+            ),
+          ),
+          Switch(
+            value: value,
+            onChanged: onChanged,
+            activeColor: const Color(0xFF4FC3F7),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildActionButton({
+    required IconData icon,
+    required String label,
+    required Color color,
+    required VoidCallback onTap,
+  }) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(8),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        decoration: BoxDecoration(
+          color: color.withOpacity(0.1),
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(color: color.withOpacity(0.3)),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, size: 16, color: color),
+            const SizedBox(width: 6),
+            Text(label, style: TextStyle(fontSize: 12, color: color, fontWeight: FontWeight.w500)),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildConfigOverview() {
+    final overrides = _config.exportAll();
+    if (overrides.isEmpty) {
+      return Container(
+        padding: const EdgeInsets.all(16),
+        decoration: BoxDecoration(
+          color: Colors.grey.shade50,
+          borderRadius: BorderRadius.circular(12),
+        ),
+        child: const Center(
+          child: Text('所有配置均为默认值', style: TextStyle(fontSize: 12, color: Colors.grey)),
+        ),
+      );
+    }
+
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: const Color(0xFFF5F5F5),
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Text('📋 当前覆盖配置', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w500)),
+              const Spacer(),
+              Text('${overrides.length} 项', style: TextStyle(fontSize: 11, color: Colors.grey.shade500)),
+            ],
+          ),
+          const SizedBox(height: 8),
+          ...overrides.entries.take(10).map((e) => Padding(
+            padding: const EdgeInsets.only(bottom: 4),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    e.key,
+                    style: TextStyle(fontSize: 11, color: Colors.grey.shade700, fontFamily: 'monospace'),
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Text(
+                  '${e.value}',
+                  style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: Color(0xFF4FC3F7)),
+                ),
+              ],
+            ),
+          )),
+          if (overrides.length > 10)
+            Padding(
+              padding: const EdgeInsets.only(top: 4),
+              child: Text(
+                '... 还有 ${overrides.length - 10} 项',
+                style: TextStyle(fontSize: 11, color: Colors.grey.shade500),
+              ),
+            ),
         ],
       ),
     );

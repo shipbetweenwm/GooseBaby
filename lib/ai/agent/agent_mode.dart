@@ -181,6 +181,24 @@ class PendingPlan {
   
   /// 是否已被用户拒绝
   bool isRejected;
+
+  /// 成功判定条件（来自 StructuredPlanner 的 successCriteria）
+  final String? successCriteria;
+
+  /// 预估 Token 消耗（来自 StructuredPlanner）
+  final int estimatedTokens;
+
+  /// 预估耗时（来自 StructuredPlanner）
+  final Duration estimatedDuration;
+
+  /// 步骤间共享的上下文（每步执行后更新，下一步可读取）
+  final Map<String, dynamic> sharedContext = {};
+
+  /// 重新规划次数（用于限制连续 replan）
+  int replanCount = 0;
+
+  /// 最大重新规划次数
+  static const int maxReplanCount = 3;
   
   PendingPlan({
     required this.id,
@@ -190,6 +208,9 @@ class PendingPlan {
     DateTime? createdAt,
     this.isConfirmed = false,
     this.isRejected = false,
+    this.successCriteria,
+    this.estimatedTokens = 0,
+    this.estimatedDuration = Duration.zero,
   }) : createdAt = createdAt ?? DateTime.now();
   
   /// 获取待执行的步骤
@@ -205,6 +226,34 @@ class PendingPlan {
     final completed = steps.where((s) => 
         s.status == PlanStepStatus.completed || s.status == PlanStepStatus.skipped).length;
     return completed / steps.length;
+  }
+
+  /// 获取下一批可执行的步骤（DAG 调度：所有依赖已完成的步骤）
+  List<PlanStep> getNextExecutableSteps() {
+    return steps.where((step) {
+      if (step.status != PlanStepStatus.pending) return false;
+      // 所有依赖都已成功完成
+      return step.dependsOn.every((depId) {
+        final dep = steps.where((s) => s.id == depId).firstOrNull;
+        return dep != null && dep.status == PlanStepStatus.completed;
+      });
+    }).toList();
+  }
+
+  /// 是否还能继续重新规划
+  bool get canReplan => replanCount < maxReplanCount;
+
+  /// 获取已完成步骤的上下文摘要（用于传递给后续步骤）
+  String getCompletedStepsContext() {
+    final completed = steps.where((s) => s.status == PlanStepStatus.completed).toList();
+    if (completed.isEmpty) return '';
+    
+    return completed.map((s) {
+      final resultSummary = s.result != null
+          ? (s.result!.length > 300 ? '${s.result!.substring(0, 300)}...' : s.result!)
+          : '完成';
+      return '✅ 步骤${s.order} [${s.description}]: $resultSummary';
+    }).join('\n');
   }
 }
 
@@ -233,6 +282,27 @@ class PlanStep {
   
   /// 错误信息
   String? error;
+
+  /// 依赖的步骤 ID 列表（DAG 依赖关系）
+  final List<String> dependsOn;
+
+  /// 步骤重要程度：high=失败必须停止, medium=可重试, low=可跳过
+  final String criticality;
+
+  /// 是否可重试
+  final bool canRetry;
+
+  /// 最大重试次数
+  final int maxRetries;
+
+  /// 当前重试次数
+  int retryCount = 0;
+
+  /// 预期输出描述（用于评估是否成功）
+  final String? expectedOutput;
+
+  /// 步骤执行时长
+  Duration? executionDuration;
   
   PlanStep({
     required this.id,
@@ -243,12 +313,26 @@ class PlanStep {
     PlanStepStatus? status,
     this.result,
     this.error,
+    this.dependsOn = const [],
+    this.criticality = 'medium',
+    this.canRetry = true,
+    this.maxRetries = 2,
+    this.expectedOutput,
   }) : status = status ?? PlanStepStatus.pending;
   
   /// 兼容旧代码
   bool get isExecuted => status == PlanStepStatus.completed;
   bool get isSkipped => status == PlanStepStatus.skipped;
   bool get isFailed => status == PlanStepStatus.failed;
+
+  /// 是否还能重试
+  bool get canRetryNow => canRetry && retryCount < maxRetries;
+
+  /// 是否为低优先级（失败可跳过）
+  bool get isLowPriority => criticality == 'low';
+
+  /// 是否为高优先级（失败必须停止）
+  bool get isHighPriority => criticality == 'high';
   
   /// 标记为运行中
   void start() => status = PlanStepStatus.running;
@@ -263,6 +347,20 @@ class PlanStep {
   void fail(String error) {
     this.error = error;
     status = PlanStepStatus.failed;
+  }
+
+  /// 标记为失败并增加重试计数
+  void failWithRetry(String error) {
+    this.error = error;
+    retryCount++;
+    status = PlanStepStatus.failed;
+  }
+
+  /// 重置为待执行（用于重试）
+  void resetForRetry() {
+    status = PlanStepStatus.pending;
+    result = null;
+    error = null;
   }
   
   /// 标记为跳过

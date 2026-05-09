@@ -14,6 +14,14 @@ import '../../ai/agent/agent_hooks.dart';
 import '../../ai/agent/sub_agent_types.dart';
 import '../../ai/agent/failure_lesson_hook.dart';
 import '../../ai/agent/security_hook.dart';
+import '../../ai/config/agent_config.dart';
+import '../../ai/guardrails/guardrails.dart';
+import '../../ai/observability/tracer.dart';
+import '../../ai/agent/recovery.dart';
+import '../../ai/agent/tool_selector.dart';
+import '../../ai/agent/planner.dart';
+import '../../ai/agent/query_router.dart';
+import '../../ai/agent/session_state_machine.dart';
 import '../../ai/memory/memory_manager.dart';
 import '../../ai/memory/context_manager.dart';
 import '../../ai/self_improvement.dart';
@@ -87,6 +95,9 @@ class _ConversationState {
   final ContextManager contextManager = ContextManager();
   int currentHistoryTokens = 0;
   int currentSystemPromptTokens = 0;
+
+  // 会话状态机
+  final SessionStateMachine stateMachine = SessionStateMachine();
 
   // 团队任务执行状态跟踪
   String? currentTeamTask;
@@ -1367,6 +1378,27 @@ class _ChatPanelState extends State<ChatPanel> with SingleTickerProviderStateMix
           PerformanceStatsHook(),
         ];
 
+        // ── 根据 AgentConfig 开关创建优化模块实例 ──
+        final agentConfig = AgentConfig();
+        final guardrails = agentConfig.enableGuardrails ? GuardrailsSystem() : null;
+        final tracer = agentConfig.enableObservability ? Tracer() : null;
+        final recovery = agentConfig.enableRecovery ? RecoveryManager() : null;
+        final toolSelector = agentConfig.enableToolSelector ? ToolSelector() : null;
+
+        // ── Plan 模式注入结构化规划器 ──
+        final structuredPlanner = _agentMode == AgentMode.plan
+            ? StructuredPlanner(
+                provider: llmManager.currentProvider!,
+                config: llmManager.currentConfig,
+              )
+            : null;
+        final stepEvaluator = _agentMode == AgentMode.plan ? StepEvaluator() : null;
+
+        // ── 新增模块实例 ──
+        final queryRouter = QueryRouter();
+        // 重置状态机
+        targetCs.stateMachine.reset(reason: '新对话开始');
+
         // ── CUA 模式：Observe-Actor 架构 ──
         // Actor 自主调用 cua_observe 观察屏幕，无需外部 Brain 分析截图
 
@@ -1380,6 +1412,14 @@ class _ChatPanelState extends State<ChatPanel> with SingleTickerProviderStateMix
           hooks: hooks,
           mode: _agentMode,
           userRequest: text,
+          guardrails: guardrails,
+          tracer: tracer,
+          recovery: recovery,
+          toolSelector: toolSelector,
+          planner: structuredPlanner,
+          evaluator: stepEvaluator,
+          queryRouter: queryRouter,
+          stateMachine: targetCs.stateMachine,
           analyzeScreenshot: null,
           embedScreenshotImages: false,
           onPlanGenerated: (plan) {
@@ -5602,24 +5642,70 @@ $discussionContext
                 : Icon(statusIcon, size: 12, color: statusColor),
           ),
           const SizedBox(width: 8),
-          // 步骤描述
+          // 步骤描述 + DAG 信息
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(
-                  step.description,
-                  style: TextStyle(
-                    fontSize: 12,
-                    color: step.status == PlanStepStatus.pending ? Colors.black87 : Colors.grey.shade600,
-                    decoration: step.status == PlanStepStatus.skipped ? TextDecoration.lineThrough : null,
-                  ),
+                Row(
+                  children: [
+                    // 优先级标记
+                    if (step.criticality == 'high')
+                      Padding(
+                        padding: const EdgeInsets.only(right: 4),
+                        child: Text('🔴', style: TextStyle(fontSize: 9)),
+                      ),
+                    if (step.criticality == 'low')
+                      Padding(
+                        padding: const EdgeInsets.only(right: 4),
+                        child: Text('🟡', style: TextStyle(fontSize: 9)),
+                      ),
+                    Expanded(
+                      child: Text(
+                        step.description,
+                        style: TextStyle(
+                          fontSize: 12,
+                          color: step.status == PlanStepStatus.pending ? Colors.black87 : Colors.grey.shade600,
+                          decoration: step.status == PlanStepStatus.skipped ? TextDecoration.lineThrough : null,
+                        ),
+                      ),
+                    ),
+                  ],
                 ),
-                if (step.toolName != null)
-                  Text(
-                    '🔧 ${step.toolName}',
-                    style: TextStyle(fontSize: 10, color: Colors.grey.shade500),
-                  ),
+                // 工具 + 依赖 + 重试信息
+                Row(
+                  children: [
+                    if (step.toolName != null)
+                      Padding(
+                        padding: const EdgeInsets.only(right: 8),
+                        child: Text(
+                          '🔧 ${step.toolName}',
+                          style: TextStyle(fontSize: 10, color: Colors.grey.shade500),
+                        ),
+                      ),
+                    if (step.dependsOn.isNotEmpty)
+                      Text(
+                        '⛓ ${step.dependsOn.join(",")}',
+                        style: TextStyle(fontSize: 10, color: Colors.grey.shade400),
+                      ),
+                    if (step.retryCount > 0)
+                      Padding(
+                        padding: const EdgeInsets.only(left: 8),
+                        child: Text(
+                          '🔄 ×${step.retryCount}',
+                          style: TextStyle(fontSize: 10, color: Colors.orange.shade400),
+                        ),
+                      ),
+                    if (step.executionDuration != null)
+                      Padding(
+                        padding: const EdgeInsets.only(left: 8),
+                        child: Text(
+                          '⏱ ${step.executionDuration!.inSeconds}s',
+                          style: TextStyle(fontSize: 10, color: Colors.grey.shade400),
+                        ),
+                      ),
+                  ],
+                ),
               ],
             ),
           ),
@@ -6073,6 +6159,18 @@ $discussionContext
     final skillManager = context.read<SkillManager>();
     final petEngine = context.read<PetEngine>();
     
+    // 创建评估器（P0 核心：每步执行后主动评估）
+    final evaluator = StepEvaluator();
+    
+    // 创建结构化规划器（用于 replan 场景）
+    StructuredPlanner? replanPlanner;
+    if (llmManager.currentProvider != null) {
+      replanPlanner = StructuredPlanner(
+        provider: llmManager.currentProvider!,
+        config: llmManager.currentConfig,
+      );
+    }
+    
     setState(() {
       _isLoading = true;
       _streamingContent = '';
@@ -6097,142 +6195,59 @@ $discussionContext
     }
     
     try {
-      // 构建计划步骤描述
+      // 构建计划步骤描述（包含依赖关系信息）
       final stepsDesc = plan.steps.asMap().entries
-          .map((e) => '步骤${e.key + 1}: ${e.value.description}')
+          .map((e) {
+            final step = e.value;
+            final depInfo = step.dependsOn.isNotEmpty
+                ? ' (依赖: ${step.dependsOn.join(", ")})'
+                : '';
+            final critInfo = step.criticality != 'medium'
+                ? ' [${step.criticality}]'
+                : '';
+            return '步骤${e.key + 1} (${step.id}): ${step.description}$depInfo$critInfo';
+          })
           .join('\n');
       
-      // 逐步执行
-      for (int i = 0; i < plan.steps.length; i++) {
-        final step = plan.steps[i];
+      // ── DAG 驱动的步骤执行循环 ──
+      // 每次迭代获取当前可执行的步骤（所有依赖已完成），逐个执行
+      while (true) {
         if (!mounted || _cancellationToken?.isCancelled == true) break;
         
-        // 标记当前步骤为执行中
-        setState(() => step.start());
-        
-        // 构建执行该步骤的 prompt
-        final completedSteps = plan.steps
-            .where((s) => s.status == PlanStepStatus.completed)
-            .map((s) => '✅ ${s.description}: ${s.result?.substring(0, (s.result!.length > 200 ? 200 : s.result!.length)) ?? "完成"}')
-            .join('\n');
-        
-        final stepPrompt = '''用户请求: ${plan.userRequest}
-
-完整计划:
-$stepsDesc
-
-${completedSteps.isNotEmpty ? '已完成步骤:\n$completedSteps\n' : ''}当前执行: 步骤${i + 1} - ${step.description}
-
-请执行当前步骤，直接给出结果。''';
-        
-        // 构建 system prompt（复用主流程逻辑）
-        _contextManager.clearSegments();
-        final memorySegments = memoryManager.getMemorySegments(plan.userRequest);
-        for (final seg in memorySegments) {
-          _contextManager.addSegment(seg);
-        }
-        final effectiveMemoryContext = _contextManager.build(
-          customMaxTokens: _contextManager.getSystemPromptMaxForLevel(_contextManager.promptLevel),
-        );
-        
-        String systemPrompt = GoosePrompts.getSystemPromptByLevel(
-          _contextManager.promptLevel,
-          workMode: widget.workMode,
-        );
-        if (effectiveMemoryContext.isNotEmpty) {
-          systemPrompt += '\n\n## 关于主人的记忆\n$effectiveMemoryContext';
-        }
-        final agentSkillsPrompt = skillManager.getAgentSkillsPrompt(userRequest: step.description);
-        if (agentSkillsPrompt.isNotEmpty && _contextManager.promptLevel != PromptLevel.minimal) {
-          systemPrompt += '\n\n$agentSkillsPrompt';
-        }
-        
-        // 添加运行环境
-        if (!kIsWeb && workDir.isNotEmpty) {
-          systemPrompt += '\n\n## 运行环境\n- 操作系统: $osName\n- 工作目录: $workDir';
-        }
-        
-        final tools = skillManager.toFunctionTools(excludeSkillIds: const {'cua'});
-        final messages = <Map<String, dynamic>>[
-          {'role': 'system', 'content': systemPrompt},
-          {'role': 'user', 'content': stepPrompt},
-        ];
-        
-        // 先检测是否有 tool calls
-        final response = await llmManager.chatWithMessages(messages, tools: tools);
-        
-        String stepResult;
-        if (response.hasToolCalls) {
-          // 有工具调用 → 进入 Agent 循环
-          final hooks = <AgentHook>[
-            SecurityHook(),
-            LoopDetectionHook(),
-            FailureLessonHook(memoryManager),
-            PerformanceStatsHook(),
-          ];
+        // 获取下一批可执行步骤（DAG 调度）
+        final executableSteps = plan.getNextExecutableSteps();
+        if (executableSteps.isEmpty) {
+          // 没有可执行的步骤了，检查是否全部完成
+          if (plan.isCompleted) break;
           
-          // Plan 执行阶段保持纯文本模型（非 CUA）
-          final loopResult = await AgentLoop.run(
-            provider: llmManager.currentProvider!,
-            config: llmManager.currentConfig,
-            messages: messages,
-            tools: tools,
-            executeTool: (call, {onOutput}) => _executeTool(call, skillManager, workDir, onOutput: onOutput),
-            cancellationToken: _cancellationToken,
-            hooks: hooks,
-            mode: AgentMode.craft, // 执行阶段用 craft 模式
-            userRequest: step.description,
-            onStepUpdate: (toolStep) {
-              if (!mounted) return;
-              final existIdx = targetCs.toolCallSteps.indexWhere(
-                (s) => identical(s.sourceStep, toolStep),
-              );
-              final widget = _ToolCallStep(
-                sourceStep: toolStep,
-                title: toolStep.title,
-                content: toolStep.content,
-                isLoading: toolStep.isLoading,
-                isSkip: toolStep.isSkip,
-                isFailed: toolStep.isFailed,
-                timestamp: toolStep.timestamp,
-              );
-              if (existIdx >= 0) {
-                targetCs.toolCallSteps[existIdx] = widget;
-              } else {
-                targetCs.toolCallSteps.add(widget);
-              }
-              final streamTargetId2 = targetId;
-              if (_currentConversationId == streamTargetId2) {
-                setState(() {});
-                _scrollToBottom();
-              }
-            },
-          );
-          stepResult = loopResult.text;
-        } else {
-          // 纯文本回复 → 流式输出
-          final streamBuffer = StringBuffer();
-          await for (final chunk in llmManager.chatStreamWithMessages(messages, tools: tools)) {
-            if (!mounted) break;
-            if (targetCs.cancellationToken?.isCancelled ?? false) break;
-            streamBuffer.write(chunk);
-            targetCs.streamingContent = streamBuffer.toString();
-            if (_currentConversationId == targetId) {
-              setState(() {});
-              _scrollToBottom();
-            }
+          // 有未完成但无法执行的步骤（依赖链断裂）
+          final blockedSteps = plan.steps.where((s) => s.status == PlanStepStatus.pending).toList();
+          debugPrint('⚠️ [Plan] ${blockedSteps.length} 个步骤因依赖链断裂无法执行');
+          for (final blocked in blockedSteps) {
+            blocked.skip();
+            if (mounted) setState(() {});
           }
-          if (targetCs.cancellationToken?.isCancelled ?? false) {
-            throw CancelledException();
-          }
-          stepResult = streamBuffer.toString();
+          break;
         }
         
-        // 标记步骤完成
-        setState(() {
-          step.complete(stepResult);
-          targetCs.streamingContent = '';
-        });
+        // 当前版本串行执行（P2 才做并行），取第一个可执行步骤
+        final step = executableSteps.first;
+        
+        // 执行单个步骤（含评估 + 重试逻辑）
+        await _executePlanStep(
+          plan: plan,
+          step: step,
+          stepsDesc: stepsDesc,
+          targetId: targetId,
+          targetCs: targetCs,
+          llmManager: llmManager,
+          memoryManager: memoryManager,
+          skillManager: skillManager,
+          evaluator: evaluator,
+          replanPlanner: replanPlanner,
+          workDir: workDir,
+          osName: osName,
+        );
       }
       
       // 全部完成 → 输出最终结果
@@ -6242,9 +6257,23 @@ ${completedSteps.isNotEmpty ? '已完成步骤:\n$completedSteps\n' : ''}当前�
           orElse: () => plan.steps.last,
         ).result ?? '计划执行完成';
         
+        // 添加成功条件检查摘要
+        final summaryBuffer = StringBuffer(lastResult);
+        if (plan.successCriteria != null) {
+          summaryBuffer.write('\n\n📊 成功条件: ${plan.successCriteria}');
+        }
+        final skippedCount = plan.steps.where((s) => s.status == PlanStepStatus.skipped).length;
+        final failedCount = plan.steps.where((s) => s.status == PlanStepStatus.failed).length;
+        if (skippedCount > 0 || failedCount > 0) {
+          summaryBuffer.write('\n⚠️ $skippedCount 步跳过, $failedCount 步失败');
+        }
+        if (plan.replanCount > 0) {
+          summaryBuffer.write('\n🔄 经历 ${plan.replanCount} 次重新规划');
+        }
+        
         setState(() {
           targetCs.messages.add(_ChatMessage(
-            content: lastResult,
+            content: summaryBuffer.toString(),
             isUser: false,
             timestamp: DateTime.now(),
             toolSteps: List.unmodifiable(targetCs.toolCallSteps),
@@ -6294,6 +6323,377 @@ ${completedSteps.isNotEmpty ? '已完成步骤:\n$completedSteps\n' : ''}当前�
       }
       if (targetId != null) _activeConversationIds.remove(targetId);
       targetCs.processingConversationId = null;
+    }
+  }
+
+  /// 执行计划中的单个步骤（含评估 + 重试 + 跳过 + 重新规划 + 上下文传递）
+  ///
+  /// P0 核心改进：
+  /// 1. 每步执行后由 StepEvaluator 主动评估
+  /// 2. 评估失败时根据决策：重试 / 跳过 / 重新规划
+  /// 3. 前一步的结果作为下一步的输入上下文
+  Future<void> _executePlanStep({
+    required PendingPlan plan,
+    required PlanStep step,
+    required String stepsDesc,
+    required String? targetId,
+    required _ConversationState targetCs,
+    required LLMManager llmManager,
+    required MemoryManager memoryManager,
+    required SkillManager skillManager,
+    required StepEvaluator evaluator,
+    required StructuredPlanner? replanPlanner,
+    required String workDir,
+    required String osName,
+  }) async {
+    final stepStartTime = DateTime.now();
+    
+    // 标记当前步骤为执行中
+    setState(() => step.start());
+    
+    // ── P0 核心：构建含上下文的 Prompt ──
+    // 将已完成步骤的结果 + 共享上下文传递给当前步骤
+    final completedContext = plan.getCompletedStepsContext();
+    
+    // 共享上下文摘要（如果有）
+    final sharedCtxDesc = plan.sharedContext.isNotEmpty
+        ? '\n\n## 步骤间共享上下文\n${plan.sharedContext.entries.map((e) => '- ${e.key}: ${e.value}').join('\n')}'
+        : '';
+    
+    final stepPrompt = '''用户请求: ${plan.userRequest}
+
+完整计划:
+$stepsDesc
+${plan.successCriteria != null ? '\n成功条件: ${plan.successCriteria}' : ''}
+${completedContext.isNotEmpty ? '\n已完成步骤及结果:\n$completedContext\n' : ''}$sharedCtxDesc
+当前执行: 步骤${step.order} (${step.id}) - ${step.description}
+${step.expectedOutput != null ? '预期输出: ${step.expectedOutput}' : ''}
+
+请执行当前步骤。注意：
+1. 充分利用前面步骤的结果，不要重复执行已完成的工作
+2. 如果本步骤依赖前面步骤的输出，请直接使用
+3. 完成后给出清晰的执行结果摘要''';
+    
+    // 构建 system prompt
+    _contextManager.clearSegments();
+    final memorySegments = memoryManager.getMemorySegments(plan.userRequest);
+    for (final seg in memorySegments) {
+      _contextManager.addSegment(seg);
+    }
+    final effectiveMemoryContext = _contextManager.build(
+      customMaxTokens: _contextManager.getSystemPromptMaxForLevel(_contextManager.promptLevel),
+    );
+    
+    String systemPrompt = GoosePrompts.getSystemPromptByLevel(
+      _contextManager.promptLevel,
+      workMode: widget.workMode,
+    );
+    if (effectiveMemoryContext.isNotEmpty) {
+      systemPrompt += '\n\n## 关于主人的记忆\n$effectiveMemoryContext';
+    }
+    final agentSkillsPrompt = skillManager.getAgentSkillsPrompt(userRequest: step.description);
+    if (agentSkillsPrompt.isNotEmpty && _contextManager.promptLevel != PromptLevel.minimal) {
+      systemPrompt += '\n\n$agentSkillsPrompt';
+    }
+    if (!kIsWeb && workDir.isNotEmpty) {
+      systemPrompt += '\n\n## 运行环境\n- 操作系统: $osName\n- 工作目录: $workDir';
+    }
+    
+    final tools = skillManager.toFunctionTools(excludeSkillIds: const {'cua'});
+    final messages = <Map<String, dynamic>>[
+      {'role': 'system', 'content': systemPrompt},
+      {'role': 'user', 'content': stepPrompt},
+    ];
+    
+    // 执行步骤
+    String stepResult;
+    bool stepSuccess = true;
+    try {
+      // 先检测是否有 tool calls
+      final response = await llmManager.chatWithMessages(messages, tools: tools);
+      
+      if (response.hasToolCalls) {
+        // 有工具调用 → 进入 Agent 循环
+        final hooks = <AgentHook>[
+          SecurityHook(),
+          LoopDetectionHook(),
+          FailureLessonHook(memoryManager),
+          PerformanceStatsHook(),
+        ];
+        
+        final agentConfig = AgentConfig();
+        final guardrails = agentConfig.enableGuardrails ? GuardrailsSystem() : null;
+        final tracer = agentConfig.enableObservability ? Tracer() : null;
+        final recovery = agentConfig.enableRecovery ? RecoveryManager() : null;
+        final toolSelector = agentConfig.enableToolSelector ? ToolSelector() : null;
+        final queryRouter = QueryRouter();
+        
+        final loopResult = await AgentLoop.run(
+          provider: llmManager.currentProvider!,
+          config: llmManager.currentConfig,
+          messages: messages,
+          tools: tools,
+          executeTool: (call, {onOutput}) => _executeTool(call, skillManager, workDir, onOutput: onOutput),
+          cancellationToken: _cancellationToken,
+          hooks: hooks,
+          mode: AgentMode.craft,
+          userRequest: step.description,
+          guardrails: guardrails,
+          tracer: tracer,
+          recovery: recovery,
+          toolSelector: toolSelector,
+          queryRouter: queryRouter,
+          stateMachine: targetCs.stateMachine,
+          onStepUpdate: (toolStep) {
+            if (!mounted) return;
+            final existIdx = targetCs.toolCallSteps.indexWhere(
+              (s) => identical(s.sourceStep, toolStep),
+            );
+            final widget = _ToolCallStep(
+              sourceStep: toolStep,
+              title: toolStep.title,
+              content: toolStep.content,
+              isLoading: toolStep.isLoading,
+              isSkip: toolStep.isSkip,
+              isFailed: toolStep.isFailed,
+              timestamp: toolStep.timestamp,
+            );
+            if (existIdx >= 0) {
+              targetCs.toolCallSteps[existIdx] = widget;
+            } else {
+              targetCs.toolCallSteps.add(widget);
+            }
+            if (_currentConversationId == targetId) {
+              setState(() {});
+              _scrollToBottom();
+            }
+          },
+        );
+        stepResult = loopResult.text;
+      } else {
+        // 纯文本回复 → 流式输出
+        final streamBuffer = StringBuffer();
+        await for (final chunk in llmManager.chatStreamWithMessages(messages, tools: tools)) {
+          if (!mounted) break;
+          if (targetCs.cancellationToken?.isCancelled ?? false) break;
+          streamBuffer.write(chunk);
+          targetCs.streamingContent = streamBuffer.toString();
+          if (_currentConversationId == targetId) {
+            setState(() {});
+            _scrollToBottom();
+          }
+        }
+        if (targetCs.cancellationToken?.isCancelled ?? false) {
+          throw CancelledException();
+        }
+        stepResult = streamBuffer.toString();
+      }
+    } catch (e) {
+      stepResult = '执行出错: $e';
+      stepSuccess = false;
+    }
+    
+    final stepDuration = DateTime.now().difference(stepStartTime);
+    step.executionDuration = stepDuration;
+    
+    // ── P0 核心：StepEvaluator 评估 ──
+    // 构造 ToolResult 供 evaluator 评估
+    final toolResult = ToolResult(
+      toolCallId: 'plan_step_${step.id}',
+      content: stepResult,
+      isError: !stepSuccess,
+    );
+    
+    // 构造 EnhancedPlanStep 供评估
+    final enhancedStep = EnhancedPlanStep(
+      id: step.id,
+      description: step.description,
+      toolName: step.toolName,
+      criticality: step.criticality,
+      canRetry: step.canRetry,
+      maxRetries: step.maxRetries,
+      expectedOutput: step.expectedOutput,
+      dependsOn: step.dependsOn,
+    );
+    
+    final evaluation = await evaluator.evaluate(enhancedStep, toolResult);
+    debugPrint('📊 [Plan] 步骤 ${step.id} 评估: decision=${evaluation.decision}, issues=${evaluation.issues.length}');
+    
+    // ── 根据评估决策执行相应动作 ──
+    switch (evaluation.decision) {
+      case EvalDecision.proceed:
+      case EvalDecision.proceedWithWarning:
+        // 成功 → 标记完成，更新共享上下文
+        setState(() {
+          step.complete(stepResult);
+          targetCs.streamingContent = '';
+        });
+        // 将本步骤的结果写入共享上下文
+        plan.sharedContext['step_${step.id}_result'] = stepResult.length > 500
+            ? '${stepResult.substring(0, 500)}...'
+            : stepResult;
+        if (evaluation.decision == EvalDecision.proceedWithWarning) {
+          final warnings = evaluation.issues.map((i) => i.message).join('; ');
+          debugPrint('⚠️ [Plan] 步骤 ${step.id} 有警告: $warnings');
+        }
+        break;
+        
+      case EvalDecision.retry:
+      case EvalDecision.rollbackAndRetry:
+        // 重试 → 如果还有重试次数
+        if (step.canRetryNow) {
+          debugPrint('🔄 [Plan] 步骤 ${step.id} 重试 (${step.retryCount + 1}/${step.maxRetries})');
+          step.failWithRetry(stepResult);
+          step.resetForRetry();
+          if (mounted) setState(() {});
+          // 递归调用自身重试（retryCount 已更新，不会无限递归）
+          await _executePlanStep(
+            plan: plan,
+            step: step,
+            stepsDesc: stepsDesc,
+            targetId: targetId,
+            targetCs: targetCs,
+            llmManager: llmManager,
+            memoryManager: memoryManager,
+            skillManager: skillManager,
+            evaluator: evaluator,
+            replanPlanner: replanPlanner,
+            workDir: workDir,
+            osName: osName,
+          );
+        } else {
+          // 重试次数用尽
+          debugPrint('❌ [Plan] 步骤 ${step.id} 重试次数用尽');
+          setState(() {
+            step.fail('重试 ${step.maxRetries} 次后仍然失败: $stepResult');
+            targetCs.streamingContent = '';
+          });
+          // 如果是低优先级，自动跳过；否则根据策略决定
+          if (step.isLowPriority) {
+            debugPrint('⏭️ [Plan] 低优先级步骤 ${step.id} 自动跳过');
+            setState(() => step.skip());
+          }
+          // 高优先级失败：后续依赖它的步骤会因为 getNextExecutableSteps 无法满足依赖而被跳过
+        }
+        break;
+        
+      case EvalDecision.skipStep:
+        // 跳过当前步骤
+        debugPrint('⏭️ [Plan] 跳过步骤 ${step.id}');
+        setState(() {
+          step.skip();
+          targetCs.streamingContent = '';
+        });
+        break;
+        
+      case EvalDecision.replan:
+        // 重新规划 → 使用 StructuredPlanner 重新生成剩余步骤
+        if (plan.canReplan && replanPlanner != null) {
+          debugPrint('🔄 [Plan] 触发重新规划 (第 ${plan.replanCount + 1} 次)');
+          plan.replanCount++;
+          
+          // 标记当前步骤失败
+          setState(() {
+            step.fail('评估建议重新规划: $stepResult');
+            targetCs.streamingContent = '';
+          });
+          
+          try {
+            // 构建 ExecutionPlan 用于 replan
+            final currentExecutionPlan = ExecutionPlan(
+              id: plan.id,
+              steps: plan.steps.map((s) => EnhancedPlanStep(
+                id: s.id,
+                description: s.description,
+                toolName: s.toolName,
+                dependsOn: s.dependsOn,
+                criticality: s.criticality,
+                canRetry: s.canRetry,
+                maxRetries: s.maxRetries,
+                expectedOutput: s.expectedOutput,
+              )).toList(),
+            );
+            // 标记已完成的步骤
+            for (final s in plan.steps) {
+              if (s.status == PlanStepStatus.completed) {
+                currentExecutionPlan.markCompleted(
+                  s.id,
+                  StepResult(
+                    stepId: s.id,
+                    isSuccess: true,
+                    duration: s.executionDuration ?? Duration.zero,
+                  ),
+                );
+              }
+            }
+            
+            final newPlan = await replanPlanner.replan(
+              currentExecutionPlan,
+              enhancedStep,
+              StepResult(
+                stepId: step.id,
+                isSuccess: false,
+                error: stepResult,
+                duration: stepDuration,
+              ),
+            );
+            
+            // 将新计划的步骤追加到当前计划（替换剩余未执行的步骤）
+            final completedStepIds = plan.steps
+                .where((s) => s.status == PlanStepStatus.completed || s.status == PlanStepStatus.skipped)
+                .map((s) => s.id)
+                .toSet();
+            
+            // 移除未完成的旧步骤
+            plan.steps.removeWhere((s) => !completedStepIds.contains(s.id) && s.id != step.id);
+            
+            // 添加新步骤
+            int nextOrder = plan.steps.length + 1;
+            for (final newStep in newPlan.steps) {
+              plan.steps.add(PlanStep(
+                id: newStep.id,
+                order: nextOrder++,
+                description: newStep.description,
+                toolName: newStep.toolName,
+                dependsOn: newStep.dependsOn,
+                criticality: newStep.criticality,
+                canRetry: newStep.canRetry,
+                maxRetries: newStep.maxRetries,
+                expectedOutput: newStep.expectedOutput,
+              ));
+            }
+            
+            if (mounted) setState(() {});
+            debugPrint('✅ [Plan] 重新规划完成，新增 ${newPlan.steps.length} 个步骤');
+          } catch (e) {
+            debugPrint('❌ [Plan] 重新规划失败: $e');
+            // 重新规划失败，继续执行剩余步骤
+          }
+        } else {
+          // 无法重新规划（次数用尽或无 planner），标记失败
+          debugPrint('❌ [Plan] 无法重新规划（canReplan=${plan.canReplan}, hasPlanner=${replanPlanner != null}）');
+          setState(() {
+            step.fail(stepResult);
+            targetCs.streamingContent = '';
+          });
+        }
+        break;
+        
+      case EvalDecision.rollbackAndAbort:
+        // 回滚并终止 → 标记失败，后续步骤会因依赖断裂自动跳过
+        debugPrint('🛑 [Plan] 步骤 ${step.id} 回滚并终止');
+        setState(() {
+          step.fail('严重错误，终止执行: $stepResult');
+          targetCs.streamingContent = '';
+        });
+        // 将所有剩余步骤标记为跳过
+        for (final remaining in plan.steps) {
+          if (remaining.status == PlanStepStatus.pending) {
+            remaining.skip();
+          }
+        }
+        if (mounted) setState(() {});
+        break;
     }
   }
 
